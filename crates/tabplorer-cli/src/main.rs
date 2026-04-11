@@ -9,7 +9,11 @@ use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyW, RegDeleteTreeW, RegSetValueExW,
     HKEY, HKEY_CURRENT_USER, REG_SZ,
 };
-use windows::Win32::Foundation::WIN32_ERROR;
+use windows::Win32::Foundation::{WIN32_ERROR, HINSTANCE, FreeLibrary};
+use windows::Win32::System::LibraryLoader::{LoadLibraryW, GetProcAddress};
+use windows::Win32::UI::WindowsAndMessaging::{
+    SetWindowsHookExW, GetMessageW, WH_CBT, MSG, HOOKPROC,
+};
 
 // ── CLSID (must match tabplorer-dll) ─────────────────────────────────────────
 
@@ -36,6 +40,8 @@ enum Commands {
     },
     /// Show installation status
     Status,
+    /// Run as background hook process (used internally by install)
+    Hook,
 }
 
 fn main() {
@@ -56,6 +62,12 @@ fn main() {
         Commands::Status => {
             if let Err(e) = status() {
                 eprintln!("Status failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Hook => {
+            if let Err(e) = run_hook() {
+                eprintln!("Hook failed: {e}");
                 std::process::exit(1);
             }
         }
@@ -182,6 +194,63 @@ fn io_err(e: std::io::Error) -> windows_core::Error {
     )
 }
 
+// ── Run key path ──────────────────────────────────────────────────────────────
+
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE: &str = "Tabplorer";
+
+// ── hook ──────────────────────────────────────────────────────────────────────
+
+/// Load tabplorer_dll.dll and install a global CBT hook, then run a message
+/// loop to keep it alive.  This function never returns normally.
+fn run_hook() -> WinResult<()> {
+    let dll_path = install_dll_path();
+    let dll_path_wide = to_wide_null(&dll_path.to_string_lossy());
+
+    // Load the DLL
+    let hmod = unsafe {
+        LoadLibraryW(PCWSTR(dll_path_wide.as_ptr()))?
+    };
+
+    // Get the hook proc address
+    let proc_name = std::ffi::CString::new("TabplorerCBTHook").unwrap();
+    let hook_fn = unsafe {
+        GetProcAddress(hmod, windows::core::PCSTR(proc_name.as_ptr().cast()))
+    };
+    let hook_fn = hook_fn.ok_or_else(|| {
+        windows_core::Error::new(
+            windows_core::HRESULT(0x80004005u32 as i32),
+            "TabplorerCBTHook export not found in tabplorer_dll.dll",
+        )
+    })?;
+
+    // Transmute to HOOKPROC — safe because we verified the export exists
+    let hook_proc: HOOKPROC = unsafe { std::mem::transmute(hook_fn) };
+
+    // Convert HMODULE to HINSTANCE (same underlying pointer)
+    let hinstance = HINSTANCE(hmod.0);
+
+    // Install the global CBT hook (thread_id = 0 → all threads)
+    let _hhook = unsafe {
+        SetWindowsHookExW(WH_CBT, hook_proc, Some(hinstance), 0)?
+    };
+
+    println!("Tabplorer hook running. Press Ctrl+C to stop.");
+
+    // Run the message loop to keep the hook alive
+    let mut msg = MSG::default();
+    loop {
+        let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+        if ret.0 == 0 || ret.0 == -1 {
+            break;
+        }
+    }
+
+    // Cleanup (unreachable in normal operation; process is killed externally)
+    unsafe { let _ = FreeLibrary(hmod); }
+    Ok(())
+}
+
 // ── install ───────────────────────────────────────────────────────────────────
 
 fn install() -> WinResult<()> {
@@ -236,7 +305,25 @@ fn install() -> WinResult<()> {
         println!("Config already exists at {}", cfg.display());
     }
 
-    // 6. Restart Explorer
+    // 6. Register Run key so hook starts at logon
+    let exe_path = std::env::current_exe()
+        .map_err(io_err)?
+        .to_string_lossy()
+        .into_owned();
+    let run_value = format!("\"{exe_path}\" hook");
+    let hkey = reg_create_key(RUN_KEY)?;
+    reg_set_string(hkey, RUN_VALUE, &run_value)?;
+    unsafe { let _ = RegCloseKey(hkey); }
+    println!("Registered Run key: {run_value}");
+
+    // 7. Start hook process immediately (detached)
+    let _ = Command::new(&exe_path)
+        .arg("hook")
+        .spawn()
+        .map_err(|_| ())
+        .map(|_| println!("Hook process started."));
+
+    // 8. Restart Explorer
     restart_explorer();
     println!("Install complete.");
     Ok(())
@@ -257,7 +344,27 @@ fn uninstall(clean: bool) -> WinResult<()> {
     reg_delete_tree(&clsid_key)?;
     println!("Removed CLSID registry key.");
 
-    // 3. If --clean, remove install dir
+    // 3. Remove Run key
+    use windows::Win32::System::Registry::{RegOpenKeyW, RegDeleteValueW, HKEY_CURRENT_USER};
+    {
+        let run_key_w = to_wide_null(RUN_KEY);
+        let mut hkey = HKEY::default();
+        let err = unsafe { RegOpenKeyW(HKEY_CURRENT_USER, PCWSTR(run_key_w.as_ptr()), &mut hkey) };
+        if err.is_ok() {
+            let val_w = to_wide_null(RUN_VALUE);
+            unsafe { let _ = RegDeleteValueW(hkey, PCWSTR(val_w.as_ptr())); }
+            unsafe { let _ = RegCloseKey(hkey); }
+            println!("Removed Run key.");
+        }
+    }
+
+    // 4. Kill any running hook process
+    let _ = Command::new("taskkill")
+        .args(["/f", "/im", "tabplorer.exe"])
+        .output();
+    println!("Killed hook process (if running).");
+
+    // 5. If --clean, remove install dir
     if clean {
         let dir = install_dir();
         if dir.exists() {
@@ -266,7 +373,7 @@ fn uninstall(clean: bool) -> WinResult<()> {
         }
     }
 
-    // 4. Restart Explorer
+    // 6. Restart Explorer
     restart_explorer();
     println!("Uninstall complete. (~/.tabplorer.json left in place)");
     Ok(())

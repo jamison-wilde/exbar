@@ -393,11 +393,14 @@ unsafe extern "system" fn toolbar_wndproc_safe(
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Register (once) and create the toolbar window.
+///
+/// `shell_browser` may be `None` when called from the CBT hook path; navigation
+/// will be unavailable but the visual toolbar will still appear.
 pub fn create_toolbar(
     parent: HWND,
     bounds: &RECT,
     hinstance: windows::Win32::Foundation::HINSTANCE,
-    shell_browser: IShellBrowser,
+    shell_browser: Option<IShellBrowser>,
 ) -> Option<HWND> {
     CLASS_REGISTERED.call_once(|| {
         let class_name_wide: Vec<u16> = CLASS_NAME
@@ -425,7 +428,7 @@ pub fn create_toolbar(
 
     let dpi = get_dpi(parent);
     let config = Config::load();
-    let state = Box::new(ToolbarState::new(dpi, config, Some(shell_browser)));
+    let state = Box::new(ToolbarState::new(dpi, config, shell_browser));
     let state_ptr = Box::into_raw(state);
 
     let class_name_wide: Vec<u16> = CLASS_NAME

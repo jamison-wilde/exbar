@@ -121,7 +121,7 @@ fn discover_toolbar_slot(site: &IUnknown) -> windows_core::Result<()> {
 
             // Step 5: Create the toolbar window.
             let hinstance = unsafe { crate::HMODULE };
-            match crate::toolbar::create_toolbar(slot.parent, &slot.bounds, hinstance, browser) {
+            match crate::toolbar::create_toolbar(slot.parent, &slot.bounds, hinstance, Some(browser)) {
                 Some(toolbar_hwnd) => {
                     log_info(&format!("SetSite: toolbar created — hwnd={toolbar_hwnd:?}"));
                 }

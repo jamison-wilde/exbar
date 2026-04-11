@@ -12,6 +12,7 @@ pub mod dragdrop;
 pub mod explorer;
 pub mod toolbar;
 pub mod navigate;
+pub mod hook;
 
 use bho::TabplorerBHO;
 
@@ -118,4 +119,20 @@ unsafe extern "system" fn DllGetClassObject(
 #[unsafe(no_mangle)]
 unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
     HRESULT(1) // S_FALSE
+}
+
+// ── CBT hook export ───────────────────────────────────────────────────────────
+
+/// Global CBT hook callback installed by `tabplorer.exe hook`.
+///
+/// Called for every CBT event in every thread of every process (because the
+/// hook is installed with thread-id = 0). Activation events for Explorer
+/// windows (class `CabinetWClass`) trigger toolbar injection.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn TabplorerCBTHook(
+    code: i32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    unsafe { hook::cbt_hook_proc(code, wparam, lparam) }
 }
