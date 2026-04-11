@@ -8,6 +8,7 @@ use windows::Win32::System::SystemServices::{
 };
 
 mod config;
+mod theme;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static mut HMODULE: HINSTANCE = HINSTANCE(std::ptr::null_mut());
