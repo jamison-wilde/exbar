@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/tabplorer-dll", "crates/tabplorer-cli"]
+resolver = "2"
