@@ -8,6 +8,7 @@ use windows_core::{implement, Interface, BOOL, GUID, HRESULT, IUnknown, Ref, Res
 mod config;
 mod theme;
 pub mod bho;
+pub mod dragdrop;
 pub mod explorer;
 pub mod toolbar;
 pub mod navigate;
