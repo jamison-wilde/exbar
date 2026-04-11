@@ -9,6 +9,8 @@ mod config;
 mod theme;
 pub mod bho;
 pub mod explorer;
+pub mod toolbar;
+pub mod navigate;
 
 use bho::TabplorerBHO;
 

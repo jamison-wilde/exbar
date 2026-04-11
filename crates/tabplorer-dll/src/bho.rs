@@ -118,6 +118,17 @@ fn discover_toolbar_slot(site: &IUnknown) -> windows_core::Result<()> {
                 "SetSite: toolbar slot found — parent={:?} bounds=({},{},{},{})",
                 slot.parent, r.left, r.top, r.right, r.bottom
             ));
+
+            // Step 5: Create the toolbar window.
+            let hinstance = unsafe { crate::HMODULE };
+            match crate::toolbar::create_toolbar(slot.parent, &slot.bounds, hinstance, browser) {
+                Some(toolbar_hwnd) => {
+                    log_info(&format!("SetSite: toolbar created — hwnd={toolbar_hwnd:?}"));
+                }
+                None => {
+                    log_error("SetSite: create_toolbar returned None");
+                }
+            }
         }
         None => {
             log_info("SetSite: toolbar slot not found (Explorer version may differ)");
