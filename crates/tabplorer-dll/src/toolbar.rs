@@ -1,44 +1,137 @@
-//! Owner-drawn toolbar window embedded in the Explorer command bar.
+//! Floating draggable toolbar window for Explorer folder shortcuts.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_3DFACE, CreatePen, CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject,
-    DrawTextW, EndPaint, FillRect, GetStockObject, GetSysColorBrush, HBRUSH, HGDIOBJ,
-    InvalidateRect, LineTo, MoveToEx, PAINTSTRUCT, PS_SOLID, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT, DT_SINGLELINE, DT_VCENTER,
+    BeginPaint, CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject,
+    DrawTextW, EndPaint, FillRect, GetStockObject,
+    InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT, DT_SINGLELINE, DT_VCENTER, DT_CENTER,
+    ScreenToClient,
 };
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetParent, PostMessageW, RegisterClassExW,
-    SendMessageW, SetWindowLongPtrW, GetWindowLongPtrW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-    GWLP_USERDATA, HMENU, WNDCLASSEXW, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WS_CHILD, WS_VISIBLE, WM_GETFONT, WINDOW_EX_STYLE,
+    CreateWindowExW, DefWindowProcW, GetClientRect, PostMessageW, RegisterClassExW,
+    SetWindowLongPtrW, GetWindowLongPtrW, SetWindowPos, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    GWLP_USERDATA, WNDCLASSEXW, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WS_POPUP, WS_VISIBLE, WS_EX_TOOLWINDOW,
+    WM_NCHITTEST, SWP_NOZORDER, SWP_NOACTIVATE, HTCAPTION,
+    WS_EX_LAYERED, SetLayeredWindowAttributes, LWA_ALPHA,
+    SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    WM_MOVE, IsWindow,
 };
-use windows::Win32::UI::Shell::IShellBrowser;
 use windows_core::PCWSTR;
 
-use crate::config::{Config, FolderEntry};
-use crate::theme::{
-    get_dpi, scale, text_color, hotlight_color,
-    BUTTON_GAP, BUTTON_PADDING_H, BUTTON_ICON_SIZE, ICON_TEXT_GAP,
-    REFRESH_BUTTON_SIZE, SEPARATOR_MARGIN, SEPARATOR_WIDTH,
-};
+use crate::config::{Config, FolderEntry, Layout};
+use crate::theme;
 
-// ── Window class name ─────────────────────────────────────────────────────────
+// ── Constants ────────────────────────────────────────────────────────────────
 
 static CLASS_REGISTERED: Once = Once::new();
 const CLASS_NAME: &str = "TabplorerToolbar";
+const WM_USER_REFRESH: u32 = 0x0401;
+const WM_DPICHANGED: u32 = 0x02E0;
 
-/// WM_USER + 1 — internal message to trigger a toolbar refresh.
-const WM_USER_REFRESH: u32 = 0x0401; // WM_USER = 0x0400
+// Layout constants (logical pixels, scale by DPI)
+const BTN_PAD_H: i32 = 10;
+const BTN_PAD_V: i32 = 4;
+const BTN_GAP: i32 = 2;
+const REFRESH_SIZE: i32 = 28;
+/// Logical pixel width/height of the drag handle grip area.
+const GRIP_SIZE: i32 = 12;
 
-// ── Data structures ───────────────────────────────────────────────────────────
+// ── Global state ──────────────────────────────────────────────────────────────
+
+/// The single global toolbar HWND (None if not yet created or destroyed).
+static GLOBAL_TOOLBAR: Mutex<Option<isize>> = Mutex::new(None);
+
+/// The most recently activated Explorer (CabinetWClass) HWND.
+static ACTIVE_EXPLORER: Mutex<Option<isize>> = Mutex::new(None);
+
+pub fn set_active_explorer(hwnd: HWND) {
+    *ACTIVE_EXPLORER.lock().unwrap() = Some(hwnd.0 as isize);
+}
+
+pub fn get_active_explorer() -> Option<HWND> {
+    ACTIVE_EXPLORER.lock().unwrap().map(|h| HWND(h as *mut _))
+}
+
+/// Check whether the global toolbar already exists (window is still valid).
+pub fn global_toolbar_exists() -> bool {
+    let guard = GLOBAL_TOOLBAR.lock().unwrap();
+    match *guard {
+        None => false,
+        Some(h) => {
+            let hwnd = HWND(h as *mut _);
+            unsafe { IsWindow(Some(hwnd)).as_bool() }
+        }
+    }
+}
+
+fn set_global_toolbar(hwnd: HWND) {
+    *GLOBAL_TOOLBAR.lock().unwrap() = Some(hwnd.0 as isize);
+}
+
+fn clear_global_toolbar() {
+    *GLOBAL_TOOLBAR.lock().unwrap() = None;
+}
+
+// ── Position persistence ──────────────────────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedPos { x: i32, y: i32 }
+
+fn pos_file_path() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| "C:\\Users\\Default".into());
+    let mut p = std::path::PathBuf::from(home);
+    p.push(".tabplorer-pos.json");
+    p
+}
+
+fn load_saved_pos() -> Option<(i32, i32)> {
+    let bytes = std::fs::read(pos_file_path()).ok()?;
+    let saved: SavedPos = serde_json::from_slice(&bytes).ok()?;
+    Some((saved.x, saved.y))
+}
+
+fn save_pos(x: i32, y: i32) {
+    let saved = SavedPos { x, y };
+    if let Ok(json) = serde_json::to_string(&saved) {
+        let _ = std::fs::write(pos_file_path(), json);
+    }
+}
+
+// ── Screen bounds clamping ────────────────────────────────────────────────────
+
+/// Return the primary monitor work area.
+fn work_area() -> RECT {
+    let mut wa = RECT::default();
+    unsafe {
+        let _ = SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut wa as *mut RECT as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+    }
+    wa
+}
+
+fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
+    let wa = work_area();
+    let cx = x.max(wa.left).min((wa.right - w).max(wa.left));
+    let cy = y.max(wa.top).min((wa.bottom - h).max(wa.top));
+    (cx, cy)
+}
+
+// ── Data structures ──────────────────────────────────────────────────────────
 
 struct ButtonLayout {
     rect: RECT,
@@ -52,182 +145,240 @@ struct ToolbarState {
     pressed_index: Option<usize>,
     dpi: u32,
     config: Option<Config>,
-    shell_browser: Option<IShellBrowser>,
     tracking_mouse: bool,
+    layout: Layout,
+    drop_registered: bool,
+    /// Logical pixel size of the grip (already includes DPI scale factor).
+    grip_size: i32,
 }
 
 impl ToolbarState {
-    fn new(dpi: u32, config: Option<Config>, shell_browser: Option<IShellBrowser>) -> Self {
+    fn new(dpi: u32, config: Option<Config>) -> Self {
+        let layout = config.as_ref().map_or(Layout::Horizontal, |c| c.layout);
         ToolbarState {
             buttons: Vec::new(),
             hover_index: None,
             pressed_index: None,
             dpi,
             config,
-            shell_browser,
             tracking_mouse: false,
+            layout,
+            drop_registered: false,
+            grip_size: theme::scale(GRIP_SIZE, dpi),
         }
     }
 }
 
-// ── Layout ────────────────────────────────────────────────────────────────────
+// ── Layout computation ───────────────────────────────────────────────────────
 
-fn compute_layout(state: &mut ToolbarState, client_rect: &RECT) {
+/// Compute button positions. Returns the required (width, height) for the window.
+fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
     state.buttons.clear();
-
     let dpi = state.dpi;
-    let h = client_rect.bottom - client_rect.top;
-    let refresh_size = scale(REFRESH_BUTTON_SIZE, dpi);
-    let sep_margin = scale(SEPARATOR_MARGIN, dpi);
-    let sep_width = scale(SEPARATOR_WIDTH, dpi);
-    let pad_h = scale(BUTTON_PADDING_H, dpi);
-    let gap = scale(BUTTON_GAP, dpi);
-    let icon_w = scale(BUTTON_ICON_SIZE, dpi);
-    let icon_text_gap = scale(ICON_TEXT_GAP, dpi);
+    let s = |px: i32| theme::scale(px, dpi);
 
-    // Refresh button
-    state.buttons.push(ButtonLayout {
-        rect: RECT { left: 0, top: 0, right: refresh_size, bottom: h },
-        folder: FolderEntry {
-            name: "\u{27F3}".to_string(),
-            path: String::new(),
-            icon: None,
-        },
-        is_refresh: true,
-    });
+    let btn_h = s(REFRESH_SIZE);
+    let pad_h = s(BTN_PAD_H);
+    let gap = s(BTN_GAP);
+    let grip = state.grip_size;
 
-    // Starting x after separator
-    let mut x = refresh_size + sep_margin + sep_width + sep_margin;
+    let is_vertical = state.layout == Layout::Vertical;
 
-    if let Some(ref config) = state.config.clone() {
-        for entry in &config.folders {
-            // Approximate text width: 8 logical px per char, scaled
-            let text_w = (entry.name.chars().count() as i32) * scale(8, dpi);
-            let btn_w = pad_h + icon_w + icon_text_gap + text_w + pad_h;
-            state.buttons.push(ButtonLayout {
-                rect: RECT { left: x, top: 0, right: x + btn_w, bottom: h },
-                folder: entry.clone(),
-                is_refresh: false,
-            });
-            x += btn_w + gap;
+    let folder_names: Vec<String> = state.config.as_ref()
+        .map_or(Vec::new(), |c| c.folders.iter().map(|f| f.name.clone()).collect());
+
+    let char_w = s(8);
+
+    let mut max_btn_w = s(REFRESH_SIZE);
+    for name in &folder_names {
+        let w = pad_h + s(14) + s(4) + (name.chars().count() as i32 * char_w) + pad_h;
+        if w > max_btn_w { max_btn_w = w; }
+    }
+
+    if is_vertical {
+        // Grip at top, then refresh, then folder buttons
+        let mut y = grip; // skip grip row
+
+        state.buttons.push(ButtonLayout {
+            rect: RECT { left: 0, top: y, right: max_btn_w, bottom: y + btn_h },
+            folder: FolderEntry { name: "\u{21BB}".into(), path: String::new(), icon: None },
+            is_refresh: true,
+        });
+        y += btn_h + gap;
+
+        if let Some(ref config) = state.config.clone() {
+            for entry in &config.folders {
+                state.buttons.push(ButtonLayout {
+                    rect: RECT { left: 0, top: y, right: max_btn_w, bottom: y + btn_h },
+                    folder: entry.clone(),
+                    is_refresh: false,
+                });
+                y += btn_h + gap;
+            }
         }
+
+        (max_btn_w, y - gap)
+    } else {
+        // Grip on left, then refresh, then folder buttons
+        let mut x = grip; // skip grip column
+
+        let refresh_w = s(REFRESH_SIZE);
+        state.buttons.push(ButtonLayout {
+            rect: RECT { left: x, top: 0, right: x + refresh_w, bottom: btn_h },
+            folder: FolderEntry { name: "\u{21BB}".into(), path: String::new(), icon: None },
+            is_refresh: true,
+        });
+        x += refresh_w + gap;
+
+        if let Some(ref config) = state.config.clone() {
+            for entry in &config.folders {
+                let w = pad_h + (entry.name.chars().count() as i32 * char_w) + pad_h;
+                state.buttons.push(ButtonLayout {
+                    rect: RECT { left: x, top: 0, right: x + w, bottom: btn_h },
+                    folder: entry.clone(),
+                    is_refresh: false,
+                });
+                x += w + gap;
+            }
+        }
+
+        (x - gap, btn_h)
     }
 }
 
-// ── Hit test ──────────────────────────────────────────────────────────────────
+// ── Hit test ─────────────────────────────────────────────────────────────────
 
 fn hit_test(state: &ToolbarState, x: i32, y: i32) -> Option<usize> {
-    for (i, btn) in state.buttons.iter().enumerate() {
-        let r = &btn.rect;
-        if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
-            return Some(i);
-        }
-    }
-    None
+    state.buttons.iter().position(|b| {
+        x >= b.rect.left && x < b.rect.right && y >= b.rect.top && y < b.rect.bottom
+    })
 }
 
-// ── Painting ──────────────────────────────────────────────────────────────────
+/// Returns true if (x, y) is in the grip area.
+fn in_grip(state: &ToolbarState, x: i32, y: i32) -> bool {
+    match state.layout {
+        Layout::Horizontal => x < state.grip_size,
+        Layout::Vertical   => y < state.grip_size,
+    }
+}
+
+// ── Painting ─────────────────────────────────────────────────────────────────
 
 unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-    if hdc.is_invalid() {
-        return;
-    }
+    if hdc.is_invalid() { return; }
 
     let mut client = RECT::default();
     unsafe { let _ = GetClientRect(hwnd, &mut client); }
 
-    // Fill background with system face color
-    let bg_brush = unsafe { GetSysColorBrush(COLOR_3DFACE) };
+    let is_dark = theme::is_dark_mode();
+
+    // Background
+    let bg_color = if is_dark { COLORREF(0x002D2D2D) } else { COLORREF(0x00F0F0F0) };
+    let bg_brush = unsafe { CreateSolidBrush(bg_color) };
     unsafe { FillRect(hdc, &client, bg_brush); }
+    unsafe { DeleteObject(bg_brush.into()); }
+
+    // Grip area — draw dots
+    let grip = state.grip_size;
+    let grip_color = if is_dark { COLORREF(0x00888888) } else { COLORREF(0x00999999) };
+    let grip_brush = unsafe { CreateSolidBrush(grip_color) };
+    let dot_size = theme::scale(2, state.dpi);
+    let dot_gap  = theme::scale(4, state.dpi);
+
+    match state.layout {
+        Layout::Horizontal => {
+            // Three vertical dots centered in the grip column
+            let cx = grip / 2;
+            let total_h = dot_size * 3 + dot_gap * 2;
+            let start_y = (client.bottom - client.top - total_h) / 2;
+            for i in 0..3i32 {
+                let dy = start_y + i * (dot_size + dot_gap);
+                let dot = RECT {
+                    left: cx - dot_size / 2,
+                    top:  dy,
+                    right:  cx + dot_size / 2 + 1,
+                    bottom: dy + dot_size,
+                };
+                unsafe { FillRect(hdc, &dot, grip_brush); }
+            }
+        }
+        Layout::Vertical => {
+            // Three horizontal dots centered in the grip row
+            let cy = grip / 2;
+            let total_w = dot_size * 3 + dot_gap * 2;
+            let start_x = (client.right - client.left - total_w) / 2;
+            for i in 0..3i32 {
+                let dx = start_x + i * (dot_size + dot_gap);
+                let dot = RECT {
+                    left:   dx,
+                    top:    cy - dot_size / 2,
+                    right:  dx + dot_size,
+                    bottom: cy + dot_size / 2 + 1,
+                };
+                unsafe { FillRect(hdc, &dot, grip_brush); }
+            }
+        }
+    }
+    unsafe { DeleteObject(grip_brush.into()); }
+
+    // Border
+    let border_color = if is_dark { COLORREF(0x00555555) } else { COLORREF(0x00CCCCCC) };
+    let border_brush = unsafe { CreateSolidBrush(border_color) };
+    let top_border = RECT { left: client.left, top: client.top, right: client.right, bottom: client.top + 1 };
+    unsafe { FillRect(hdc, &top_border, border_brush); }
+    let bottom_border = RECT { left: client.left, top: client.bottom - 1, right: client.right, bottom: client.bottom };
+    unsafe { FillRect(hdc, &bottom_border, border_brush); }
+    let left_border = RECT { left: client.left, top: client.top, right: client.left + 1, bottom: client.bottom };
+    unsafe { FillRect(hdc, &left_border, border_brush); }
+    let right_border = RECT { left: client.right - 1, top: client.top, right: client.right, bottom: client.bottom };
+    unsafe { FillRect(hdc, &right_border, border_brush); }
+    unsafe { DeleteObject(border_brush.into()); }
 
     unsafe { SetBkMode(hdc, TRANSPARENT); }
 
-    // Text color
-    let (r, g, b) = text_color();
-    let text_cr = COLORREF(r as u32 | ((g as u32) << 8) | ((b as u32) << 16));
+    let text_cr = if is_dark { COLORREF(0x00FFFFFF) } else { COLORREF(0x00202020) };
     unsafe { SetTextColor(hdc, text_cr); }
 
-    // Try to inherit parent font; fall back to DEFAULT_GUI_FONT
-    let old_font: HGDIOBJ = {
-        let parent_result = unsafe { GetParent(hwnd) };
-        let hfont_lresult = if let Ok(parent) = parent_result {
-            unsafe { SendMessageW(parent, WM_GETFONT, Some(WPARAM(0)), Some(LPARAM(0))) }
-        } else {
-            LRESULT(0)
-        };
+    let default_font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+    let old_font = unsafe { SelectObject(hdc, default_font) };
 
-        if hfont_lresult.0 != 0 {
-            let hfont = windows::Win32::Graphics::Gdi::HFONT(hfont_lresult.0 as *mut _);
-            unsafe { SelectObject(hdc, hfont.into()) }
-        } else {
-            let default_font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
-            unsafe { SelectObject(hdc, default_font) }
-        }
-    };
-
-    // Draw each button
     for (i, btn) in state.buttons.iter().enumerate() {
-        let is_hover = state.hover_index == Some(i);
+        let is_hover   = state.hover_index   == Some(i);
         let is_pressed = state.pressed_index == Some(i);
 
         if is_pressed {
-            let (hr, hg, hb) = hotlight_color();
-            let cr = COLORREF(
-                (hr as u32).saturating_sub(30)
-                    | (((hg as u32).saturating_sub(30)) << 8)
-                    | (((hb as u32).saturating_sub(30)) << 16),
-            );
-            let hbr = unsafe { CreateSolidBrush(cr) };
+            let hl = if is_dark { COLORREF(0x00505050) } else { COLORREF(0x00D0D0D0) };
+            let hbr = unsafe { CreateSolidBrush(hl) };
             unsafe { FillRect(hdc, &btn.rect, hbr); }
-            unsafe { let _ = DeleteObject(hbr.into()); }
+            unsafe { DeleteObject(hbr.into()); }
         } else if is_hover {
-            let (hr, hg, hb) = hotlight_color();
-            let cr = COLORREF(
-                ((hr as u32 + 255) / 2)
-                    | ((((hg as u32 + 255) / 2)) << 8)
-                    | ((((hb as u32 + 255) / 2)) << 16),
-            );
-            let hbr = unsafe { CreateSolidBrush(cr) };
+            let hl = if is_dark { COLORREF(0x003D3D3D) } else { COLORREF(0x00E0E0E0) };
+            let hbr = unsafe { CreateSolidBrush(hl) };
             unsafe { FillRect(hdc, &btn.rect, hbr); }
-            unsafe { let _ = DeleteObject(hbr.into()); }
+            unsafe { DeleteObject(hbr.into()); }
         }
 
-        // Draw label
         let label = if btn.is_refresh {
-            "\u{27F3}".to_string()
+            "\u{21BB}".to_string()
         } else {
             format!("\u{1F4C1} {}", btn.folder.name)
         };
 
         let mut label_wide: Vec<u16> = label.encode_utf16().collect();
         let mut draw_rect = btn.rect;
-        unsafe {
-            DrawTextW(hdc, &mut label_wide, &mut draw_rect, DT_SINGLELINE | DT_VCENTER);
+        let flags = if btn.is_refresh {
+            DT_SINGLELINE | DT_VCENTER | DT_CENTER
+        } else {
+            DT_SINGLELINE | DT_VCENTER
+        };
+        if !btn.is_refresh {
+            draw_rect.left += theme::scale(BTN_PAD_H, state.dpi);
         }
+        unsafe { DrawTextW(hdc, &mut label_wide, &mut draw_rect, flags); }
     }
 
-    // Draw separator after refresh button
-    if !state.buttons.is_empty() {
-        let dpi = state.dpi;
-        let sep_margin = scale(SEPARATOR_MARGIN, dpi);
-        let refresh_size = scale(REFRESH_BUTTON_SIZE, dpi);
-        let sep_x = refresh_size + sep_margin;
-
-        let (r, g, b) = text_color();
-        let sep_cr = COLORREF(r as u32 | ((g as u32) << 8) | ((b as u32) << 16));
-        let hpen = unsafe { CreatePen(PS_SOLID, 1, sep_cr) };
-        let old_pen = unsafe { SelectObject(hdc, hpen.into()) };
-        unsafe {
-            let _ = MoveToEx(hdc, sep_x, client.top + scale(4, dpi), None);
-            let _ = LineTo(hdc, sep_x, client.bottom - scale(4, dpi));
-            SelectObject(hdc, old_pen);
-            let _ = DeleteObject(hpen.into());
-        }
-    }
-
-    // Restore font
     if !old_font.is_invalid() {
         unsafe { SelectObject(hdc, old_font); }
     }
@@ -235,7 +386,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     unsafe { let _ = EndPaint(hwnd, &ps); }
 }
 
-// ── Window procedure ──────────────────────────────────────────────────────────
+// ── Window procedure ─────────────────────────────────────────────────────────
 
 unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
@@ -245,20 +396,50 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize) };
 
             let state = unsafe { &mut *state_ptr };
-            let mut client = RECT::default();
-            unsafe { let _ = GetClientRect(hwnd, &mut client); }
-            compute_layout(state, &client);
+            let (w, h) = compute_layout(state);
+            unsafe {
+                let _ = SetWindowPos(hwnd, None, 0, 0, w, h,
+                    SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE);
+            }
+
+            // Apply layered window transparency
+            apply_opacity(hwnd, state);
+
+            // Register drop target
+            register_drop_targets(hwnd, state);
 
             LRESULT(0)
         }
 
         WM_DESTROY => {
+            clear_global_toolbar();
+            crate::dragdrop::unregister_drop_target(hwnd);
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
                 drop(unsafe { Box::from_raw(ptr) });
             }
             LRESULT(0)
+        }
+
+        WM_NCHITTEST => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+
+            let mut pt = POINT { x, y };
+            unsafe { ScreenToClient(hwnd, &mut pt); }
+
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
+            if !ptr.is_null() {
+                let state = unsafe { &*ptr };
+                if in_grip(state, pt.x, pt.y) {
+                    return LRESULT(HTCAPTION as isize);
+                }
+                if hit_test(state, pt.x, pt.y).is_some() {
+                    return LRESULT(1); // HTCLIENT
+                }
+            }
+            LRESULT(HTCAPTION as isize)
         }
 
         WM_PAINT => {
@@ -273,6 +454,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
+        WM_MOVE => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            save_pos(x, y);
+            LRESULT(0)
+        }
+
         WM_MOUSEMOVE => {
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
@@ -280,12 +468,10 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let new_hover = hit_test(state, x, y);
-
                 if new_hover != state.hover_index {
                     state.hover_index = new_hover;
                     unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
                 }
-
                 if !state.tracking_mouse {
                     let mut tme = TRACKMOUSEEVENT {
                         cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -330,19 +516,20 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let clicked = hit_test(state, x, y);
-
                 if clicked.is_some() && clicked == state.pressed_index {
                     let idx = clicked.unwrap();
                     if state.buttons[idx].is_refresh {
                         unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_REFRESH, WPARAM(0), LPARAM(0)); }
                     } else {
                         let path = state.buttons[idx].folder.path.clone();
-                        if let Some(ref sb) = state.shell_browser {
-                            let _ = crate::navigate::navigate_to(sb, &path);
+                        // Get the active Explorer fresh at click time.
+                        if let Some(explorer_hwnd) = get_active_explorer() {
+                            if let Some(sb) = unsafe { crate::hook::get_shell_browser_for(explorer_hwnd) } {
+                                let _ = crate::navigate::navigate_to(&sb, &path);
+                            }
                         }
                     }
                 }
-
                 state.pressed_index = None;
                 unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
             }
@@ -360,10 +547,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             if !ptr.is_null() {
                 let state = unsafe { &mut *ptr };
                 state.dpi = new_dpi;
-                let mut client = RECT::default();
-                unsafe { let _ = GetClientRect(hwnd, &mut client); }
-                compute_layout(state, &client);
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, true); }
+                state.grip_size = theme::scale(GRIP_SIZE, new_dpi);
+                let (w, h) = compute_layout(state);
+                unsafe {
+                    let _ = SetWindowPos(hwnd, None, 0, 0, w, h,
+                        SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE);
+                    let _ = InvalidateRect(Some(hwnd), None, true);
+                }
             }
             LRESULT(0)
         }
@@ -372,15 +562,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
     }
 }
 
-/// WM_DPICHANGED = 0x02E0
-const WM_DPICHANGED: u32 = 0x02E0;
-
-/// Safety wrapper — catches panics at the FFI boundary.
 unsafe extern "system" fn toolbar_wndproc_safe(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
+    hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
     match std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
         toolbar_wndproc(hwnd, msg, wparam, lparam)
@@ -390,24 +573,49 @@ unsafe extern "system" fn toolbar_wndproc_safe(
     }
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// ── Opacity ───────────────────────────────────────────────────────────────────
 
-/// Register (once) and create the toolbar window.
-///
-/// `shell_browser` may be `None` when called from the CBT hook path; navigation
-/// will be unavailable but the visual toolbar will still appear.
+fn apply_opacity(hwnd: HWND, state: &ToolbarState) {
+    let opacity = state.config.as_ref().map_or(0.8, |c| c.background_opacity);
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0) as u8;
+    unsafe {
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
+    }
+}
+
+// ── Drop target registration ─────────────────────────────────────────────────
+
+fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
+    if state.drop_registered { return; }
+    if state.config.as_ref().map_or(true, |c| c.folders.is_empty()) { return; }
+
+    // Capture button rects + paths for the closure (avoids holding borrow on state).
+    let button_info: Vec<(RECT, String)> = state.buttons.iter()
+        .filter(|b| !b.is_refresh)
+        .map(|b| (b.rect, b.folder.path.clone()))
+        .collect();
+
+    let resolver = move |cx: i32, cy: i32| -> Option<String> {
+        button_info.iter()
+            .find(|(r, _)| cx >= r.left && cx < r.right && cy >= r.top && cy < r.bottom)
+            .map(|(_, p)| p.clone())
+    };
+
+    if crate::dragdrop::register_drop_target(hwnd, Box::new(resolver)).is_ok() {
+        state.drop_registered = true;
+        crate::log::info("Registered OLE drop target on toolbar (cursor-based)");
+    }
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────
+
 pub fn create_toolbar(
-    parent: HWND,
-    bounds: &RECT,
+    owner: HWND,
+    screen_pos: &RECT,
     hinstance: windows::Win32::Foundation::HINSTANCE,
-    shell_browser: Option<IShellBrowser>,
 ) -> Option<HWND> {
     CLASS_REGISTERED.call_once(|| {
-        let class_name_wide: Vec<u16> = CLASS_NAME
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
+        let class_wide: Vec<u16> = CLASS_NAME.encode_utf16().chain(std::iter::once(0)).collect();
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -415,49 +623,54 @@ pub fn create_toolbar(
             cbClsExtra: 0,
             cbWndExtra: std::mem::size_of::<*mut ToolbarState>() as i32,
             hInstance: hinstance,
-            hIcon: windows::Win32::UI::WindowsAndMessaging::HICON::default(),
-            hCursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR::default(),
-            hbrBackground: HBRUSH::default(),
-            lpszMenuName: PCWSTR::null(),
-            lpszClassName: PCWSTR(class_name_wide.as_ptr()),
-            hIconSm: windows::Win32::UI::WindowsAndMessaging::HICON::default(),
+            lpszClassName: PCWSTR(class_wide.as_ptr()),
+            ..Default::default()
         };
-
         unsafe { RegisterClassExW(&wc) };
     });
 
-    let dpi = get_dpi(parent);
+    let dpi = theme::get_dpi(owner);
     let config = Config::load();
-    let state = Box::new(ToolbarState::new(dpi, config, shell_browser));
+    let is_dark = theme::is_dark_mode();
+    crate::log::info(&format!("create_toolbar: dark_mode={is_dark}"));
+
+    let state = Box::new(ToolbarState::new(dpi, config));
     let state_ptr = Box::into_raw(state);
 
-    let class_name_wide: Vec<u16> = CLASS_NAME
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let class_wide: Vec<u16> = CLASS_NAME.encode_utf16().chain(std::iter::once(0)).collect();
 
-    let width = bounds.right - bounds.left;
-    let height = bounds.bottom - bounds.top;
+    // Determine initial window position: saved pos > default pos
+    let (mut x, mut y) = load_saved_pos().unwrap_or((screen_pos.left, screen_pos.top));
+
+    // Rough placeholder size for clamping; resized in WM_CREATE.
+    let placeholder_w = 400;
+    let placeholder_h = 30;
+    let clamped = clamp_to_work_area(x, y, placeholder_w, placeholder_h);
+    x = clamped.0;
+    y = clamped.1;
+
+    crate::log::info(&format!("create_toolbar: screen x={x} y={y}"));
 
     let hwnd_result = unsafe {
         CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            PCWSTR(class_name_wide.as_ptr()),
+            WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+            PCWSTR(class_wide.as_ptr()),
             PCWSTR::null(),
-            WS_CHILD | WS_VISIBLE,
-            bounds.left,
-            bounds.top,
-            width,
-            height,
-            Some(parent),
-            Some(HMENU::default()),
+            WS_POPUP | WS_VISIBLE,
+            x, y,
+            placeholder_w, placeholder_h,
+            Some(owner),
+            None,
             Some(hinstance),
             Some(state_ptr as *const _ as *const std::ffi::c_void),
         )
     };
 
     match hwnd_result {
-        Ok(hwnd) => Some(hwnd),
+        Ok(hwnd) => {
+            set_global_toolbar(hwnd);
+            Some(hwnd)
+        }
         Err(_) => {
             drop(unsafe { Box::from_raw(state_ptr) });
             None
@@ -465,18 +678,20 @@ pub fn create_toolbar(
     }
 }
 
-/// Reload config and repaint the toolbar.
 pub fn refresh_toolbar(hwnd: HWND) {
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-    if ptr.is_null() {
-        return;
-    }
+    if ptr.is_null() { return; }
     let state = unsafe { &mut *ptr };
     state.config = Config::load();
+    state.layout = state.config.as_ref().map_or(Layout::Horizontal, |c| c.layout);
 
-    let mut client = RECT::default();
-    unsafe { let _ = GetClientRect(hwnd, &mut client); }
-    compute_layout(state, &client);
+    // Re-apply opacity in case config changed.
+    apply_opacity(hwnd, state);
 
-    unsafe { let _ = InvalidateRect(Some(hwnd), None, true); }
+    let (w, h) = compute_layout(state);
+    unsafe {
+        let _ = SetWindowPos(hwnd, None, 0, 0, w, h,
+            SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE);
+        let _ = InvalidateRect(Some(hwnd), None, true);
+    }
 }

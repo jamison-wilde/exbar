@@ -5,7 +5,8 @@
 
 use std::sync::Mutex;
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::System::Com::{FORMATETC, TYMED_HGLOBAL, IDataObject};
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{
@@ -18,24 +19,73 @@ use windows::Win32::UI::Shell::{
     FileOperation, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
     IFileOperation, IShellItemArray,
     SHCreateItemFromParsingName, SHCreateShellItemArrayFromDataObject,
+    SHParseDisplayName, SHGetPathFromIDListW,
 };
+use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows_core::{implement, Result, PCWSTR};
 
 // ── FolderDropTarget ──────────────────────────────────────────────────────────
 
+/// Closure type: given screen (x, y), returns the target folder path or None.
+pub type PathResolver = Box<dyn Fn(i32, i32) -> Option<String> + Send + Sync>;
+
 #[implement(IDropTarget)]
 pub struct FolderDropTarget {
-    target_path: String,
+    hwnd: HWND,
+    path_resolver: PathResolver,
     current_effect: Mutex<DROPEFFECT>,
+    /// Cached target path determined at DragEnter, reused in DragOver/Drop.
+    current_target: Mutex<Option<String>>,
 }
 
 impl FolderDropTarget {
-    fn new(target_path: String) -> Self {
+    pub fn new(hwnd: HWND, path_resolver: PathResolver) -> Self {
         FolderDropTarget {
-            target_path,
+            hwnd,
+            path_resolver,
             current_effect: Mutex::new(DROPEFFECT_NONE),
+            current_target: Mutex::new(None),
         }
     }
+}
+
+// ── Shell alias resolution ────────────────────────────────────────────────────
+
+/// Resolve a path (including `shell:` aliases) to a real filesystem path.
+/// Returns the original path if resolution fails or the path is already absolute.
+fn resolve_to_real_path(path: &str) -> String {
+    if !path.starts_with("shell:") && !path.is_empty() {
+        // Already a filesystem path; check it starts with a drive letter.
+        if path.len() >= 2 && path.as_bytes()[1] == b':' {
+            return path.to_owned();
+        }
+    }
+
+    // Try SHParseDisplayName + SHGetPathFromIDListW
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+
+    let ok = unsafe {
+        SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).is_ok()
+    };
+
+    if !ok || pidl.is_null() {
+        return path.to_owned();
+    }
+
+    let mut buf = [0u16; 260];
+    let got_path = unsafe { SHGetPathFromIDListW(pidl as *const _, &mut buf) };
+    unsafe { CoTaskMemFree(Some(pidl as *const _)); }
+
+    if got_path.as_bool() {
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+        if len > 0 {
+            return String::from_utf16_lossy(&buf[..len]);
+        }
+    }
+
+    path.to_owned()
 }
 
 // ── Drop effect logic ─────────────────────────────────────────────────────────
@@ -133,12 +183,18 @@ fn determine_effect(
         return DROPEFFECT_MOVE;
     }
 
-    let target_drive = drive_letter(target_path);
+    // Resolve shell aliases to real paths before comparing drive letters.
+    let real_target = resolve_to_real_path(target_path);
+    let target_drive = drive_letter(&real_target);
+
     let source_drive = unsafe { first_path_from_data_object(data_object) }
+        .map(|p| resolve_to_real_path(&p))
         .and_then(|p| drive_letter(&p));
 
     match (source_drive, target_drive) {
         (Some(s), Some(t)) if s == t => DROPEFFECT_MOVE,
+        // If resolution failed for target, default to MOVE (same-drive is more common).
+        (_, None) => DROPEFFECT_MOVE,
         _ => DROPEFFECT_COPY,
     }
 }
@@ -185,16 +241,28 @@ unsafe fn execute_drop(
 
 // ── IDropTarget impl ──────────────────────────────────────────────────────────
 
+impl FolderDropTarget_Impl {
+    /// Convert screen POINTL to client coords and look up target path.
+    fn resolve_target(&self, pt: &windows::Win32::Foundation::POINTL) -> Option<String> {
+        let mut client_pt = POINT { x: pt.x, y: pt.y };
+        unsafe { ScreenToClient(self.hwnd, &mut client_pt); }
+        (self.path_resolver)(client_pt.x, client_pt.y)
+    }
+}
+
 impl IDropTarget_Impl for FolderDropTarget_Impl {
     fn DragEnter(
         &self,
         pdataobj: windows_core::Ref<'_, IDataObject>,
         grfkeystate: MODIFIERKEYS_FLAGS,
-        _pt: &windows::Win32::Foundation::POINTL,
+        pt: &windows::Win32::Foundation::POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let effect = if let Some(data_obj) = pdataobj.as_ref() {
-            determine_effect(grfkeystate, data_obj, &self.target_path)
+        let target = self.resolve_target(pt);
+        *self.current_target.lock().unwrap() = target.clone();
+
+        let effect = if let (Some(data_obj), Some(ref path)) = (pdataobj.as_ref(), target) {
+            determine_effect(grfkeystate, data_obj, path)
         } else {
             DROPEFFECT_NONE
         };
@@ -209,10 +277,13 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
     fn DragOver(
         &self,
         grfkeystate: MODIFIERKEYS_FLAGS,
-        _pt: &windows::Win32::Foundation::POINTL,
+        pt: &windows::Win32::Foundation::POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
-        // Re-check modifier keys; keep existing drive-heuristic effect if no modifier.
+        // Update target in case the cursor moved to a different button.
+        let target = self.resolve_target(pt);
+        *self.current_target.lock().unwrap() = target.clone();
+
         let stored = *self.current_effect.lock().unwrap();
         let effect = if grfkeystate.contains(MK_CONTROL) {
             DROPEFFECT_COPY
@@ -231,6 +302,7 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
 
     fn DragLeave(&self) -> Result<()> {
         *self.current_effect.lock().unwrap() = DROPEFFECT_NONE;
+        *self.current_target.lock().unwrap() = None;
         Ok(())
     }
 
@@ -238,7 +310,7 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         &self,
         pdataobj: windows_core::Ref<'_, IDataObject>,
         grfkeystate: MODIFIERKEYS_FLAGS,
-        _pt: &windows::Win32::Foundation::POINTL,
+        pt: &windows::Win32::Foundation::POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
         let Some(data_obj) = pdataobj.as_ref() else {
@@ -248,20 +320,33 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
             return Ok(());
         };
 
-        let effect = determine_effect(grfkeystate, data_obj, &self.target_path);
+        // Re-resolve target at drop point.
+        let target = self.resolve_target(pt)
+            .or_else(|| self.current_target.lock().unwrap().clone());
+
+        let Some(target_path) = target else {
+            if !pdweffect.is_null() {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+            }
+            return Ok(());
+        };
+
+        let effect = determine_effect(grfkeystate, data_obj, &target_path);
         if !pdweffect.is_null() {
             unsafe { *pdweffect = effect };
         }
 
-        unsafe { execute_drop(data_obj, effect, &self.target_path) }
+        crate::log::info(&format!("drop: target_path={target_path:?} effect={effect:?}"));
+        unsafe { execute_drop(data_obj, effect, &target_path) }
     }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Register a drop target for `hwnd` that drops files into `target_path`.
-pub fn register_drop_target(hwnd: HWND, target_path: &str) -> Result<()> {
-    let target = FolderDropTarget::new(target_path.to_owned());
+/// Register a drop target for `hwnd`. The `path_resolver` closure maps
+/// client-coordinate (x, y) to the target folder path.
+pub fn register_drop_target(hwnd: HWND, path_resolver: PathResolver) -> Result<()> {
+    let target = FolderDropTarget::new(hwnd, path_resolver);
     let drop_target: IDropTarget = target.into();
     unsafe { RegisterDragDrop(hwnd, &drop_target) }
 }
@@ -319,5 +404,18 @@ mod tests {
             _ => DROPEFFECT_COPY,
         };
         assert_eq!(effect, DROPEFFECT_COPY);
+    }
+
+    #[test]
+    fn shell_alias_target_with_no_drive_defaults_to_move() {
+        // If target can't be resolved (no drive letter), default to MOVE.
+        let src = Some('C');
+        let tgt = None::<char>; // unresolvable shell alias
+        let effect = match (src, tgt) {
+            (Some(s), Some(t)) if s == t => DROPEFFECT_MOVE,
+            (_, None) => DROPEFFECT_MOVE,
+            _ => DROPEFFECT_COPY,
+        };
+        assert_eq!(effect, DROPEFFECT_MOVE);
     }
 }

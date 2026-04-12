@@ -111,17 +111,16 @@ fn discover_toolbar_slot(site: &IUnknown) -> windows_core::Result<()> {
     log_info(&format!("SetSite: cabinet HWND = {hwnd:?}"));
 
     // Step 4: Walk the window hierarchy.
-    match explorer::find_toolbar_slot(hwnd) {
-        Some(slot) => {
-            let r = slot.bounds;
+    match explorer::check_explorer_ready(hwnd) {
+        Some(info) => {
+            let r = info.default_pos;
             log_info(&format!(
-                "SetSite: toolbar slot found — parent={:?} bounds=({},{},{},{})",
-                slot.parent, r.left, r.top, r.right, r.bottom
+                "SetSite: explorer ready — owner={:?} pos=({},{},{},{})",
+                info.cabinet_hwnd, r.left, r.top, r.right, r.bottom
             ));
 
-            // Step 5: Create the toolbar window.
             let hinstance = unsafe { crate::HMODULE };
-            match crate::toolbar::create_toolbar(slot.parent, &slot.bounds, hinstance, Some(browser)) {
+            match crate::toolbar::create_toolbar(info.cabinet_hwnd, &info.default_pos, hinstance) {
                 Some(toolbar_hwnd) => {
                     log_info(&format!("SetSite: toolbar created — hwnd={toolbar_hwnd:?}"));
                 }

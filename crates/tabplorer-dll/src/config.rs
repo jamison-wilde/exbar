@@ -2,9 +2,26 @@ use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    Horizontal,
+    Vertical,
+}
+
+impl Default for Layout {
+    fn default() -> Self { Layout::Horizontal }
+}
+
+fn default_opacity() -> f32 { 0.8 }
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub folders: Vec<FolderEntry>,
+    #[serde(default)]
+    pub layout: Layout,
+    #[serde(default = "default_opacity")]
+    pub background_opacity: f32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
