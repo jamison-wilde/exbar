@@ -173,18 +173,6 @@ fn config_path() -> PathBuf {
     PathBuf::from(home).join(".tabplorer.json")
 }
 
-// ── Explorer restart ──────────────────────────────────────────────────────────
-
-fn restart_explorer() {
-    let _ = Command::new("taskkill")
-        .args(["/f", "/im", "explorer.exe"])
-        .output();
-    let _ = Command::new("cmd")
-        .args(["/c", "start", "explorer.exe"])
-        .output();
-    println!("Explorer restarted.");
-}
-
 // ── io err helper ─────────────────────────────────────────────────────────────
 
 fn io_err(e: std::io::Error) -> windows_core::Error {
@@ -316,10 +304,7 @@ fn install() -> WinResult<()> {
     unsafe { let _ = RegCloseKey(hkey); }
     println!("Registered Run key: {run_value}");
 
-    // 7. Restart Explorer first (so the old session is gone)
-    restart_explorer();
-
-    // 8. Start hook process after Explorer restarts (detached)
+    // 7. Start hook process (detached)
     std::thread::sleep(std::time::Duration::from_secs(2));
     let _ = Command::new(&exe_path)
         .arg("hook")
@@ -378,8 +363,6 @@ fn uninstall(clean: bool) -> WinResult<()> {
         }
     }
 
-    // 6. Restart Explorer
-    restart_explorer();
     println!("Uninstall complete. (~/.tabplorer.json left in place)");
     Ok(())
 }
