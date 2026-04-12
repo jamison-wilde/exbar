@@ -1,9 +1,10 @@
 [package]
-name = "tabplorer-dll"
+name = "exbar-dll"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
+name = "exbar_dll"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -25,7 +26,6 @@ windows = { version = "0.61", features = [
     "Win32_UI_Accessibility",
     "Win32_System_Memory",
     "Win32_System_Com_StructuredStorage",
-    "Win32_UI_WindowsAndMessaging",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
