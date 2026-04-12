@@ -17,14 +17,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, PostMessageW, RegisterClassExW,
-    SetWindowLongPtrW, GetWindowLongPtrW, SetWindowPos, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-    GWLP_USERDATA, WNDCLASSEXW, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    SetWindowLongPtrW, GetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, GWLP_USERDATA, WNDCLASSEXW, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_PAINT, WS_POPUP, WS_VISIBLE, WS_EX_TOOLWINDOW,
-    WM_NCHITTEST, SWP_NOZORDER, SWP_NOACTIVATE, HTCAPTION,
+    WM_NCHITTEST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE, HTCAPTION,
     WS_EX_LAYERED, SetLayeredWindowAttributes, LWA_ALPHA,
     SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WM_MOVE, IsWindow,
+    WM_MOVE, IsWindow, SW_HIDE, SW_SHOWNA, GetForegroundWindow,
 };
+use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_core::PCWSTR;
 
 use crate::config::{Config, FolderEntry, Layout};
@@ -81,6 +82,120 @@ fn clear_global_toolbar() {
     *GLOBAL_TOOLBAR.lock().unwrap() = None;
 }
 
+fn get_global_toolbar_hwnd() -> Option<HWND> {
+    GLOBAL_TOOLBAR.lock().unwrap().map(|h| HWND(h as *mut _))
+}
+
+// ── Foreground window tracking ───────────────────────────────────────────────
+
+static FOREGROUND_HOOK_INSTALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
+const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
+const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
+
+/// Check if the given HWND belongs to the current process (explorer.exe).
+fn hwnd_in_our_process(hwnd: HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
+    pid != 0 && pid == std::process::id()
+}
+
+unsafe extern "system" fn foreground_event_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    let tb = match get_global_toolbar_hwnd() {
+        Some(h) => h,
+        None => return,
+    };
+
+    let class = crate::explorer::get_class_name(hwnd);
+    let is_explorer = class == "CabinetWClass";
+    let in_our_process = hwnd_in_our_process(hwnd);
+
+    if event == EVENT_SYSTEM_MINIMIZESTART {
+        // Only hide if NOT our process (avoid hiding on Explorer's internal popups)
+        if !in_our_process {
+            update_toolbar_visibility(tb);
+        }
+        return;
+    }
+
+    if event == EVENT_SYSTEM_MINIMIZEEND {
+        if is_explorer {
+            show_above(tb, hwnd);
+        }
+        return;
+    }
+
+    // EVENT_SYSTEM_FOREGROUND
+    // Keep toolbar visible if the foreground window is:
+    //   - An Explorer window (re-raise above it)
+    //   - OUR process (tooltips, tree view items, menus — all transient)
+    // Hide only when a window in a DIFFERENT process takes foreground.
+    if is_explorer {
+        set_active_explorer(hwnd);
+        show_above(tb, hwnd);
+    } else if in_our_process {
+        // Transient Explorer-owned window — don't hide, just ensure we stay topmost
+        // (no-op — already topmost)
+    } else {
+        unsafe { let _ = ShowWindow(tb, SW_HIDE); }
+    }
+}
+
+fn show_above(toolbar: HWND, _explorer: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
+    unsafe {
+        let _ = ShowWindow(toolbar, SW_SHOWNA);
+        // Use HWND_TOPMOST so the toolbar stays above Explorer reliably.
+        // When a non-Explorer app is foreground, the toolbar is hidden entirely,
+        // so topmost won't intrude on other applications.
+        let _ = SetWindowPos(
+            toolbar,
+            Some(HWND_TOPMOST),
+            0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Hide the toolbar if the foreground window is in a different process
+/// (i.e., not Explorer or any of its helper windows).
+fn update_toolbar_visibility(toolbar: HWND) {
+    let fg = unsafe { GetForegroundWindow() };
+    if !hwnd_in_our_process(fg) {
+        unsafe { let _ = ShowWindow(toolbar, SW_HIDE); }
+    }
+}
+
+fn install_foreground_hook() {
+    use std::sync::atomic::Ordering;
+    if FOREGROUND_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    unsafe {
+        SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_MINIMIZEEND, // range covers FOREGROUND, MINIMIZESTART, MINIMIZEEND
+            None,
+            Some(foreground_event_proc),
+            0, 0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+    }
+    crate::log::info("Installed foreground event hook");
+}
+
 // ── Position persistence ──────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -110,8 +225,24 @@ fn save_pos(x: i32, y: i32) {
 
 // ── Screen bounds clamping ────────────────────────────────────────────────────
 
-/// Return the primary monitor work area.
-fn work_area() -> RECT {
+/// Return the work area of the monitor containing `ref_hwnd`, or the primary
+/// monitor work area if that fails.
+fn work_area_for(ref_hwnd: Option<HWND>) -> RECT {
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO};
+
+    if let Some(hwnd) = ref_hwnd {
+        let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        if !monitor.is_invalid() {
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if unsafe { GetMonitorInfoW(monitor, &mut mi) }.as_bool() {
+                return mi.rcWork;
+            }
+        }
+    }
+    // Fallback: primary monitor work area
     let mut wa = RECT::default();
     unsafe {
         let _ = SystemParametersInfoW(
@@ -124,8 +255,8 @@ fn work_area() -> RECT {
     wa
 }
 
-fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
-    let wa = work_area();
+fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, ref_hwnd: Option<HWND>) -> (i32, i32) {
+    let wa = work_area_for(ref_hwnd);
     let cx = x.max(wa.left).min((wa.right - w).max(wa.left));
     let cy = y.max(wa.top).min((wa.bottom - h).max(wa.top));
     (cx, cy)
@@ -397,9 +528,21 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
             let state = unsafe { &mut *state_ptr };
             let (w, h) = compute_layout(state);
+
+            // Now that we know the real size, re-clamp position to fit entirely
+            // within the current monitor's work area (the Explorer's monitor).
+            let mut current_rect = RECT::default();
+            unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut current_rect); }
+            let (final_x, final_y) = clamp_to_work_area(
+                current_rect.left,
+                current_rect.top,
+                w, h,
+                Some(hwnd),
+            );
+
             unsafe {
-                let _ = SetWindowPos(hwnd, None, 0, 0, w, h,
-                    SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE);
+                let _ = SetWindowPos(hwnd, None, final_x, final_y, w, h,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
             }
 
             // Apply layered window transparency
@@ -407,6 +550,18 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
             // Register drop target
             register_drop_targets(hwnd, state);
+
+            // Install foreground window hook to auto-show/hide the toolbar
+            install_foreground_hook();
+
+            // Initial visibility: only show if an Explorer window is foreground
+            let fg = unsafe { GetForegroundWindow() };
+            let fg_class = crate::explorer::get_class_name(fg);
+            if fg_class != "CabinetWClass" {
+                unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+            } else {
+                show_above(hwnd, fg);
+            }
 
             LRESULT(0)
         }
@@ -643,14 +798,18 @@ pub fn create_toolbar(
     let (mut x, mut y) = load_saved_pos().unwrap_or((screen_pos.left, screen_pos.top));
 
     // Rough placeholder size for clamping; resized in WM_CREATE.
+    // Clamp using the monitor that contains the triggering Explorer window.
     let placeholder_w = 400;
     let placeholder_h = 30;
-    let clamped = clamp_to_work_area(x, y, placeholder_w, placeholder_h);
+    let clamped = clamp_to_work_area(x, y, placeholder_w, placeholder_h, Some(owner));
     x = clamped.0;
     y = clamped.1;
 
     crate::log::info(&format!("create_toolbar: screen x={x} y={y}"));
 
+    // Create as a TOP-LEVEL popup (no owner) so it survives individual
+    // Explorer window closures. The `owner` HWND is used for monitor
+    // detection only, not as the parent/owner.
     let hwnd_result = unsafe {
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_LAYERED,
@@ -659,12 +818,15 @@ pub fn create_toolbar(
             WS_POPUP | WS_VISIBLE,
             x, y,
             placeholder_w, placeholder_h,
-            Some(owner),
+            None, // no owner — independent top-level window
             None,
             Some(hinstance),
             Some(state_ptr as *const _ as *const std::ffi::c_void),
         )
     };
+
+    // Prevent "unused" warning when the owner only informs monitor choice.
+    let _ = owner;
 
     match hwnd_result {
         Ok(hwnd) => {

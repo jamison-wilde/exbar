@@ -7,6 +7,7 @@ use windows_core::{implement, Interface, BOOL, GUID, HRESULT, IUnknown, Ref, Res
 
 mod config;
 mod theme;
+pub mod log;
 pub mod bho;
 pub mod dragdrop;
 pub mod explorer;
@@ -27,6 +28,16 @@ pub const CLSID_TABPLORER: GUID = GUID::from_values(
     [0xA6, 0xD8, 0x1B, 0x9E, 0x0C, 0x5F, 0x2A, 0x73],
 );
 
+// ── Process check ────────────────────────────────────────────────────────────
+
+fn is_explorer_process() -> bool {
+    let path = std::env::current_exe().unwrap_or_default();
+    let name = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    name.eq_ignore_ascii_case("explorer.exe")
+}
+
 // ── DllMain ──────────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -38,11 +49,21 @@ unsafe extern "system" fn DllMain(
     use windows::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
     match reason {
         DLL_PROCESS_ATTACH => {
+            // Only initialize in explorer.exe — we get loaded into every process
+            // via the global CBT hook, but we only do work in Explorer.
+            if !is_explorer_process() {
+                return TRUE;
+            }
             unsafe { HMODULE = hinstance };
             INITIALIZED.store(true, Ordering::SeqCst);
+            log::info("DllMain: DLL_PROCESS_ATTACH (explorer.exe)");
         }
         DLL_PROCESS_DETACH => {
+            if !INITIALIZED.load(Ordering::SeqCst) {
+                return TRUE; // was never initialized (non-Explorer process)
+            }
             INITIALIZED.store(false, Ordering::SeqCst);
+            log::info("DllMain: DLL_PROCESS_DETACH");
         }
         _ => {}
     }
@@ -134,5 +155,18 @@ pub unsafe extern "system" fn TabplorerCBTHook(
     wparam: windows::Win32::Foundation::WPARAM,
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
+    // Only process in explorer.exe — immediately pass through in other processes
+    if !INITIALIZED.load(Ordering::SeqCst) {
+        return unsafe {
+            windows::Win32::UI::WindowsAndMessaging::CallNextHookEx(None, code, wparam, lparam)
+        };
+    }
+
+    use std::sync::Once;
+    static FIRST_CALL: Once = Once::new();
+    FIRST_CALL.call_once(|| {
+        log::info("TabplorerCBTHook: first invocation in explorer.exe");
+    });
+
     unsafe { hook::cbt_hook_proc(code, wparam, lparam) }
 }

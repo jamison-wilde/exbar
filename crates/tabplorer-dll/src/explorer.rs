@@ -1,37 +1,49 @@
-//! Explorer window hierarchy walker.
-//! Finds the toolbar slot (command bar area) within a CabinetWClass window.
+//! Explorer window detection.
+//! Detects CabinetWClass windows and provides a default toolbar position.
 
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW, GetWindowRect};
 use windows_core::BOOL;
 
-const SHELL_TAB_WINDOW_CLASS: &str = "ShellTabWindowClass";
-const XAML_HOST_CLASS: &str = "XamlExplorerHostIslandWindow";
+/// Win11 uses DesktopChildSiteBridge for XAML content.
+/// We wait for this to exist before injecting (means Explorer is fully loaded).
+const DESKTOP_BRIDGE_CLASS: &str = "Microsoft.UI.Content.DesktopChildSiteBridge";
 
-/// Represents a slot where the tabplorer toolbar can be placed.
-pub struct ToolbarSlot {
-    /// The parent window that will host the toolbar.
-    pub parent: HWND,
-    /// Screen-space bounds of the XAML host island window.
-    pub bounds: RECT,
+/// Info needed to create the toolbar for an Explorer window.
+pub struct ExplorerInfo {
+    /// The CabinetWClass window.
+    pub cabinet_hwnd: HWND,
+    /// Default screen position for the toolbar (top-right area of Explorer).
+    pub default_pos: RECT,
 }
 
-/// Walks the Explorer window hierarchy starting from `cabinet_hwnd` to find
-/// the command bar area.
-///
-/// Hierarchy: CabinetWClass → ShellTabWindowClass → XamlExplorerHostIslandWindow
-pub fn find_toolbar_slot(cabinet_hwnd: HWND) -> Option<ToolbarSlot> {
-    let shell_tab = find_child_by_class(cabinet_hwnd, SHELL_TAB_WINDOW_CLASS)?;
-    let xaml_host = find_child_by_class(shell_tab, XAML_HOST_CLASS)?;
+/// Check if an Explorer window is ready for injection.
+/// Returns None if the DesktopChildSiteBridge doesn't exist yet
+/// (Explorer hasn't finished initializing).
+pub fn check_explorer_ready(cabinet_hwnd: HWND) -> Option<ExplorerInfo> {
+    // Wait for the bridge to exist — ensures Explorer is fully loaded
+    let _bridge = find_child_by_class(cabinet_hwnd, DESKTOP_BRIDGE_CLASS)?;
 
-    let mut bounds = RECT::default();
+    // Get the Explorer window rect for default toolbar positioning
+    let mut cabinet_rect = RECT::default();
     unsafe {
-        GetWindowRect(xaml_host, &mut bounds).ok()?;
+        GetWindowRect(cabinet_hwnd, &mut cabinet_rect).ok()?;
     }
 
-    Some(ToolbarSlot {
-        parent: shell_tab,
-        bounds,
+    // Default position: near the top-left of Explorer's content area.
+    // Real position will be clamped to monitor bounds after layout computes
+    // the actual toolbar size in WM_CREATE. We intentionally pick top-left
+    // so wide toolbars don't hang off the right side of the screen.
+    let default_pos = RECT {
+        left: cabinet_rect.left + 40,
+        top: cabinet_rect.top + 120, // below title bar, tabs, and command bar
+        right: cabinet_rect.left + 440,
+        bottom: cabinet_rect.top + 160,
+    };
+
+    Some(ExplorerInfo {
+        cabinet_hwnd,
+        default_pos,
     })
 }
 
@@ -53,7 +65,6 @@ pub fn find_child_by_class(parent: HWND, target_class: &str) -> Option<HWND> {
         let class = get_class_name(hwnd);
         if class == state.target {
             state.found = Some(hwnd);
-            // Return FALSE to stop enumeration.
             return BOOL(0);
         }
         BOOL(1)

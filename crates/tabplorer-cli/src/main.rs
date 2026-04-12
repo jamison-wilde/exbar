@@ -316,15 +316,20 @@ fn install() -> WinResult<()> {
     unsafe { let _ = RegCloseKey(hkey); }
     println!("Registered Run key: {run_value}");
 
-    // 7. Start hook process immediately (detached)
+    // 7. Restart Explorer first (so the old session is gone)
+    restart_explorer();
+
+    // 8. Start hook process after Explorer restarts (detached)
+    std::thread::sleep(std::time::Duration::from_secs(2));
     let _ = Command::new(&exe_path)
         .arg("hook")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
         .spawn()
         .map_err(|_| ())
         .map(|_| println!("Hook process started."));
 
-    // 8. Restart Explorer
-    restart_explorer();
     println!("Install complete.");
     Ok(())
 }

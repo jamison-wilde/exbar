@@ -22,6 +22,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Variant",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Accessibility",
     "Win32_System_Memory",
     "Win32_System_Com_StructuredStorage",
     "Win32_UI_WindowsAndMessaging",
