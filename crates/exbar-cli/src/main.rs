@@ -6,7 +6,7 @@ use std::process::Command;
 
 use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyW, RegDeleteTreeW, RegSetValueExW,
+    RegCloseKey, RegCreateKeyW, RegSetValueExW,
     HKEY, HKEY_CURRENT_USER, REG_SZ,
 };
 use windows::Win32::Foundation::{WIN32_ERROR, HINSTANCE, FreeLibrary};
@@ -15,14 +15,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowsHookExW, GetMessageW, WH_CBT, MSG, HOOKPROC,
 };
 
-// ── CLSID (must match tabplorer-dll) ─────────────────────────────────────────
-
-const CLSID: &str = "{7D2B5E4A-89C1-4F3E-A6D8-1B9E0C5F2A73}";
-
 // ── CLI definition ────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "tabplorer", about = "Manage the Tabplorer Explorer extension")]
+#[command(name = "exbar", about = "Manage the Exbar Explorer toolbar")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -30,9 +26,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Install the Explorer extension
+    /// [DEV ONLY] Install the Explorer extension (end users should use the MSI installer)
     Install,
-    /// Uninstall the Explorer extension
+    /// [DEV ONLY] Uninstall the Explorer extension (end users should use Windows Settings → Apps)
     Uninstall {
         /// Also delete the DLL and local data
         #[arg(long)]
@@ -40,7 +36,7 @@ enum Commands {
     },
     /// Show installation status
     Status,
-    /// Run as background hook process (used internally by install)
+    /// Run as background hook process (started by the MSI installer's Run key)
     Hook,
 }
 
@@ -130,15 +126,6 @@ fn reg_set_string(hkey: HKEY, value_name: &str, data: &str) -> WinResult<()> {
     if err.is_ok() { Ok(()) } else { Err(win_err(err)) }
 }
 
-fn reg_delete_tree(subkey: &str) -> WinResult<()> {
-    let subkey_w = to_wide_null(subkey);
-    let err: WIN32_ERROR = unsafe {
-        RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(subkey_w.as_ptr()))
-    };
-    // ERROR_FILE_NOT_FOUND (2) means already absent — that's fine
-    if err.is_ok() || err.0 == 2 { Ok(()) } else { Err(win_err(err)) }
-}
-
 // ── Install paths ─────────────────────────────────────────────────────────────
 
 fn local_appdata() -> PathBuf {
@@ -153,16 +140,16 @@ fn local_appdata() -> PathBuf {
 }
 
 fn install_dir() -> PathBuf {
-    local_appdata().join("tabplorer")
+    local_appdata().join("Exbar")
 }
 
 fn install_dll_path() -> PathBuf {
-    install_dir().join("tabplorer_dll.dll")
+    install_dir().join("exbar_dll.dll")
 }
 
 fn source_dll_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let dll = exe.parent()?.join("tabplorer_dll.dll");
+    let dll = exe.parent()?.join("exbar_dll.dll");
     if dll.exists() { Some(dll) } else { None }
 }
 
@@ -170,7 +157,7 @@ fn config_path() -> PathBuf {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| "C:\\Users\\Default".into());
-    PathBuf::from(home).join(".tabplorer.json")
+    PathBuf::from(home).join(".exbar.json")
 }
 
 // ── io err helper ─────────────────────────────────────────────────────────────
@@ -185,11 +172,11 @@ fn io_err(e: std::io::Error) -> windows_core::Error {
 // ── Run key path ──────────────────────────────────────────────────────────────
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const RUN_VALUE: &str = "Tabplorer";
+const RUN_VALUE: &str = "Exbar";
 
 // ── hook ──────────────────────────────────────────────────────────────────────
 
-/// Load tabplorer_dll.dll and install a global CBT hook, then run a message
+/// Load exbar_dll.dll and install a global CBT hook, then run a message
 /// loop to keep it alive.  This function never returns normally.
 fn run_hook() -> WinResult<()> {
     let dll_path = install_dll_path();
@@ -201,14 +188,14 @@ fn run_hook() -> WinResult<()> {
     };
 
     // Get the hook proc address
-    let proc_name = std::ffi::CString::new("TabplorerCBTHook").unwrap();
+    let proc_name = std::ffi::CString::new("ExbarCBTHook").unwrap();
     let hook_fn = unsafe {
         GetProcAddress(hmod, windows::core::PCSTR(proc_name.as_ptr().cast()))
     };
     let hook_fn = hook_fn.ok_or_else(|| {
         windows_core::Error::new(
             windows_core::HRESULT(0x80004005u32 as i32),
-            "TabplorerCBTHook export not found in tabplorer_dll.dll",
+            "ExbarCBTHook export not found in exbar_dll.dll",
         )
     })?;
 
@@ -223,7 +210,7 @@ fn run_hook() -> WinResult<()> {
         SetWindowsHookExW(WH_CBT, hook_proc, Some(hinstance), 0)?
     };
 
-    println!("Tabplorer hook running. Press Ctrl+C to stop.");
+    println!("Exbar hook running. Press Ctrl+C to stop.");
 
     // Run the message loop to keep the hook alive
     let mut msg = MSG::default();
@@ -246,11 +233,11 @@ fn install() -> WinResult<()> {
     let src = source_dll_path().ok_or_else(|| {
         windows_core::Error::new(
             windows_core::HRESULT(0x80070002u32 as i32),
-            "tabplorer_dll.dll not found next to the executable",
+            "exbar_dll.dll not found next to the executable",
         )
     })?;
 
-    // 2. Copy to %LOCALAPPDATA%\tabplorer\
+    // 2. Copy to %LOCALAPPDATA%\Exbar\
     let dst_dir = install_dir();
     std::fs::create_dir_all(&dst_dir).map_err(io_err)?;
     let dst = install_dll_path();
@@ -258,25 +245,9 @@ fn install() -> WinResult<()> {
     println!("Copied DLL to {}", dst.display());
 
     let dll_path = dst.to_string_lossy().into_owned();
+    let _ = dll_path;
 
-    // 3. Register COM CLSID InprocServer32
-    let clsid_key = format!(r"Software\Classes\CLSID\{CLSID}\InprocServer32");
-    let hkey = reg_create_key(&clsid_key)?;
-    reg_set_string(hkey, "", &dll_path)?;          // default value = DLL path
-    reg_set_string(hkey, "ThreadingModel", "Apartment")?;
-    unsafe { let _ = RegCloseKey(hkey); };
-    println!("Registered CLSID InprocServer32.");
-
-    // 4. Register BHO
-    let bho_key = format!(
-        r"Software\Microsoft\Windows\CurrentVersion\Explorer\Browser Helper Objects\{CLSID}"
-    );
-    let hkey = reg_create_key(&bho_key)?;
-    reg_set_string(hkey, "NoExplorer", "0")?;
-    unsafe { let _ = RegCloseKey(hkey); };
-    println!("Registered BHO.");
-
-    // 5. Create stub config if missing
+    // 3. Create stub config if missing
     let cfg = config_path();
     if !cfg.exists() {
         let stub = serde_json::json!({
@@ -293,7 +264,7 @@ fn install() -> WinResult<()> {
         println!("Config already exists at {}", cfg.display());
     }
 
-    // 6. Register Run key so hook starts at logon
+    // 4. Register Run key so hook starts at logon
     let exe_path = std::env::current_exe()
         .map_err(io_err)?
         .to_string_lossy()
@@ -304,7 +275,7 @@ fn install() -> WinResult<()> {
     unsafe { let _ = RegCloseKey(hkey); }
     println!("Registered Run key: {run_value}");
 
-    // 7. Start hook process (detached)
+    // 5. Start hook process (detached)
     std::thread::sleep(std::time::Duration::from_secs(2));
     let _ = Command::new(&exe_path)
         .arg("hook")
@@ -322,19 +293,7 @@ fn install() -> WinResult<()> {
 // ── uninstall ─────────────────────────────────────────────────────────────────
 
 fn uninstall(clean: bool) -> WinResult<()> {
-    // 1. Remove BHO registry key
-    let bho_key = format!(
-        r"Software\Microsoft\Windows\CurrentVersion\Explorer\Browser Helper Objects\{CLSID}"
-    );
-    reg_delete_tree(&bho_key)?;
-    println!("Removed BHO registry key.");
-
-    // 2. Remove CLSID registry key
-    let clsid_key = format!(r"Software\Classes\CLSID\{CLSID}");
-    reg_delete_tree(&clsid_key)?;
-    println!("Removed CLSID registry key.");
-
-    // 3. Remove Run key
+    // 1. Remove Run key
     use windows::Win32::System::Registry::{RegOpenKeyW, RegDeleteValueW, HKEY_CURRENT_USER};
     {
         let run_key_w = to_wide_null(RUN_KEY);
@@ -348,13 +307,13 @@ fn uninstall(clean: bool) -> WinResult<()> {
         }
     }
 
-    // 4. Kill any running hook process
+    // 2. Kill any running hook process
     let _ = Command::new("taskkill")
-        .args(["/f", "/im", "tabplorer.exe"])
+        .args(["/f", "/im", "exbar.exe"])
         .output();
     println!("Killed hook process (if running).");
 
-    // 5. If --clean, remove install dir
+    // 3. If --clean, remove install dir
     if clean {
         let dir = install_dir();
         if dir.exists() {
@@ -363,7 +322,7 @@ fn uninstall(clean: bool) -> WinResult<()> {
         }
     }
 
-    println!("Uninstall complete. (~/.tabplorer.json left in place)");
+    println!("Uninstall complete. (~/.exbar.json left in place)");
     Ok(())
 }
 
