@@ -147,6 +147,16 @@ fn install_dll_path() -> PathBuf {
     install_dir().join("exbar_dll.dll")
 }
 
+/// Directory containing the currently-running exbar.exe.
+/// This is the source of truth for "where the DLL lives at runtime"
+/// regardless of how the binary was installed.
+fn running_exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn source_dll_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dll = exe.parent()?.join("exbar_dll.dll");
@@ -179,7 +189,7 @@ const RUN_VALUE: &str = "Exbar";
 /// Load exbar_dll.dll and install a global CBT hook, then run a message
 /// loop to keep it alive.  This function never returns normally.
 fn run_hook() -> WinResult<()> {
-    let dll_path = install_dll_path();
+    let dll_path = running_exe_dir().join("exbar_dll.dll");
     let dll_path_wide = to_wide_null(&dll_path.to_string_lossy());
 
     // Load the DLL
