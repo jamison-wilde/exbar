@@ -4,29 +4,28 @@ Orientation for AI coding tools working in this repo.
 
 ## Project
 
-**Tabplorer** — a Rust DLL + CLI that injects a floating folder-shortcut toolbar into Windows 11 File Explorer. See `README.md` for user-facing details.
+**Exbar** — a Rust DLL + CLI that injects a floating folder-shortcut toolbar into Windows 11 File Explorer. See `README.md` for user-facing details.
 
 ## Layout
 
 ```
-tabplorer/
+exbar/
 ├── Cargo.toml                          # workspace
 ├── crates/
-│   ├── tabplorer-dll/                  # cdylib injected into explorer.exe
+│   ├── exbar-dll/                      # cdylib injected into explorer.exe
 │   │   ├── Cargo.toml
 │   │   ├── src/
-│   │   │   ├── lib.rs                  # DllMain, COM exports (DllGetClassObject, DllCanUnloadNow), TabplorerCBTHook export
-│   │   │   ├── bho.rs                  # IObjectWithSite — registered but unused on Win11
+│   │   │   ├── lib.rs                  # DllMain, ExbarCBTHook export
 │   │   │   ├── hook.rs                 # CBT hook callback, Explorer discovery, global state
 │   │   │   ├── explorer.rs             # check_explorer_ready, class-name window walking
 │   │   │   ├── toolbar.rs              # Owner-drawn floating popup window (the main UI)
 │   │   │   ├── navigate.rs             # IShellBrowser::BrowseObject navigation
 │   │   │   ├── dragdrop.rs             # IDropTarget — move/copy via IFileOperation
-│   │   │   ├── config.rs               # JSON config (~/.tabplorer.json)
+│   │   │   ├── config.rs               # JSON config (~/.exbar.json)
 │   │   │   ├── theme.rs                # DPI scale, dark-mode detection, layout constants
-│   │   │   └── log.rs                  # %TEMP%\tabplorer.log writer
+│   │   │   └── log.rs                  # %TEMP%\exbar.log writer
 │   │   └── tests/                      # integration tests using #[path = "../src/..."]
-│   └── tabplorer-cli/                  # bin — install/uninstall/hook/status
+│   └── exbar-cli/                      # bin — install/uninstall/hook/status
 │       └── src/main.rs
 ├── docs/
 │   └── superpowers/
@@ -40,19 +39,17 @@ tabplorer/
 All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` in git-bash).
 
 - **Build:** `cargo build` (dev) or `cargo build --release`
-- **Run unit tests:** `cargo test -p tabplorer-dll`
-- **Build only the DLL:** `cargo build --release -p tabplorer-dll` (faster iteration)
-- **Run the CLI:** `./target/release/tabplorer.exe <install|uninstall|status|hook>`
+- **Run unit tests:** `cargo test -p exbar-dll`
+- **Build only the DLL:** `cargo build --release -p exbar-dll` (faster iteration)
+- **Run the CLI:** `./target/release/exbar.exe <install|uninstall|status|hook>`
 
 ## Architecture
 
 ### Loading mechanism
 
-Win11 Explorer does **not** load COM BHOs, so the BHO registration in `bho.rs` is a no-op in practice. The actual injection path is:
-
-1. `tabplorer.exe hook` is registered in `HKCU\...\Run\Tabplorer` during install
+1. `exbar.exe hook` is registered in `HKCU\...\Run\Exbar` during install
 2. The hook process calls `SetWindowsHookExW(WH_CBT, ..., 0)` — a global hook
-3. Windows injects `tabplorer_dll.dll` into every process on the system
+3. Windows injects `exbar_dll.dll` into every process on the system
 4. `DllMain` in `lib.rs` early-returns unless the current process is `explorer.exe` (this is critical for stability — see "Stability guard" below)
 5. Inside `explorer.exe`, when a `CabinetWClass` window activates, the CBT hook calls `try_inject` which creates the toolbar (once, globally)
 
@@ -82,17 +79,17 @@ Win11 Explorer does **not** load COM BHOs, so the BHO registration in `bho.rs` i
 
 ## Stability guard — critical
 
-The global `SetWindowsHookEx` injects `tabplorer_dll.dll` into **every process on the system**. If the DLL does anything other than immediately return in non-Explorer processes, those processes can destabilize — save-as dialogs, anything using shell components, etc.
+The global `SetWindowsHookEx` injects `exbar_dll.dll` into **every process on the system**. If the DLL does anything other than immediately return in non-Explorer processes, those processes can destabilize — save-as dialogs, anything using shell components, etc.
 
 The guard is in `lib.rs::DllMain`:
 - On `DLL_PROCESS_ATTACH`, check `is_explorer_process()` (compares `current_exe` filename). Return `TRUE` immediately if not explorer.exe. Leave `INITIALIZED = false`.
-- `TabplorerCBTHook` also checks `INITIALIZED` and passes through immediately when false.
+- `ExbarCBTHook` also checks `INITIALIZED` and passes through immediately when false.
 
 **Never remove or weaken this guard.** If you need the DLL to do something new, do it behind this check.
 
 ## Gotchas
 
-- **DLL file locks**: once the hook is running, the DLL is loaded in many processes and can't be overwritten. When iterating, either `taskkill /f /im tabplorer.exe` + rename-old-DLL + copy-new, or use a different output name.
+- **DLL file locks**: once the hook is running, the DLL is loaded in many processes and can't be overwritten. When iterating, either `taskkill /f /im exbar.exe` + rename-old-DLL + copy-new, or use a different output name.
 - **Killing explorer.exe during testing**: can destabilize apps that have Explorer DLL dependencies. Prefer leaving Explorer alone; use the hook restart flow.
 - **`windows` crate v0.61 quirks**:
   - `BOOL` is `windows_core::BOOL`, NOT `windows::Win32::Foundation::BOOL`
@@ -106,10 +103,10 @@ The guard is in `lib.rs::DllMain`:
 
 ## Logging
 
-All DLL logs go to `%TEMP%\tabplorer.log` with format `HH:MM:SS.mmm [LEVEL] pid=N message`. Use this as the first diagnostic tool when something isn't working as expected.
+All DLL logs go to `%TEMP%\exbar.log` with format `HH:MM:SS.mmm [LEVEL] pid=N message`. Use this as the first diagnostic tool when something isn't working as expected.
 
 ```bash
-type C:\Users\slain\AppData\Local\Temp\tabplorer.log
+type C:\Users\slain\AppData\Local\Temp\exbar.log
 ```
 
 ## Build & deploy loop (live-iteration)
@@ -118,26 +115,26 @@ When iterating on the DLL while the hook is running:
 
 ```bash
 # 1. Build
-cargo build --release -p tabplorer-dll
+cargo build --release -p exbar-dll
 
 # 2. Stop hook so we can replace the DLL
-taskkill /f /im tabplorer.exe
+taskkill /f /im exbar.exe
 
 # 3. Rename + copy (overwrite may fail due to process-wide DLL locks)
-mv %LOCALAPPDATA%/tabplorer/tabplorer_dll.dll %LOCALAPPDATA%/tabplorer/tabplorer_dll.old
-cp target/release/tabplorer_dll.dll %LOCALAPPDATA%/tabplorer/tabplorer_dll.dll
+mv %LOCALAPPDATA%/Exbar/exbar_dll.dll %LOCALAPPDATA%/Exbar/exbar_dll.old
+cp target/release/exbar_dll.dll %LOCALAPPDATA%/Exbar/exbar_dll.dll
 
 # 4. Clear log for a clean diagnostic run
-rm -f %TEMP%/tabplorer.log
+rm -f %TEMP%/exbar.log
 
 # 5. Restart hook
-./target/release/tabplorer.exe hook
+./target/release/exbar.exe hook
 ```
 
 ## Adding a new feature
 
 1. Decide whether it lives in the DLL (runtime behavior) or the CLI (install/management)
-2. For DLL changes, write/extend integration tests in `crates/tabplorer-dll/tests/` using the `#[path = "../src/..."]` pattern to test pure logic without Windows APIs
+2. For DLL changes, write/extend integration tests in `crates/exbar-dll/tests/` using the `#[path = "../src/..."]` pattern to test pure logic without Windows APIs
 3. Respect the stability guard — no work in `DllMain` / the hook callback before the Explorer check
 4. All UI pixel values must pass through `theme::scale(px, dpi)` — no hardcoded pixels
 5. All theme colors must branch on `theme::is_dark_mode()` — don't assume dark
