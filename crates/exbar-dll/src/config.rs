@@ -52,7 +52,7 @@ pub fn default_config_path() -> String {
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| String::from("C:\\Users\\Default"));
     let mut path = PathBuf::from(home);
-    path.push(".tabplorer.json");
+    path.push(".exbar.json");
     path.to_string_lossy().into_owned()
 }
 

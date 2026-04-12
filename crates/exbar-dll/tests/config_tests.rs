@@ -29,7 +29,7 @@ fn parse_empty_folders() {
 
 #[test]
 fn parse_missing_file_returns_none() {
-    let result = config::Config::load_from_path("C:\\nonexistent\\path\\.tabplorer.json");
+    let result = config::Config::load_from_path("C:\\nonexistent\\path\\.exbar.json");
     assert!(result.is_none());
 }
 
@@ -44,7 +44,7 @@ fn parse_malformed_json_returns_none() {
 #[test]
 fn config_path_resolves_home() {
     let path = config::default_config_path();
-    assert!(path.ends_with(".tabplorer.json"));
+    assert!(path.ends_with(".exbar.json"));
     assert!(path.starts_with("C:\\Users\\") || path.starts_with("/"));
 }
 

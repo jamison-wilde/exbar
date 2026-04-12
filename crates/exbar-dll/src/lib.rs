@@ -64,7 +64,7 @@ unsafe extern "system" fn DllMain(
 /// through immediately in non-Explorer processes (INITIALIZED is false
 /// unless this DLL was loaded into explorer.exe).
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn TabplorerCBTHook(
+pub unsafe extern "system" fn ExbarCBTHook(
     code: i32,
     wparam: windows::Win32::Foundation::WPARAM,
     lparam: windows::Win32::Foundation::LPARAM,
@@ -78,7 +78,7 @@ pub unsafe extern "system" fn TabplorerCBTHook(
     use std::sync::Once;
     static FIRST_CALL: Once = Once::new();
     FIRST_CALL.call_once(|| {
-        log::info("TabplorerCBTHook: first invocation in explorer.exe");
+        log::info("ExbarCBTHook: first invocation in explorer.exe");
     });
 
     unsafe { hook::cbt_hook_proc(code, wparam, lparam) }

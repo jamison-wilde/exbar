@@ -34,7 +34,7 @@ use crate::theme;
 // ── Constants ────────────────────────────────────────────────────────────────
 
 static CLASS_REGISTERED: Once = Once::new();
-const CLASS_NAME: &str = "TabplorerToolbar";
+const CLASS_NAME: &str = "ExbarToolbar";
 const WM_USER_REFRESH: u32 = 0x0401;
 const WM_DPICHANGED: u32 = 0x02E0;
 
@@ -206,7 +206,7 @@ fn pos_file_path() -> std::path::PathBuf {
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| "C:\\Users\\Default".into());
     let mut p = std::path::PathBuf::from(home);
-    p.push(".tabplorer-pos.json");
+    p.push(".exbar-pos.json");
     p
 }
 

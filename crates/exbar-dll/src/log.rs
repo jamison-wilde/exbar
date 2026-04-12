@@ -1,10 +1,10 @@
-//! Shared logging — writes to %TEMP%\tabplorer.log
+//! Shared logging — writes to %TEMP%\exbar.log
 
 use std::io::Write as _;
 
 fn log_path() -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
-    p.push("tabplorer.log");
+    p.push("exbar.log");
     p
 }
 
