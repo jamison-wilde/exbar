@@ -1,10 +1,10 @@
 [package]
-name = "tabplorer-cli"
+name = "exbar-cli"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "tabplorer"
+name = "exbar"
 path = "src/main.rs"
 
 [dependencies]
