@@ -14,6 +14,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Controls::{WM_MOUSELEAVE, WC_EDITW};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, SetFocus,
+    SetCapture, ReleaseCapture,
 };
 use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -27,6 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_MOVE, IsWindow, SW_HIDE, SW_SHOWNA, GetForegroundWindow, WM_RBUTTONUP,
     DestroyWindow, GetWindowTextLengthW, GetWindowTextW, SendMessageW,
     WS_CHILD, WS_BORDER, WM_KEYDOWN, WM_KILLFOCUS, WM_GETDLGCODE, DLGC_WANTALLKEYS,
+    WM_CAPTURECHANGED,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_core::PCWSTR;
@@ -48,6 +50,8 @@ const BTN_GAP: i32 = 2;
 const ADD_SIZE: i32 = 28;
 /// Logical pixel width/height of the drag handle grip area.
 const GRIP_SIZE: i32 = 12;
+
+const REORDER_THRESHOLD: i32 = 5;
 
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
@@ -302,6 +306,18 @@ fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, ref_hwnd: Option<HWND>) ->
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy)]
+struct ReorderState {
+    /// Source button index (NOT folder index). Always >= 1 since + is at 0.
+    source_button: usize,
+    press_x: i32,
+    press_y: i32,
+    /// False until mouse has moved REORDER_THRESHOLD logical pixels.
+    active: bool,
+    /// Insertion point in folder-index space: 0..=folders.len().
+    insertion: usize,
+}
+
 struct ButtonLayout {
     rect: RECT,
     folder: FolderEntry,
@@ -320,6 +336,7 @@ struct ToolbarState {
     drop_registered: bool,
     /// Logical pixel size of the grip (already includes DPI scale factor).
     grip_size: i32,
+    reorder: Option<ReorderState>,
 }
 
 impl ToolbarState {
@@ -335,6 +352,7 @@ impl ToolbarState {
             layout,
             drop_registered: false,
             grip_size: theme::scale(GRIP_SIZE, dpi),
+            reorder: None,
         }
     }
 }
@@ -425,6 +443,29 @@ fn hit_test(state: &ToolbarState, x: i32, y: i32) -> Option<usize> {
     state.buttons.iter().position(|b| {
         x >= b.rect.left && x < b.rect.right && y >= b.rect.top && y < b.rect.bottom
     })
+}
+
+/// Given a horizontal cursor position, compute the folder-index insertion
+/// point in `0..=folders.len()`. Uses each folder button's midpoint.
+///
+/// Caller guarantees the reorder gesture started on a folder button; this
+/// function always returns a valid folder-index insertion (never index 0
+/// for the + button slot — the + stays pinned at button[0]).
+fn compute_insertion_index(state: &ToolbarState, cursor_x: i32) -> usize {
+    let folder_buttons: Vec<&ButtonLayout> = state.buttons.iter()
+        .filter(|b| !b.is_add)
+        .collect();
+    if folder_buttons.is_empty() { return 0; }
+    // For vertical layout, fall back to "end" — visual isn't supported.
+    if state.layout == Layout::Vertical { return folder_buttons.len(); }
+
+    for (i, b) in folder_buttons.iter().enumerate() {
+        let mid = (b.rect.left + b.rect.right) / 2;
+        if cursor_x < mid {
+            return i;
+        }
+    }
+    folder_buttons.len()
 }
 
 /// Returns true if (x, y) is in the grip area.
@@ -520,8 +561,13 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     for (i, btn) in state.buttons.iter().enumerate() {
         let is_hover   = state.hover_index   == Some(i);
         let is_pressed = state.pressed_index == Some(i);
+        let is_dragging_source = state.reorder.as_ref()
+            .map(|r| r.active && r.source_button == i)
+            .unwrap_or(false);
 
-        if is_pressed {
+        if is_dragging_source {
+            // Don't draw hover/pressed highlight for the dragged button.
+        } else if is_pressed {
             let hl = if is_dark { COLORREF(0x00505050) } else { COLORREF(0x00D0D0D0) };
             let hbr = unsafe { CreateSolidBrush(hl) };
             unsafe { FillRect(hdc, &btn.rect, hbr); }
@@ -539,6 +585,14 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
             format!("\u{1F4C1} {}", btn.folder.name)
         };
 
+        // Dim text for the button being dragged.
+        let text_cr_this = if is_dragging_source {
+            if is_dark { COLORREF(0x00808080) } else { COLORREF(0x00A0A0A0) }
+        } else {
+            text_cr
+        };
+        unsafe { SetTextColor(hdc, text_cr_this); }
+
         let mut label_wide: Vec<u16> = label.encode_utf16().collect();
         let mut draw_rect = btn.rect;
         let flags = if btn.is_add {
@@ -554,6 +608,34 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
 
     if !old_font.is_invalid() {
         unsafe { SelectObject(hdc, old_font); }
+    }
+
+    // Reorder insertion caret (horizontal layout only).
+    if let Some(r) = state.reorder {
+        if r.active && state.layout == Layout::Horizontal {
+            let folder_buttons: Vec<&ButtonLayout> = state.buttons.iter()
+                .filter(|b| !b.is_add)
+                .collect();
+            if !folder_buttons.is_empty() {
+                // X coordinate of the caret.
+                let caret_x = if r.insertion >= folder_buttons.len() {
+                    folder_buttons.last().unwrap().rect.right + 1
+                } else {
+                    folder_buttons[r.insertion].rect.left - 1
+                };
+                let caret_w = theme::scale(2, state.dpi);
+                let caret_color = if is_dark { COLORREF(0x00A0A0FF) } else { COLORREF(0x004040C0) };
+                let caret_brush = unsafe { CreateSolidBrush(caret_color) };
+                let caret_rect = RECT {
+                    left: caret_x,
+                    top: client.top + 2,
+                    right: caret_x + caret_w,
+                    bottom: client.bottom - 2,
+                };
+                unsafe { FillRect(hdc, &caret_rect, caret_brush); }
+                unsafe { DeleteObject(caret_brush.into()); }
+            }
+        }
     }
 
     unsafe { let _ = EndPaint(hwnd, &ps); }
@@ -670,6 +752,25 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let state = unsafe { &mut *ptr };
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+
+                // Reorder tracking (runs before hover so active drag suppresses hover).
+                if let Some(mut r) = state.reorder {
+                    let moved = (x - r.press_x).abs() + (y - r.press_y).abs();
+                    if !r.active && moved > theme::scale(REORDER_THRESHOLD, state.dpi) {
+                        r.active = true;
+                        unsafe { SetCapture(hwnd); }
+                    }
+                    if r.active {
+                        r.insertion = compute_insertion_index(state, x);
+                        state.reorder = Some(r);
+                        state.hover_index = None;
+                        unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                        return LRESULT(0);
+                    }
+                    state.reorder = Some(r);
+                }
+
+                // Hover tracking (existing behavior)
                 let new_hover = hit_test(state, x, y);
                 if new_hover != state.hover_index {
                     state.hover_index = new_hover;
@@ -700,6 +801,17 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
+        x if x == WM_CAPTURECHANGED => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                state.reorder = None;
+                state.pressed_index = None;
+                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+            }
+            LRESULT(0)
+        }
+
         WM_LBUTTONDOWN => {
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
@@ -707,6 +819,20 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 state.pressed_index = hit_test(state, x, y);
+                // Only start a potential reorder on a folder button (not + and not grip).
+                if let Some(idx) = state.pressed_index {
+                    if !state.buttons[idx].is_add {
+                        // Cancel any active inline rename before starting a reorder gesture.
+                        cancel_inline_rename();
+                        state.reorder = Some(ReorderState {
+                            source_button: idx,
+                            press_x: x,
+                            press_y: y,
+                            active: false,
+                            insertion: idx - 1, // initial insertion is current position
+                        });
+                    }
+                }
                 unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
             }
             LRESULT(0)
@@ -718,6 +844,20 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let state = unsafe { &mut *ptr };
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+
+                // Handle reorder first: if the gesture became active, commit and skip click.
+                if let Some(r) = state.reorder.take() {
+                    unsafe { let _ = ReleaseCapture(); }
+                    if r.active {
+                        let source_folder = r.source_button - 1; // button 0 is +
+                        commit_reorder(hwnd, source_folder, r.insertion);
+                        state.pressed_index = None;
+                        unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                        return LRESULT(0);
+                    }
+                    // Not active = plain click; fall through to existing click logic.
+                }
+
                 let clicked = hit_test(state, x, y);
                 if clicked.is_some() && clicked == state.pressed_index {
                     let idx = clicked.unwrap();
@@ -1065,6 +1205,19 @@ fn copy_to_clipboard(text: &str) {
         let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(hmem.0)));
         let _ = CloseClipboard();
     }
+}
+
+fn commit_reorder(hwnd: HWND, from: usize, to: usize) {
+    let mut cfg = match crate::config::Config::load() {
+        Some(c) => c,
+        None => return,
+    };
+    cfg.move_folder(from, to);
+    if let Err(e) = cfg.save() {
+        crate::log::error(&format!("commit_reorder: save failed: {e}"));
+        return;
+    }
+    unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
 }
 
 fn remove_folder_at(hwnd: HWND, index: usize) {
