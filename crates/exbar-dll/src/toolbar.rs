@@ -709,7 +709,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 if clicked.is_some() && clicked == state.pressed_index {
                     let idx = clicked.unwrap();
                     if state.buttons[idx].is_add {
-                        unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
+                        if let Some(path) = crate::picker::pick_folder() {
+                            append_folder_and_reload(hwnd, &path);
+                        }
                     } else {
                         let path = state.buttons[idx].folder.path.clone();
                         // Get the active Explorer fresh at click time.
@@ -925,6 +927,31 @@ pub fn refresh_toolbar(hwnd: HWND) {
             SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE);
         let _ = InvalidateRect(Some(hwnd), None, true);
     }
+}
+
+/// Append a folder to `~/.exbar.json` using its basename as the label, then reload.
+/// No-op on empty / invalid paths.
+fn append_folder_and_reload(hwnd: HWND, path: &std::path::Path) {
+    let name = match path.file_name().and_then(|s| s.to_str()) {
+        Some(n) if !n.is_empty() => n.to_owned(),
+        _ => return,
+    };
+    let path_str = match path.to_str() {
+        Some(s) => s.to_owned(),
+        None => return,
+    };
+
+    // Load → mutate → save. If load fails (no file yet), start from a minimal config.
+    let mut cfg = crate::config::Config::load().unwrap_or_else(|| {
+        crate::config::Config::from_str(r#"{"folders":[]}"#).expect("default config parses")
+    });
+    cfg.add_folder(name, path_str);
+    if let Err(e) = cfg.save() {
+        crate::log::error(&format!("append_folder_and_reload: save failed: {e}"));
+        return;
+    }
+
+    unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
 }
 
 fn open_config_in_editor() {
