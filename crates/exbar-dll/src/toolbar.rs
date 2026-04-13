@@ -354,7 +354,7 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
     }
 
     if is_vertical {
-        // Grip at top, then refresh, then folder buttons
+        // Grip at top, then add-button, then folder buttons
         let mut y = grip; // skip grip row
 
         state.buttons.push(ButtonLayout {
@@ -377,7 +377,7 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
 
         (max_btn_w, y - gap)
     } else {
-        // Grip on left, then refresh, then folder buttons
+        // Grip on left, then add-button, then folder buttons
         let mut x = grip; // skip grip column
 
         let refresh_w = s(ADD_SIZE);
