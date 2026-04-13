@@ -43,18 +43,38 @@ unsafe extern "system" fn DllMain(
             unsafe { HMODULE = hinstance };
             INITIALIZED.store(true, Ordering::SeqCst);
             log::info("DllMain: DLL_PROCESS_ATTACH (explorer.exe)");
+
+            // Pin the DLL so it stays loaded for the lifetime of explorer.exe.
+            // Without this, when the hook process (exbar.exe) exits, Windows
+            // unloads us — and the toolbar's wndproc / WinEvent callback (both
+            // in this DLL) become dangling pointers, crashing explorer.exe.
+            // GetModuleHandleEx with GET_MODULE_HANDLE_EX_FLAG_PIN is one of
+            // the few user32/kernel32 calls that's safe inside DllMain.
+            unsafe {
+                use windows::Win32::System::LibraryLoader::{
+                    GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_PIN,
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                };
+                let mut dummy = windows::Win32::Foundation::HMODULE(std::ptr::null_mut());
+                let _ = GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    windows::core::PCWSTR(DllMain as *const u16),
+                    &mut dummy,
+                );
+            }
         }
         DLL_PROCESS_DETACH => {
             if !INITIALIZED.load(Ordering::SeqCst) {
                 return TRUE;
             }
             INITIALIZED.store(false, Ordering::SeqCst);
-            log::info("DllMain: DLL_PROCESS_DETACH — cleaning up");
-            // Critical: tear down anything that holds callbacks into our DLL.
-            // Without this, explorer.exe crashes on the next message dispatch
-            // after our DLL gets unmapped (the toolbar's wndproc and the
-            // SetWinEventHook callback both live in this DLL).
-            toolbar::cleanup_for_unload();
+            log::info("DllMain: DLL_PROCESS_DETACH (explorer is shutting down)");
+            // We don't tear down the toolbar / WinEvent hook here.
+            // DLL_PROCESS_DETACH fires under the loader lock, where most
+            // user32 calls (DestroyWindow, etc.) deadlock or crash.
+            // We rely on PIN_DLL during PROCESS_ATTACH so this only fires
+            // when explorer.exe itself is exiting — at which point Windows
+            // is tearing everything down anyway.
         }
         _ => {}
     }
