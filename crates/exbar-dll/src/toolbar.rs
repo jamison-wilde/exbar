@@ -11,9 +11,9 @@ use windows::Win32::Graphics::Gdi::{
     SetTextColor, TRANSPARENT, DT_SINGLELINE, DT_VCENTER, DT_CENTER,
     ScreenToClient, ClientToScreen,
 };
-use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+use windows::Win32::UI::Controls::{WM_MOUSELEAVE, WC_EDITW};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, SetFocus,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, PostMessageW, RegisterClassExW,
@@ -24,6 +24,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, SetLayeredWindowAttributes, LWA_ALPHA,
     SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
     WM_MOVE, IsWindow, SW_HIDE, SW_SHOWNA, GetForegroundWindow, WM_RBUTTONUP,
+    DestroyWindow, GetWindowTextLengthW, GetWindowTextW, SendMessageW,
+    WS_CHILD, WS_BORDER, WM_KEYDOWN, WM_KILLFOCUS, WM_GETDLGCODE, DLGC_WANTALLKEYS,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_core::PCWSTR;
@@ -609,6 +611,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         WM_DESTROY => {
             clear_global_toolbar();
+            cancel_inline_rename();
             crate::dragdrop::unregister_drop_target(hwnd);
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
@@ -783,8 +786,10 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             }
                             MENU_ID_COPY_PATH => { copy_to_clipboard(&path); }
                             MENU_ID_RENAME => {
-                                // Wired in Task 9.
-                                crate::log::info("rename (task 9)");
+                                let rect = state.buttons[idx].rect;
+                                let name = state.buttons[idx].folder.name.clone();
+                                let folder_index = idx - 1; // + button at index 0
+                                start_inline_rename(hwnd, rect, folder_index, &name);
                             }
                             MENU_ID_REMOVE => { remove_folder_at(hwnd, idx); }
                             _ => {}
@@ -1065,4 +1070,162 @@ fn remove_folder_at(hwnd: HWND, index: usize) {
         return;
     }
     unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
+}
+
+// ── Inline rename ───────────────────────────────────────────────────────────
+
+/// Global: HWND of the active rename edit control, and the folder index it is editing.
+static RENAME_STATE: std::sync::Mutex<Option<RenameState>> = std::sync::Mutex::new(None);
+
+struct RenameState {
+    edit_hwnd: isize,
+    folder_index: usize,
+    toolbar_hwnd: isize,
+}
+
+fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, initial_name: &str) {
+    // Cancel any existing rename first.
+    cancel_inline_rename();
+
+    let hinstance = unsafe { crate::HMODULE };
+
+    let wide_initial: Vec<u16> = initial_name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // ES_AUTOHSCROLL = 0x0080
+    const ES_AUTOHSCROLL: u32 = 0x0080;
+    let style = (WS_CHILD.0 | WS_VISIBLE.0 | WS_BORDER.0 | ES_AUTOHSCROLL) as u32;
+
+    let edit = unsafe {
+        CreateWindowExW(
+            windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE(0),
+            WC_EDITW,
+            PCWSTR(wide_initial.as_ptr()),
+            windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(style),
+            button_rect.left,
+            button_rect.top,
+            button_rect.right - button_rect.left,
+            button_rect.bottom - button_rect.top,
+            Some(toolbar),
+            None,
+            Some(hinstance),
+            None,
+        )
+    };
+    let Ok(edit) = edit else { return; };
+
+    // Select all text
+    const EM_SETSEL: u32 = 0x00B1;
+    unsafe {
+        SendMessageW(
+            edit,
+            EM_SETSEL,
+            Some(WPARAM(0)),
+            Some(LPARAM(-1)),
+        );
+        let _ = SetFocus(Some(edit));
+    }
+
+    // Subclass for Enter/Esc/KillFocus.
+    let data: *mut RenameSubclassData = Box::into_raw(Box::new(RenameSubclassData {
+        toolbar_hwnd: toolbar.0 as isize,
+        folder_index,
+    }));
+    unsafe {
+        use windows::Win32::UI::Shell::SetWindowSubclass;
+        let _ = SetWindowSubclass(edit, Some(rename_subclass_proc), 1, data as usize);
+    }
+
+    *RENAME_STATE.lock().unwrap() = Some(RenameState {
+        edit_hwnd: edit.0 as isize,
+        folder_index,
+        toolbar_hwnd: toolbar.0 as isize,
+    });
+}
+
+struct RenameSubclassData {
+    toolbar_hwnd: isize,
+    folder_index: usize,
+}
+
+unsafe extern "system" fn rename_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    ref_data: usize,
+) -> LRESULT {
+    use windows::Win32::UI::Shell::DefSubclassProc;
+
+    const VK_RETURN: usize = 0x0D;
+    const VK_ESCAPE: usize = 0x1B;
+
+    match msg {
+        WM_GETDLGCODE => {
+            return LRESULT(DLGC_WANTALLKEYS as isize);
+        }
+        WM_KEYDOWN => {
+            let vk = wparam.0 as usize;
+            if vk == VK_RETURN {
+                commit_rename(hwnd, ref_data);
+                return LRESULT(0);
+            }
+            if vk == VK_ESCAPE {
+                cancel_rename(hwnd, ref_data);
+                return LRESULT(0);
+            }
+        }
+        WM_KILLFOCUS => {
+            commit_rename(hwnd, ref_data);
+        }
+        _ => {}
+    }
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+fn read_edit_text(edit: HWND) -> String {
+    let len = unsafe { GetWindowTextLengthW(edit) } as usize;
+    let mut buf = vec![0u16; len + 1];
+    let got = unsafe { GetWindowTextW(edit, &mut buf) } as usize;
+    String::from_utf16_lossy(&buf[..got])
+}
+
+fn commit_rename(edit: HWND, ref_data: usize) {
+    let data = unsafe { Box::from_raw(ref_data as *mut RenameSubclassData) };
+    let toolbar = HWND(data.toolbar_hwnd as *mut _);
+    let text = read_edit_text(edit);
+
+    if let Some(mut cfg) = crate::config::Config::load() {
+        cfg.rename_folder(data.folder_index, text);
+        let _ = cfg.save();
+    }
+
+    destroy_rename_edit(edit);
+    *RENAME_STATE.lock().unwrap() = None;
+    unsafe {
+        let _ = PostMessageW(Some(toolbar), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
+    }
+}
+
+fn cancel_rename(edit: HWND, ref_data: usize) {
+    let data = unsafe { Box::from_raw(ref_data as *mut RenameSubclassData) };
+    let _ = data;
+    destroy_rename_edit(edit);
+    *RENAME_STATE.lock().unwrap() = None;
+}
+
+fn destroy_rename_edit(edit: HWND) {
+    use windows::Win32::UI::Shell::RemoveWindowSubclass;
+    unsafe {
+        let _ = RemoveWindowSubclass(edit, Some(rename_subclass_proc), 1);
+        let _ = DestroyWindow(edit);
+    }
+}
+
+fn cancel_inline_rename() {
+    let state = RENAME_STATE.lock().unwrap().take();
+    if let Some(s) = state {
+        let edit = HWND(s.edit_hwnd as *mut _);
+        destroy_rename_edit(edit);
+    }
 }
