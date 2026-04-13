@@ -16,8 +16,8 @@ use windows::Win32::System::Ole::{
 };
 use windows::Win32::System::SystemServices::{MODIFIERKEYS_FLAGS, MK_CONTROL, MK_SHIFT};
 use windows::Win32::UI::Shell::{
-    FileOperation, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
-    IFileOperation, IShellItemArray,
+    DragQueryFileW, FileOperation, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
+    HDROP, IFileOperation, IShellItemArray,
     SHCreateItemFromParsingName, SHCreateShellItemArrayFromDataObject,
     SHParseDisplayName, SHGetPathFromIDListW,
 };
@@ -27,25 +27,47 @@ use windows_core::{implement, Result, PCWSTR};
 
 // ── FolderDropTarget ──────────────────────────────────────────────────────────
 
-/// Closure type: given screen (x, y), returns the target folder path or None.
-pub type PathResolver = Box<dyn Fn(i32, i32) -> Option<String> + Send + Sync>;
+/// What should happen when a drop completes at a given toolbar location.
+pub enum DropAction {
+    /// Standard folder target: move or copy the dropped files into `target_path`.
+    MoveCopyTo(String),
+    /// The `+` button: append the dropped folder to `~/.exbar.json`.
+    AddFolder,
+}
+
+/// Closure type: given client (x, y), returns the drop action for that location.
+pub type DropResolver = Box<dyn Fn(i32, i32) -> Option<DropAction> + Send + Sync>;
 
 #[implement(IDropTarget)]
 pub struct FolderDropTarget {
     hwnd: HWND,
-    path_resolver: PathResolver,
+    resolver: DropResolver,
     current_effect: Mutex<DROPEFFECT>,
-    /// Cached target path determined at DragEnter, reused in DragOver/Drop.
-    current_target: Mutex<Option<String>>,
+    current_action: Mutex<Option<DropActionSnapshot>>,
+}
+
+#[derive(Clone)]
+enum DropActionSnapshot {
+    MoveCopyTo(String),
+    AddFolder,
+}
+
+impl From<&DropAction> for DropActionSnapshot {
+    fn from(a: &DropAction) -> Self {
+        match a {
+            DropAction::MoveCopyTo(p) => DropActionSnapshot::MoveCopyTo(p.clone()),
+            DropAction::AddFolder => DropActionSnapshot::AddFolder,
+        }
+    }
 }
 
 impl FolderDropTarget {
-    pub fn new(hwnd: HWND, path_resolver: PathResolver) -> Self {
+    pub fn new(hwnd: HWND, resolver: DropResolver) -> Self {
         FolderDropTarget {
             hwnd,
-            path_resolver,
+            resolver,
             current_effect: Mutex::new(DROPEFFECT_NONE),
-            current_target: Mutex::new(None),
+            current_action: Mutex::new(None),
         }
     }
 }
@@ -171,6 +193,35 @@ unsafe fn first_path_from_data_object(data_object: &IDataObject) -> Option<Strin
     result
 }
 
+/// True if the CF_HDROP payload contains exactly one path and that path is a directory.
+fn dropped_is_single_directory(data_object: &IDataObject) -> bool {
+    let Some(first) = (unsafe { first_path_from_data_object(data_object) }) else { return false; };
+    // We only count 1 here because first_path_from_data_object already returns just the first;
+    // consult the raw HDROP for the count.
+    let count = unsafe { hdrop_file_count(data_object) }.unwrap_or(0);
+    if count != 1 { return false; }
+    std::path::Path::new(&first).is_dir()
+}
+
+/// Return the number of files in the CF_HDROP payload, or None on failure.
+unsafe fn hdrop_file_count(data_object: &IDataObject) -> Option<u32> {
+    let fmt = FORMATETC {
+        cfFormat: CF_HDROP.0,
+        ptd: std::ptr::null_mut(),
+        dwAspect: 1,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    };
+    let medium = unsafe { data_object.GetData(&fmt).ok()? };
+    let hglobal = unsafe { medium.u.hGlobal };
+    if hglobal.is_invalid() { return None; }
+
+    let hdrop = HDROP(hglobal.0);
+    // 0xFFFFFFFF asks for the count.
+    let count = unsafe { DragQueryFileW(hdrop, 0xFFFF_FFFF, None) };
+    Some(count)
+}
+
 fn determine_effect(
     key_state: MODIFIERKEYS_FLAGS,
     data_object: &IDataObject,
@@ -242,11 +293,10 @@ unsafe fn execute_drop(
 // ── IDropTarget impl ──────────────────────────────────────────────────────────
 
 impl FolderDropTarget_Impl {
-    /// Convert screen POINTL to client coords and look up target path.
-    fn resolve_target(&self, pt: &windows::Win32::Foundation::POINTL) -> Option<String> {
+    fn resolve_action(&self, pt: &windows::Win32::Foundation::POINTL) -> Option<DropAction> {
         let mut client_pt = POINT { x: pt.x, y: pt.y };
         unsafe { ScreenToClient(self.hwnd, &mut client_pt); }
-        (self.path_resolver)(client_pt.x, client_pt.y)
+        (self.resolver)(client_pt.x, client_pt.y)
     }
 }
 
@@ -258,19 +308,19 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         pt: &windows::Win32::Foundation::POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let target = self.resolve_target(pt);
-        *self.current_target.lock().unwrap() = target.clone();
+        let action = self.resolve_action(pt);
+        *self.current_action.lock().unwrap() = action.as_ref().map(DropActionSnapshot::from);
 
-        let effect = if let (Some(data_obj), Some(ref path)) = (pdataobj.as_ref(), target) {
-            determine_effect(grfkeystate, data_obj, path)
-        } else {
-            DROPEFFECT_NONE
+        let effect = match (pdataobj.as_ref(), action.as_ref()) {
+            (Some(d), Some(DropAction::MoveCopyTo(p))) => determine_effect(grfkeystate, d, p),
+            (Some(d), Some(DropAction::AddFolder)) => {
+                if dropped_is_single_directory(d) { DROPEFFECT_COPY } else { DROPEFFECT_NONE }
+            }
+            _ => DROPEFFECT_NONE,
         };
 
         *self.current_effect.lock().unwrap() = effect;
-        if !pdweffect.is_null() {
-            unsafe { *pdweffect = effect };
-        }
+        if !pdweffect.is_null() { unsafe { *pdweffect = effect }; }
         Ok(())
     }
 
@@ -280,29 +330,30 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         pt: &windows::Win32::Foundation::POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
-        // Update target in case the cursor moved to a different button.
-        let target = self.resolve_target(pt);
-        *self.current_target.lock().unwrap() = target.clone();
+        let action = self.resolve_action(pt);
+        *self.current_action.lock().unwrap() = action.as_ref().map(DropActionSnapshot::from);
 
-        let stored = *self.current_effect.lock().unwrap();
-        let effect = if grfkeystate.contains(MK_CONTROL) {
-            DROPEFFECT_COPY
-        } else if grfkeystate.contains(MK_SHIFT) {
-            DROPEFFECT_MOVE
-        } else {
-            stored
+        let effect = match action.as_ref() {
+            Some(DropAction::MoveCopyTo(_)) => {
+                if grfkeystate.contains(MK_CONTROL) { DROPEFFECT_COPY }
+                else if grfkeystate.contains(MK_SHIFT) { DROPEFFECT_MOVE }
+                else { *self.current_effect.lock().unwrap() }
+            }
+            Some(DropAction::AddFolder) => {
+                // Effect decided in DragEnter based on data; keep it.
+                *self.current_effect.lock().unwrap()
+            }
+            None => DROPEFFECT_NONE,
         };
 
         *self.current_effect.lock().unwrap() = effect;
-        if !pdweffect.is_null() {
-            unsafe { *pdweffect = effect };
-        }
+        if !pdweffect.is_null() { unsafe { *pdweffect = effect }; }
         Ok(())
     }
 
     fn DragLeave(&self) -> Result<()> {
         *self.current_effect.lock().unwrap() = DROPEFFECT_NONE;
-        *self.current_target.lock().unwrap() = None;
+        *self.current_action.lock().unwrap() = None;
         Ok(())
     }
 
@@ -314,39 +365,68 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
         let Some(data_obj) = pdataobj.as_ref() else {
-            if !pdweffect.is_null() {
-                unsafe { *pdweffect = DROPEFFECT_NONE };
-            }
+            if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_NONE }; }
             return Ok(());
         };
 
-        // Re-resolve target at drop point.
-        let target = self.resolve_target(pt)
-            .or_else(|| self.current_target.lock().unwrap().clone());
+        let action = self.resolve_action(pt)
+            .or_else(|| self.current_action.lock().unwrap().clone().map(|s| match s {
+                DropActionSnapshot::MoveCopyTo(p) => DropAction::MoveCopyTo(p),
+                DropActionSnapshot::AddFolder => DropAction::AddFolder,
+            }));
 
-        let Some(target_path) = target else {
-            if !pdweffect.is_null() {
-                unsafe { *pdweffect = DROPEFFECT_NONE };
+        match action {
+            Some(DropAction::MoveCopyTo(target_path)) => {
+                let effect = determine_effect(grfkeystate, data_obj, &target_path);
+                if !pdweffect.is_null() { unsafe { *pdweffect = effect }; }
+                crate::log::info(&format!("drop: target={target_path:?} effect={effect:?}"));
+                unsafe { execute_drop(data_obj, effect, &target_path) }
             }
-            return Ok(());
-        };
-
-        let effect = determine_effect(grfkeystate, data_obj, &target_path);
-        if !pdweffect.is_null() {
-            unsafe { *pdweffect = effect };
+            Some(DropAction::AddFolder) => {
+                if let Some(folder) = unsafe { first_path_from_data_object(data_obj) } {
+                    let pb = std::path::PathBuf::from(&folder);
+                    if pb.is_dir() {
+                        crate::log::info(&format!("drop: add-folder {folder:?}"));
+                        // Best-effort: update config and notify the toolbar.
+                        if let Some(mut cfg) = crate::config::Config::load() {
+                            let name = pb.file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("")
+                                .to_owned();
+                            if !name.is_empty() {
+                                cfg.add_folder(name, folder);
+                                let _ = cfg.save();
+                                if let Some(tb) = crate::toolbar::get_global_toolbar_hwnd_public() {
+                                    unsafe {
+                                        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                            Some(tb),
+                                            crate::toolbar::WM_USER_RELOAD_PUB,
+                                            windows::Win32::Foundation::WPARAM(0),
+                                            windows::Win32::Foundation::LPARAM(0),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_COPY }; }
+                Ok(())
+            }
+            None => {
+                if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_NONE }; }
+                Ok(())
+            }
         }
-
-        crate::log::info(&format!("drop: target_path={target_path:?} effect={effect:?}"));
-        unsafe { execute_drop(data_obj, effect, &target_path) }
     }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Register a drop target for `hwnd`. The `path_resolver` closure maps
-/// client-coordinate (x, y) to the target folder path.
-pub fn register_drop_target(hwnd: HWND, path_resolver: PathResolver) -> Result<()> {
-    let target = FolderDropTarget::new(hwnd, path_resolver);
+/// Register a drop target for `hwnd`. The `resolver` closure maps
+/// client-coordinate (x, y) to the drop action for that location.
+pub fn register_drop_target(hwnd: HWND, resolver: DropResolver) -> Result<()> {
+    let target = FolderDropTarget::new(hwnd, resolver);
     let drop_target: IDropTarget = target.into();
     unsafe { RegisterDragDrop(hwnd, &drop_target) }
 }

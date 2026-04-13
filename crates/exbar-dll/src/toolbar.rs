@@ -813,27 +813,40 @@ fn apply_opacity(hwnd: HWND, state: &ToolbarState) {
 
 fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
     if state.drop_registered { return; }
-    if state.config.as_ref().map_or(true, |c| c.folders.is_empty()) { return; }
 
-    // Capture button rects + paths for the closure (avoids holding borrow on state).
-    let button_info: Vec<(RECT, String)> = state.buttons.iter()
-        .filter(|b| !b.is_add)
-        .map(|b| (b.rect, b.folder.path.clone()))
-        .collect();
+    // Capture everything needed for the closure (must be Send+Sync, no borrows on state).
+    #[derive(Clone)]
+    struct Info { rect: RECT, action: ActionSource }
+    #[derive(Clone)]
+    enum ActionSource { Folder(String), Add }
 
-    let resolver = move |cx: i32, cy: i32| -> Option<String> {
-        button_info.iter()
-            .find(|(r, _)| cx >= r.left && cx < r.right && cy >= r.top && cy < r.bottom)
-            .map(|(_, p)| p.clone())
+    let button_info: Vec<Info> = state.buttons.iter().map(|b| Info {
+        rect: b.rect,
+        action: if b.is_add { ActionSource::Add } else { ActionSource::Folder(b.folder.path.clone()) },
+    }).collect();
+
+    let resolver = move |cx: i32, cy: i32| -> Option<crate::dragdrop::DropAction> {
+        let hit = button_info.iter()
+            .find(|i| cx >= i.rect.left && cx < i.rect.right && cy >= i.rect.top && cy < i.rect.bottom)?;
+        Some(match &hit.action {
+            ActionSource::Folder(p) => crate::dragdrop::DropAction::MoveCopyTo(p.clone()),
+            ActionSource::Add => crate::dragdrop::DropAction::AddFolder,
+        })
     };
 
     if crate::dragdrop::register_drop_target(hwnd, Box::new(resolver)).is_ok() {
         state.drop_registered = true;
-        crate::log::info("Registered OLE drop target on toolbar (cursor-based)");
+        crate::log::info("Registered OLE drop target on toolbar");
     }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
+
+pub const WM_USER_RELOAD_PUB: u32 = WM_USER_RELOAD;
+
+pub fn get_global_toolbar_hwnd_public() -> Option<HWND> {
+    get_global_toolbar_hwnd()
+}
 
 pub fn create_toolbar(
     owner: HWND,
