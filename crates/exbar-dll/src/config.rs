@@ -60,6 +60,33 @@ impl Config {
         let path = default_config_path();
         Self::load_from_path(&path)
     }
+
+    pub fn add_folder(&mut self, name: String, path: String) {
+        self.folders.push(FolderEntry { name, path, icon: None });
+    }
+
+    pub fn remove_folder(&mut self, index: usize) {
+        if index < self.folders.len() {
+            self.folders.remove(index);
+        }
+    }
+
+    pub fn rename_folder(&mut self, index: usize, new_name: String) {
+        if index >= self.folders.len() { return; }
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() { return; }
+        self.folders[index].name = trimmed.to_owned();
+    }
+
+    pub fn save_to_path(&self, path: &str) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        fs::write(path, json)
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        self.save_to_path(&default_config_path())
+    }
 }
 
 pub fn default_config_path() -> String {

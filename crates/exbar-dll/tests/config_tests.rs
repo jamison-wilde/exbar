@@ -88,3 +88,63 @@ fn new_tab_timeout_clamps_to_range() {
     let cfg = config::Config::from_str(json).unwrap();
     assert_eq!(cfg.new_tab_timeout_ms_zero_disables, 5000);
 }
+
+#[test]
+fn add_folder_appends_to_end() {
+    let mut cfg = config::Config::from_str(r#"{"folders":[{"name":"A","path":"C:\\a"}]}"#).unwrap();
+    cfg.add_folder("B".into(), "C:\\b".into());
+    assert_eq!(cfg.folders.len(), 2);
+    assert_eq!(cfg.folders[1].name, "B");
+    assert_eq!(cfg.folders[1].path, "C:\\b");
+    assert!(cfg.folders[1].icon.is_none());
+}
+
+#[test]
+fn remove_folder_deletes_by_index() {
+    let mut cfg = config::Config::from_str(
+        r#"{"folders":[{"name":"A","path":"C:\\a"},{"name":"B","path":"C:\\b"}]}"#).unwrap();
+    cfg.remove_folder(0);
+    assert_eq!(cfg.folders.len(), 1);
+    assert_eq!(cfg.folders[0].name, "B");
+}
+
+#[test]
+fn remove_folder_out_of_bounds_is_noop() {
+    let mut cfg = config::Config::from_str(r#"{"folders":[{"name":"A","path":"C:\\a"}]}"#).unwrap();
+    cfg.remove_folder(42);
+    assert_eq!(cfg.folders.len(), 1);
+}
+
+#[test]
+fn rename_folder_updates_name() {
+    let mut cfg = config::Config::from_str(r#"{"folders":[{"name":"A","path":"C:\\a"}]}"#).unwrap();
+    cfg.rename_folder(0, "Renamed".into());
+    assert_eq!(cfg.folders[0].name, "Renamed");
+    assert_eq!(cfg.folders[0].path, "C:\\a");
+}
+
+#[test]
+fn rename_folder_empty_is_noop() {
+    let mut cfg = config::Config::from_str(r#"{"folders":[{"name":"A","path":"C:\\a"}]}"#).unwrap();
+    cfg.rename_folder(0, "   ".into());
+    assert_eq!(cfg.folders[0].name, "A");
+}
+
+#[test]
+fn rename_folder_out_of_bounds_is_noop() {
+    let mut cfg = config::Config::from_str(r#"{"folders":[{"name":"A","path":"C:\\a"}]}"#).unwrap();
+    cfg.rename_folder(7, "X".into());
+    assert_eq!(cfg.folders[0].name, "A");
+}
+
+#[test]
+fn save_to_path_round_trips() {
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    let mut cfg = config::Config::from_str(r#"{"folders":[{"name":"A","path":"C:\\a"}]}"#).unwrap();
+    cfg.add_folder("B".into(), "C:\\b".into());
+    cfg.save_to_path(f.path().to_str().unwrap()).unwrap();
+    let cfg2 = config::Config::load_from_path(f.path().to_str().unwrap()).unwrap();
+    assert_eq!(cfg2.folders.len(), 2);
+    assert_eq!(cfg2.folders[1].name, "B");
+    let _ = &mut f; // keep tempfile alive
+}
