@@ -85,6 +85,20 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
 - Registered on the whole toolbar window; at drop time it uses the cursor position (converted to client coords) to determine which button the drop is over
 - Shell aliases (`shell:downloads`) are resolved to real paths via `SHParseDisplayName` + `SHGetPathFromIDListW` before comparing drive letters for the move/copy heuristic
 - Executes the drop via `IFileOperation` with `FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR`
+- Dispatches via `DropAction` enum: `MoveCopyTo(target)` for folder buttons, `AddFolder` for the `+` button (appends dropped directory to `~/.exbar.json`)
+
+### Context menus and inline rename
+
+- The `+` button (first slot) has three interactions:
+  - **Left-click** → `picker.rs` opens `IFileOpenDialog` with `FOS_PICKFOLDERS`, starting at `%SystemDrive%\`; selected folder appended via `Config::add_folder` + `save()`
+  - **Right-click** → `Edit config` (ShellExecute opens `~/.exbar.json` in default handler) / `Reload config` (posts `WM_USER_RELOAD`)
+  - **Drop a single directory** → same path as click-picker result
+- Folder buttons:
+  - **Left-click** → navigate active Explorer via `IShellBrowser::BrowseObject`
+  - **Ctrl+left-click** → `navigate::open_in_new_tab` — posts Ctrl+T to the active Explorer HWND, polls `IShellWindows` for up to `newTabTimeoutMsZeroDisables` ms looking for a newly-appeared HWND, navigates it; on timeout or `0` config, falls back to `ShellExecuteW("explorer.exe", "\"path\"")`
+  - **Right-click** → `Open / Open in new tab / Copy path / --- / Rename / Remove`
+  - **Rename** spawns a child `EDIT` control (`start_inline_rename` in `toolbar.rs`) subclassed via `SetWindowSubclass` to intercept Enter (commit), Esc (cancel), `WM_KILLFOCUS` (commit). Empty commit keeps the old name via `Config::rename_folder`'s trim-empty guard
+- The `contextmenu.rs` wrapper exposes `show_menu(owner, pt, items) -> u32` around `TrackPopupMenu` with `TPM_RETURNCMD`
 
 ## Stability guard — critical
 
@@ -109,6 +123,10 @@ The guard is in `lib.rs::DllMain`:
   - `DeleteObject` expects `HGDIOBJ`; convert with `.into()` from `HBRUSH` / `HPEN` / `HFONT`
 - **Win11 Explorer window hierarchy**: command bar is rendered by `Microsoft.UI.Content.DesktopChildSiteBridge` (WinUI 3 XAML). Cannot inject Win32 child windows into that hierarchy. We use a separate top-level popup instead. The old approach of overlaying the command bar area is abandoned — don't reintroduce it.
 - **`WINEVENT_SKIPOWNPROCESS`**: do NOT set this flag on the foreground-window WinEvent hook. Most events we care about (Explorer activations) happen in explorer.exe itself.
+- **`newTabTimeoutMsZeroDisables` semantics**: config field controls ctrl-click-new-tab behavior. `0` disables the new-tab attempt entirely (always opens a new Explorer window). Any positive value is both the poll ceiling AND the trigger to try the tab path. Clamped to `0..=5000` during deserialization.
+- **Inline rename on layered window**: the `EDIT` control is a child of the `WS_EX_LAYERED` toolbar. If paint artifacts appear, replace the child-window approach with a small `CreateDialogIndirectParamW` modal keyed to the button's screen rect.
+- **Inline rename lifetime**: `Box<RenameSubclassData>` is leaked into `SetWindowSubclass`'s `ref_data`. `commit_rename` / `cancel_rename` reclaim via `Box::from_raw` after `RemoveWindowSubclass`. `cancel_inline_rename` (called on `WM_DESTROY`) reclaims the box via the pointer stashed in `RENAME_STATE`. Do NOT fall through to `DefSubclassProc` after a commit — the HWND has been destroyed.
+- **Toolbar UI thread blocks during `open_in_new_tab`**: the poll sleeps up to `newTabTimeoutMsZeroDisables` ms on the toolbar's wndproc thread. Accepted trade-off for v0.2.0 simplicity; revisit with a worker-thread variant if it feels bad.
 - **Hook process must not show a console**: `exbar.exe hook` calls `FreeConsole()` at the start to detach from any inherited console. The MSI's post-install custom action otherwise opens a visible terminal window. Don't add `println!` calls in `run_hook()` after `FreeConsole` — they'll silently no-op.
 
 ## Logging
