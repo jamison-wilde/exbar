@@ -15,6 +15,7 @@ use windows::Win32::UI::Controls::{WM_MOUSELEAVE, WC_EDITW};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, SetFocus,
 };
+use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, PostMessageW, RegisterClassExW,
     SetWindowLongPtrW, GetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW,
@@ -723,8 +724,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         }
                     } else {
                         let path = state.buttons[idx].folder.path.clone();
-                        // Get the active Explorer fresh at click time.
-                        if let Some(explorer_hwnd) = get_active_explorer() {
+                        let ctrl = (wparam.0 & MK_CONTROL.0 as usize) != 0;
+                        if ctrl {
+                            let timeout = state.config.as_ref()
+                                .map(|c| c.new_tab_timeout_ms_zero_disables)
+                                .unwrap_or(500);
+                            crate::navigate::open_in_new_tab(get_active_explorer(), &path, timeout);
+                        } else if let Some(explorer_hwnd) = get_active_explorer() {
                             if let Some(sb) = unsafe { crate::hook::get_shell_browser_for(explorer_hwnd) } {
                                 let _ = crate::navigate::navigate_to(&sb, &path);
                             }
@@ -781,8 +787,10 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 }
                             }
                             MENU_ID_OPEN_NEW_TAB => {
-                                // Wired in Task 10.
-                                crate::log::info("open-in-new-tab (task 10)");
+                                let timeout = state.config.as_ref()
+                                    .map(|c| c.new_tab_timeout_ms_zero_disables)
+                                    .unwrap_or(500);
+                                crate::navigate::open_in_new_tab(get_active_explorer(), &path, timeout);
                             }
                             MENU_ID_COPY_PATH => { copy_to_clipboard(&path); }
                             MENU_ID_RENAME => {

@@ -35,6 +35,80 @@ pub fn navigate_to(shell_browser: &IShellBrowser, path: &str) -> Result<(), Stri
     browse_result
 }
 
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN, WM_KEYUP, SW_SHOWNORMAL};
+use windows::Win32::UI::Shell::ShellExecuteW;
+
+const VK_CONTROL: usize = 0x11;
+const VK_T_KEY: usize = 0x54;
+
+/// Open `path` in a new Explorer tab by:
+///   1. Snapshotting existing tabs
+///   2. Posting Ctrl+T to `target_explorer`
+///   3. Polling for a new IShellBrowser that wasn't in the snapshot
+///   4. Calling BrowseObject on the new one
+///
+/// Falls back to a new Explorer window (ShellExecute) on timeout or any failure.
+/// If `timeout_ms == 0`, skips the tab attempt and opens a new window directly.
+pub fn open_in_new_tab(target_explorer: Option<HWND>, path: &str, timeout_ms: u32) {
+    if timeout_ms == 0 {
+        open_in_new_window(path);
+        return;
+    }
+    let Some(target) = target_explorer else {
+        open_in_new_window(path);
+        return;
+    };
+
+    let before: std::collections::HashSet<isize> = unsafe {
+        crate::hook::enumerate_shell_browsers()
+    }.into_iter().map(|(h, _)| h).collect();
+
+    unsafe {
+        let _ = PostMessageW(Some(target), WM_KEYDOWN, WPARAM(VK_CONTROL), LPARAM(0));
+        let _ = PostMessageW(Some(target), WM_KEYDOWN, WPARAM(VK_T_KEY), LPARAM(0));
+        let _ = PostMessageW(Some(target), WM_KEYUP,   WPARAM(VK_T_KEY), LPARAM(0));
+        let _ = PostMessageW(Some(target), WM_KEYUP,   WPARAM(VK_CONTROL), LPARAM(0));
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() >= std::time::Duration::from_millis(timeout_ms as u64) {
+            crate::log::info("open_in_new_tab: timeout → falling back to new window");
+            open_in_new_window(path);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let current = unsafe { crate::hook::enumerate_shell_browsers() };
+        for (hwnd, browser) in current {
+            if !before.contains(&hwnd) {
+                if let Err(e) = navigate_to(&browser, path) {
+                    crate::log::error(&format!("open_in_new_tab: BrowseObject failed: {e}"));
+                    open_in_new_window(path);
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn open_in_new_window(path: &str) {
+    let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let exe: Vec<u16> = "explorer.exe".encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let _ = ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(exe.as_ptr()),
+            PCWSTR(path_wide.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// navigate_to with an obviously invalid path must return Err (SHParseDisplayName

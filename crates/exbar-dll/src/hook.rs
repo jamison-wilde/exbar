@@ -67,6 +67,50 @@ unsafe fn variant_i4(n: i32) -> VARIANT {
     }
 }
 
+/// Return the list of all Explorer `IShellBrowser`s keyed by their HWND.
+/// Used by the new-tab flow to detect which tab/window is newly created.
+pub unsafe fn enumerate_shell_browsers() -> Vec<(isize, IShellBrowser)> {
+    let mut out = Vec::new();
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    use windows::Win32::UI::Shell::ShellWindows;
+    let shell_windows: IShellWindows =
+        match unsafe { CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER) } {
+            Ok(s) => s,
+            Err(_) => return out,
+        };
+    let count = match unsafe { shell_windows.Count() } {
+        Ok(c) => c,
+        Err(_) => return out,
+    };
+
+    for i in 0..count {
+        let index = unsafe { variant_i4(i) };
+        let disp = match unsafe { shell_windows.Item(&index).ok() } {
+            Some(d) => d,
+            None => continue,
+        };
+        let wba = match disp.cast::<IWebBrowserApp>().ok() {
+            Some(w) => w,
+            None => continue,
+        };
+        let hw = match unsafe { wba.HWND().ok() } {
+            Some(h) => h,
+            None => continue,
+        };
+        let sp = match wba.cast::<IServiceProvider>().ok() {
+            Some(s) => s,
+            None => continue,
+        };
+        let browser: IShellBrowser =
+            match unsafe { sp.QueryService(&SID_STopLevelBrowser) } {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+        out.push((hw.0, browser));
+    }
+    out
+}
+
 /// Try to get `IShellBrowser` for `cabinet_hwnd` by enumerating `IShellWindows`.
 ///
 /// Returns `None` on any failure; navigation buttons won't work.
