@@ -71,6 +71,19 @@ impl Config {
         }
     }
 
+    /// Move the folder at `from` to position `to` in the folders list.
+    /// `to` is a pre-removal insertion index in `0..=folders.len()`.
+    /// No-op if `from >= len`, or if the resulting position equals `from`.
+    pub fn move_folder(&mut self, from: usize, to: usize) {
+        if from >= self.folders.len() { return; }
+        // Adjust the insertion index for removal-shift.
+        let effective_to = if to > from { to - 1 } else { to };
+        if effective_to == from { return; }
+        if effective_to > self.folders.len() { return; }
+        let entry = self.folders.remove(from);
+        self.folders.insert(effective_to.min(self.folders.len()), entry);
+    }
+
     pub fn rename_folder(&mut self, index: usize, new_name: String) {
         if index >= self.folders.len() { return; }
         let trimmed = new_name.trim();
