@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+};
 use windows::Win32::UI::Shell::{
     FileOpenDialog, IFileOpenDialog, IShellItem,
     SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
@@ -14,6 +16,9 @@ use windows_core::PCWSTR;
 /// Starts at `%SystemDrive%\` (typically `C:\`).
 pub fn pick_folder() -> Option<PathBuf> {
     unsafe {
+        // Idempotent if COM was already initialised on this thread.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+
         let dialog: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
 
@@ -35,9 +40,10 @@ pub fn pick_folder() -> Option<PathBuf> {
         let result: IShellItem = dialog.GetResult().ok()?;
         let pwstr = result.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
         if pwstr.is_null() { return None; }
-        let s = pwstr.to_string().ok()?;
+        // Always free the COM-allocated buffer, even if to_string fails.
+        let parsed = pwstr.to_string();
         windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.0 as *const _));
-        Some(PathBuf::from(s))
+        Some(PathBuf::from(parsed.ok()?))
     }
 }
 
