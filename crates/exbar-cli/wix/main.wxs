@@ -1,33 +1,24 @@
 <?xml version='1.0' encoding='utf-8'?>
 <!--
-  WiX v4 source file for exbar-cli installer.
-  Built with WiX Toolset v7 using wix build directly.
-
-  Variables provided at build time (via -d flag to wix build):
-    Version           = Package version (e.g. 0.1.0)
-    CargoTargetBinDir = Path to directory containing exbar.exe
-    WixDir            = Path to this wix\ directory (for License.rtf)
+  Exbar MSI installer.
+  Build with: wix build -arch x64 -d Version=0.1.0 -d CargoTargetBinDir=target/release \
+               crates/exbar-cli/wix/main.wxs -o target/wix/exbar-0.1.0-x64.msi \
+               -ext WixToolset.Util.wixext
 -->
-
-<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
-    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
-<?else ?>
-    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
-<?endif ?>
-
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
     <Package
         Name="Exbar"
         Version="$(Version)"
-        Manufacturer="Jamison Wilde"
+        Manufacturer="Exbar"
         UpgradeCode="E47632D3-B73C-4EE3-B987-D2E04332BCDB"
         Language="1033"
         Compressed="yes"
-        Scope="perMachine">
+        Scope="perUser"
+        InstallerVersion="500">
 
-        <SummaryInformation Description="Explorer Bar for Windows Explorer" />
+        <SummaryInformation Description="Exbar — floating folder-shortcut toolbar for Windows 11 File Explorer" />
 
         <MajorUpgrade
             Schedule="afterInstallInitialize"
@@ -35,86 +26,80 @@
 
         <MediaTemplate EmbedCab="yes" />
 
-        <StandardDirectory Id="$(PlatformProgramFilesFolder)">
-            <Directory Id="APPLICATIONFOLDER" Name="Exbar">
-                    <Component Id="License" Guid="*">
-                        <File Id="LicenseFile"
-                            Source="$(WixDir)\License.rtf"
-                            KeyPath="yes" />
-                    </Component>
+        <!-- Shut down any running exbar.exe before replacing files -->
+        <util:CloseApplication Id="CloseExbar"
+                               Target="exbar.exe"
+                               CloseMessage="yes"
+                               TerminateProcess="500"
+                               RebootPrompt="no" />
 
-                    <Directory Id="Bin" Name="bin">
-                        <Component Id="Path" Guid="18550E14-BC3B-403F-93F6-7559B8A5A9DE">
-                            <Environment
-                                Id="PATH"
-                                Name="PATH"
-                                Value="[Bin]"
-                                Permanent="no"
-                                Part="last"
-                                Action="set"
-                                System="yes" />
-                            <RegistryValue
-                                Root="HKLM"
-                                Key="SOFTWARE\Exbar"
-                                Name="PathConfigured"
-                                Type="integer"
-                                Value="1"
-                                KeyPath="yes" />
-                        </Component>
-                        <Component Id="binary0" Guid="*">
-                            <File
-                                Id="exe0"
-                                Name="exbar.exe"
-                                Source="$(CargoTargetBinDir)\exbar.exe"
-                                KeyPath="yes" />
-                        </Component>
-                    </Directory>
-                </Directory>
-        </StandardDirectory>
-
-        <Feature
-            Id="Binaries"
-            Title="Application"
-            Description="Installs all binaries and the license."
-            Level="1"
-            ConfigurableDirectory="APPLICATIONFOLDER"
-            AllowAdvertise="no"
-            Display="expand">
-            <ComponentRef Id="License" />
-            <ComponentRef Id="binary0" />
-
-            <Feature
-                Id="Environment"
-                Title="PATH Environment Variable"
-                Description="Add the install location of the [ProductName] executable to the PATH system environment variable. This allows the [ProductName] executable to be called from any location."
-                Level="1">
-                <ComponentRef Id="Path" />
-            </Feature>
+        <Feature Id="Main" Title="Exbar" Level="1">
+            <ComponentRef Id="ExbarExe" />
+            <ComponentRef Id="ExbarDll" />
+            <ComponentRef Id="RunKey" />
+            <ComponentRef Id="UninstallEntry" />
         </Feature>
 
-        <SetProperty Id="ARPINSTALLLOCATION" Value="[APPLICATIONFOLDER]" After="CostFinalize" />
+        <!-- Post-install: launch the hook process in the user's context -->
+        <CustomAction Id="LaunchHook"
+                      FileRef="ExbarExeFile"
+                      ExeCommand="hook"
+                      Impersonate="yes"
+                      Execute="deferred"
+                      Return="asyncNoWait" />
 
-        <!--
-          Uncomment to set a product icon in Add/Remove Programs:
-          <Icon Id="ProductICO" SourceFile="wix\Product.ico" />
-          <Property Id="ARPPRODUCTICON" Value="ProductICO" />
-        -->
+        <InstallExecuteSequence>
+            <Custom Action="LaunchHook" After="InstallFinalize" Condition="NOT Installed" />
+        </InstallExecuteSequence>
 
-        <!--
-          Uncomment to add a help URL in Add/Remove Programs:
-          <Property Id="ARPHELPLINK" Value="https://github.com/yourname/exbar" />
-        -->
+        <StandardDirectory Id="LocalAppDataFolder">
+            <Directory Id="INSTALLDIR" Name="Exbar" />
+        </StandardDirectory>
 
-        <ui:WixUI Id="WixUI_FeatureTree" />
+        <!-- exbar.exe component -->
+        <Component Id="ExbarExe" Directory="INSTALLDIR" Guid="*" Bitness="always64">
+            <File Id="ExbarExeFile"
+                  Source="$(CargoTargetBinDir)\exbar.exe"
+                  KeyPath="yes" />
+        </Component>
 
-        <WixVariable Id="WixUILicenseRtf" Value="$(WixDir)\License.rtf" />
+        <!-- exbar_dll.dll component -->
+        <Component Id="ExbarDll" Directory="INSTALLDIR" Guid="*" Bitness="always64">
+            <File Id="ExbarDllFile"
+                  Source="$(CargoTargetBinDir)\exbar_dll.dll"
+                  KeyPath="yes" />
+        </Component>
 
-        <!--
-          Uncomment to customize installer GUI images:
-          <WixVariable Id="WixUIBannerBmp" Value="wix\Banner.bmp" />
-          <WixVariable Id="WixUIDialogBmp" Value="wix\Dialog.bmp" />
-        -->
+        <!-- Run key: auto-start hook at login -->
+        <Component Id="RunKey" Directory="INSTALLDIR" Guid="*" Bitness="always64">
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                Name="Exbar"
+                Type="string"
+                Value="&quot;[INSTALLDIR]exbar.exe&quot; hook"
+                KeyPath="yes" />
+        </Component>
+
+        <!-- Uninstall metadata — shown in Settings → Apps -->
+        <Component Id="UninstallEntry" Directory="INSTALLDIR" Guid="*" Bitness="always64">
+            <RegistryKey Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\Exbar">
+                <RegistryValue Name="DisplayName" Type="string" Value="Exbar" />
+                <RegistryValue Name="DisplayVersion" Type="string" Value="$(Version)" />
+                <RegistryValue Name="Publisher" Type="string" Value="Exbar" />
+                <RegistryValue Name="InstallLocation" Type="string" Value="[INSTALLDIR]" />
+                <RegistryValue Name="UninstallString" Type="string" Value="msiexec /x [ProductCode]" />
+                <RegistryValue Name="NoModify" Type="integer" Value="1" />
+                <RegistryValue Name="NoRepair" Type="integer" Value="1" />
+            </RegistryKey>
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\Exbar"
+                Name="Installed"
+                Type="integer"
+                Value="1"
+                KeyPath="yes" />
+        </Component>
 
     </Package>
-
 </Wix>
