@@ -710,7 +710,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     let idx = clicked.unwrap();
                     if state.buttons[idx].is_add {
                         if let Some(path) = crate::picker::pick_folder() {
-                            append_folder_and_reload(hwnd, &path);
+                            append_folder_and_reload(&path);
                         }
                     } else {
                         let path = state.buttons[idx].folder.path.clone();
@@ -842,12 +842,6 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-pub const WM_USER_RELOAD_PUB: u32 = WM_USER_RELOAD;
-
-pub fn get_global_toolbar_hwnd_public() -> Option<HWND> {
-    get_global_toolbar_hwnd()
-}
-
 pub fn create_toolbar(
     owner: HWND,
     screen_pos: &RECT,
@@ -944,7 +938,7 @@ pub fn refresh_toolbar(hwnd: HWND) {
 
 /// Append a folder to `~/.exbar.json` using its basename as the label, then reload.
 /// No-op on empty / invalid paths.
-fn append_folder_and_reload(hwnd: HWND, path: &std::path::Path) {
+pub(crate) fn append_folder_and_reload(path: &std::path::Path) {
     let name = match path.file_name().and_then(|s| s.to_str()) {
         Some(n) if !n.is_empty() => n.to_owned(),
         _ => return,
@@ -964,7 +958,9 @@ fn append_folder_and_reload(hwnd: HWND, path: &std::path::Path) {
         return;
     }
 
-    unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
+    if let Some(hwnd) = get_global_toolbar_hwnd() {
+        unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
+    }
 }
 
 fn open_config_in_editor() {

@@ -28,6 +28,12 @@ use windows_core::{implement, Result, PCWSTR};
 // ── FolderDropTarget ──────────────────────────────────────────────────────────
 
 /// What should happen when a drop completes at a given toolbar location.
+///
+/// Callbacks on `FolderDropTarget` are STA-bound to the toolbar window's
+/// owning thread, so this state never crosses threads in practice — the
+/// `Mutex` wrappers below are here to satisfy `Sync` for the `#[implement]`
+/// vtable, not to protect against contention.
+#[derive(Clone)]
 pub enum DropAction {
     /// Standard folder target: move or copy the dropped files into `target_path`.
     MoveCopyTo(String),
@@ -43,22 +49,7 @@ pub struct FolderDropTarget {
     hwnd: HWND,
     resolver: DropResolver,
     current_effect: Mutex<DROPEFFECT>,
-    current_action: Mutex<Option<DropActionSnapshot>>,
-}
-
-#[derive(Clone)]
-enum DropActionSnapshot {
-    MoveCopyTo(String),
-    AddFolder,
-}
-
-impl From<&DropAction> for DropActionSnapshot {
-    fn from(a: &DropAction) -> Self {
-        match a {
-            DropAction::MoveCopyTo(p) => DropActionSnapshot::MoveCopyTo(p.clone()),
-            DropAction::AddFolder => DropActionSnapshot::AddFolder,
-        }
-    }
+    current_action: Mutex<Option<DropAction>>,
 }
 
 impl FolderDropTarget {
@@ -309,7 +300,7 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
         let action = self.resolve_action(pt);
-        *self.current_action.lock().unwrap() = action.as_ref().map(DropActionSnapshot::from);
+        *self.current_action.lock().unwrap() = action.clone();
 
         let effect = match (pdataobj.as_ref(), action.as_ref()) {
             (Some(d), Some(DropAction::MoveCopyTo(p))) => determine_effect(grfkeystate, d, p),
@@ -331,7 +322,7 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
         let action = self.resolve_action(pt);
-        *self.current_action.lock().unwrap() = action.as_ref().map(DropActionSnapshot::from);
+        *self.current_action.lock().unwrap() = action.clone();
 
         let effect = match action.as_ref() {
             Some(DropAction::MoveCopyTo(_)) => {
@@ -370,10 +361,7 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         };
 
         let action = self.resolve_action(pt)
-            .or_else(|| self.current_action.lock().unwrap().clone().map(|s| match s {
-                DropActionSnapshot::MoveCopyTo(p) => DropAction::MoveCopyTo(p),
-                DropActionSnapshot::AddFolder => DropAction::AddFolder,
-            }));
+            .or_else(|| self.current_action.lock().unwrap().clone());
 
         match action {
             Some(DropAction::MoveCopyTo(target_path)) => {
@@ -383,32 +371,15 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
                 unsafe { execute_drop(data_obj, effect, &target_path) }
             }
             Some(DropAction::AddFolder) => {
+                // Guard against multi-selection/file drops that slipped past DragOver.
+                if !dropped_is_single_directory(data_obj) {
+                    if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_NONE }; }
+                    return Ok(());
+                }
                 if let Some(folder) = unsafe { first_path_from_data_object(data_obj) } {
                     let pb = std::path::PathBuf::from(&folder);
-                    if pb.is_dir() {
-                        crate::log::info(&format!("drop: add-folder {folder:?}"));
-                        // Best-effort: update config and notify the toolbar.
-                        if let Some(mut cfg) = crate::config::Config::load() {
-                            let name = pb.file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("")
-                                .to_owned();
-                            if !name.is_empty() {
-                                cfg.add_folder(name, folder);
-                                let _ = cfg.save();
-                                if let Some(tb) = crate::toolbar::get_global_toolbar_hwnd_public() {
-                                    unsafe {
-                                        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                                            Some(tb),
-                                            crate::toolbar::WM_USER_RELOAD_PUB,
-                                            windows::Win32::Foundation::WPARAM(0),
-                                            windows::Win32::Foundation::LPARAM(0),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    crate::log::info(&format!("drop: add-folder {folder:?}"));
+                    crate::toolbar::append_folder_and_reload(&pb);
                 }
                 if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_COPY }; }
                 Ok(())
