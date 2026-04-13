@@ -9,7 +9,7 @@ use windows::Win32::Graphics::Gdi::{
     DrawTextW, EndPaint, FillRect, GetStockObject,
     InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode,
     SetTextColor, TRANSPARENT, DT_SINGLELINE, DT_VCENTER, DT_CENTER,
-    ScreenToClient,
+    ScreenToClient, ClientToScreen,
 };
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -23,7 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_NCHITTEST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE, HTCAPTION,
     WS_EX_LAYERED, SetLayeredWindowAttributes, LWA_ALPHA,
     SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WM_MOVE, IsWindow, SW_HIDE, SW_SHOWNA, GetForegroundWindow,
+    WM_MOVE, IsWindow, SW_HIDE, SW_SHOWNA, GetForegroundWindow, WM_RBUTTONUP,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_core::PCWSTR;
@@ -719,6 +719,28 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 }
                 state.pressed_index = None;
                 unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+            }
+            LRESULT(0)
+        }
+
+        WM_RBUTTONUP => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                if let Some(idx) = hit_test(state, x, y) {
+                    let mut pt = POINT { x, y };
+                    unsafe { ClientToScreen(hwnd, &mut pt); }
+                    if state.buttons[idx].is_add {
+                        // Task 5 will wire the + menu here.
+                        crate::log::info("right-click on + (menu coming in task 5)");
+                    } else {
+                        // Task 8 will wire the folder menu here.
+                        crate::log::info(&format!("right-click on folder[{idx}] (menu coming in task 8)"));
+                    }
+                    let _ = pt; // silence unused warning until menus are wired
+                }
             }
             LRESULT(0)
         }
