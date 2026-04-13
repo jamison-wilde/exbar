@@ -38,6 +38,7 @@
             <ComponentRef Id="ExbarDll" />
             <ComponentRef Id="RunKey" />
             <ComponentRef Id="UninstallEntry" />
+            <ComponentRef Id="StartMenuShortcut" />
         </Feature>
 
         <!-- Post-install: launch the hook process in the user's context -->
@@ -58,6 +59,25 @@
         <StandardDirectory Id="LocalAppDataFolder">
             <Directory Id="INSTALLDIR" Name="Exbar" />
         </StandardDirectory>
+
+        <!-- Start Menu shortcut so users can re-launch the toolbar after killing it -->
+        <StandardDirectory Id="ProgramMenuFolder" />
+
+        <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder" Guid="*" Bitness="always64">
+            <Shortcut Id="ExbarShortcut"
+                      Name="Exbar"
+                      Description="Floating folder-shortcut toolbar for File Explorer"
+                      Target="[INSTALLDIR]exbar.exe"
+                      Arguments="hook"
+                      WorkingDirectory="INSTALLDIR" />
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\Exbar"
+                Name="ShortcutInstalled"
+                Type="integer"
+                Value="1"
+                KeyPath="yes" />
+        </Component>
 
         <!-- exbar.exe component -->
         <Component Id="ExbarExe" Directory="INSTALLDIR" Guid="*" Bitness="always64">
