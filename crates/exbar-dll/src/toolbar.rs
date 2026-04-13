@@ -49,6 +49,12 @@ const GRIP_SIZE: i32 = 12;
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
 
+const MENU_ID_OPEN: u32 = 201;
+const MENU_ID_OPEN_NEW_TAB: u32 = 202;
+const MENU_ID_COPY_PATH: u32 = 203;
+const MENU_ID_RENAME: u32 = 204;
+const MENU_ID_REMOVE: u32 = 205;
+
 // ── Global state ──────────────────────────────────────────────────────────────
 
 /// The single global toolbar HWND (None if not yet created or destroyed).
@@ -753,9 +759,36 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             _ => {}
                         }
                     } else {
-                        // Task 8 will wire the folder menu here.
-                        crate::log::info(&format!("right-click on folder[{idx}] (menu coming in task 8)"));
-                        let _ = pt;
+                        let items = [
+                            crate::contextmenu::MenuItem { id: MENU_ID_OPEN,         label: "Open" },
+                            crate::contextmenu::MenuItem { id: MENU_ID_OPEN_NEW_TAB, label: "Open in new tab" },
+                            crate::contextmenu::MenuItem { id: MENU_ID_COPY_PATH,    label: "Copy path" },
+                            crate::contextmenu::SEPARATOR,
+                            crate::contextmenu::MenuItem { id: MENU_ID_RENAME,       label: "Rename" },
+                            crate::contextmenu::MenuItem { id: MENU_ID_REMOVE,       label: "Remove" },
+                        ];
+                        let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
+                        let path = state.buttons[idx].folder.path.clone();
+                        match chosen {
+                            MENU_ID_OPEN => {
+                                if let Some(explorer_hwnd) = get_active_explorer() {
+                                    if let Some(sb) = unsafe { crate::hook::get_shell_browser_for(explorer_hwnd) } {
+                                        let _ = crate::navigate::navigate_to(&sb, &path);
+                                    }
+                                }
+                            }
+                            MENU_ID_OPEN_NEW_TAB => {
+                                // Wired in Task 10.
+                                crate::log::info("open-in-new-tab (task 10)");
+                            }
+                            MENU_ID_COPY_PATH => { copy_to_clipboard(&path); }
+                            MENU_ID_RENAME => {
+                                // Wired in Task 9.
+                                crate::log::info("rename (task 9)");
+                            }
+                            MENU_ID_REMOVE => { remove_folder_at(hwnd, idx); }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -981,4 +1014,55 @@ fn open_config_in_editor() {
             SW_SHOWNORMAL,
         );
     }
+}
+
+fn copy_to_clipboard(text: &str) {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+    };
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let byte_size = wide.len() * std::mem::size_of::<u16>();
+
+    unsafe {
+        if OpenClipboard(None).is_err() { return; }
+        let _ = EmptyClipboard();
+
+        let hmem = match GlobalAlloc(GMEM_MOVEABLE, byte_size) {
+            Ok(h) if !h.is_invalid() => h,
+            _ => { let _ = CloseClipboard(); return; }
+        };
+        let dest = GlobalLock(hmem);
+        if dest.is_null() {
+            let _ = CloseClipboard();
+            return;
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, dest as *mut u8, byte_size);
+        let _ = GlobalUnlock(hmem);
+
+        // SetClipboardData takes ownership of the HGLOBAL on success.
+        let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(hmem.0)));
+        let _ = CloseClipboard();
+    }
+}
+
+fn remove_folder_at(hwnd: HWND, index: usize) {
+    let mut cfg = match crate::config::Config::load() {
+        Some(c) => c,
+        None => return,
+    };
+    // The toolbar's button index includes the + button at position 0; adjust.
+    if index == 0 { return; } // safety: + button never reaches here (is_add branch)
+    let folder_index = index - 1;
+    cfg.remove_folder(folder_index);
+    if let Err(e) = cfg.save() {
+        crate::log::error(&format!("remove_folder_at: save failed: {e}"));
+        return;
+    }
+    unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
 }
