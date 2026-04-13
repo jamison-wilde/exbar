@@ -554,13 +554,18 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // Install foreground window hook to auto-show/hide the toolbar
             install_foreground_hook();
 
-            // Initial visibility: only show if an Explorer window is foreground
-            let fg = unsafe { GetForegroundWindow() };
-            let fg_class = crate::explorer::get_class_name(fg);
-            if fg_class != "CabinetWClass" {
-                unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+            // Initial visibility: prefer the Explorer HWND that triggered creation
+            // (tracked in ACTIVE_EXPLORER by the CBT hook). GetForegroundWindow() is
+            // unreliable during HCBT_ACTIVATE handling because activation hasn't
+            // completed yet.
+            let explorer_hwnd = get_active_explorer().unwrap_or_else(|| unsafe { GetForegroundWindow() });
+            let class = crate::explorer::get_class_name(explorer_hwnd);
+            if class == "CabinetWClass" {
+                crate::log::info(&format!("toolbar create: showing above explorer={explorer_hwnd:?}"));
+                show_above(hwnd, explorer_hwnd);
             } else {
-                show_above(hwnd, fg);
+                crate::log::info(&format!("toolbar create: fg class={class}, hiding"));
+                unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
             }
 
             LRESULT(0)

@@ -189,6 +189,14 @@ const RUN_VALUE: &str = "Exbar";
 /// Load exbar_dll.dll and install a global CBT hook, then run a message
 /// loop to keep it alive.  This function never returns normally.
 fn run_hook() -> WinResult<()> {
+    // Detach from any inherited console so no terminal window appears
+    // (the MSI custom action launches us with a console; FreeConsole is
+    // a no-op if the process wasn't attached to one).
+    unsafe {
+        use windows::Win32::System::Console::FreeConsole;
+        let _ = FreeConsole();
+    }
+
     let dll_path = running_exe_dir().join("exbar_dll.dll");
     let dll_path_wide = to_wide_null(&dll_path.to_string_lossy());
 
@@ -220,9 +228,7 @@ fn run_hook() -> WinResult<()> {
         SetWindowsHookExW(WH_CBT, hook_proc, Some(hinstance), 0)?
     };
 
-    println!("Exbar hook running. Press Ctrl+C to stop.");
-
-    // Run the message loop to keep the hook alive
+    // Run the message loop to keep the hook alive (no println — console is detached)
     let mut msg = MSG::default();
     loop {
         let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
