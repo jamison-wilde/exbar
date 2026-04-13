@@ -24,9 +24,15 @@ exbar/
 │   │   │   ├── config.rs               # JSON config (~/.exbar.json)
 │   │   │   ├── theme.rs                # DPI scale, dark-mode detection, layout constants
 │   │   │   └── log.rs                  # %TEMP%\exbar.log writer
+│   │   ├── build.rs                    # winres version metadata
 │   │   └── tests/                      # integration tests using #[path = "../src/..."]
 │   └── exbar-cli/                      # bin — install/uninstall/hook/status
-│       └── src/main.rs
+│       ├── build.rs                    # winres version metadata
+│       ├── src/main.rs
+│       └── wix/
+│           └── main.wxs               # WiX v4 installer definition
+├── scripts/
+│   └── build-msi.sh                   # invokes `wix build` to produce the MSI
 ├── docs/
 │   └── superpowers/
 │       ├── specs/                      # design docs
@@ -42,16 +48,19 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
 - **Run unit tests:** `cargo test -p exbar-dll`
 - **Build only the DLL:** `cargo build --release -p exbar-dll` (faster iteration)
 - **Run the CLI:** `./target/release/exbar.exe <install|uninstall|status|hook>`
+- **Build MSI:** `./scripts/build-msi.sh` (requires WiX v7 installed — see "MSI installer" section)
+- **CLI subcommands**: `hook` (production, started by Run key), `status` (diagnostics). `install` and `uninstall` are dev-only fallbacks; end users use the MSI.
 
 ## Architecture
 
 ### Loading mechanism
 
-1. `exbar.exe hook` is registered in `HKCU\...\Run\Exbar` during install
-2. The hook process calls `SetWindowsHookExW(WH_CBT, ..., 0)` — a global hook
-3. Windows injects `exbar_dll.dll` into every process on the system
-4. `DllMain` in `lib.rs` early-returns unless the current process is `explorer.exe` (this is critical for stability — see "Stability guard" below)
-5. Inside `explorer.exe`, when a `CabinetWClass` window activates, the CBT hook calls `try_inject` which creates the toolbar (once, globally)
+1. The MSI installer writes `HKCU\...\Run\Exbar = "exbar.exe hook"` and launches the hook as a post-install action
+2. `exbar.exe hook` calls `SetWindowsHookExW(WH_CBT, ..., 0)` — a global hook
+3. Windows injects `exbar_dll.dll` into every process on the system as Explorer activations fire
+4. `DllMain` in `lib.rs` early-returns unless the current process is `explorer.exe` (stability guard — see "Stability guard" below)
+5. In `explorer.exe`, `DllMain` also pins the DLL via `GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, ...)` so the DLL stays loaded even after the hook process exits. Without this, killing `exbar.exe` would unload the DLL while its wndproc and WinEvent callback are still referenced — causing `explorer.exe` to crash.
+6. When a `CabinetWClass` window activates, the CBT hook calls `try_inject` which creates the toolbar (once, globally)
 
 ### Toolbar window
 
@@ -100,6 +109,7 @@ The guard is in `lib.rs::DllMain`:
   - `DeleteObject` expects `HGDIOBJ`; convert with `.into()` from `HBRUSH` / `HPEN` / `HFONT`
 - **Win11 Explorer window hierarchy**: command bar is rendered by `Microsoft.UI.Content.DesktopChildSiteBridge` (WinUI 3 XAML). Cannot inject Win32 child windows into that hierarchy. We use a separate top-level popup instead. The old approach of overlaying the command bar area is abandoned — don't reintroduce it.
 - **`WINEVENT_SKIPOWNPROCESS`**: do NOT set this flag on the foreground-window WinEvent hook. Most events we care about (Explorer activations) happen in explorer.exe itself.
+- **Hook process must not show a console**: `exbar.exe hook` calls `FreeConsole()` at the start to detach from any inherited console. The MSI's post-install custom action otherwise opens a visible terminal window. Don't add `println!` calls in `run_hook()` after `FreeConsole` — they'll silently no-op.
 
 ## Logging
 
@@ -129,6 +139,29 @@ rm -f %TEMP%/exbar.log
 
 # 5. Restart hook
 ./target/release/exbar.exe hook
+```
+
+## MSI installer (WiX)
+
+The installer is defined in `crates/exbar-cli/wix/main.wxs` (WiX v4 schema). Built via `./scripts/build-msi.sh` which invokes `wix build` directly — `cargo-wix` v0.3 generates WiX v3 templates and can't drive WiX v7.
+
+The MSI:
+- **Per-user install** (`Scope="perUser"`) to `%LOCALAPPDATA%\Exbar\` — no UAC prompt
+- **Run key** at `HKCU\...\Run\Exbar` so the hook auto-starts at login
+- **Uninstall entry** under `HKCU\...\Uninstall\Exbar` so it appears in Settings → Apps
+- **Start Menu shortcut** so users can re-launch after killing the hook
+- **Post-install custom action** launches `exbar.exe hook` immediately (deferred, impersonated, async-no-wait)
+- **`util:CloseApplication`** shuts down running `exbar.exe` before file replacement on upgrade/uninstall
+
+The WiX Util extension (`WixToolset.Util.wixext`) is required for `util:CloseApplication`.
+
+**UpgradeCode** `E47632D3-B73C-4EE3-B987-D2E04332BCDB` is fixed in `main.wxs` and must never change across versions. Changing it makes new versions install side-by-side instead of replacing the old one.
+
+WiX v7 install (one-time per machine):
+```
+dotnet tool install --global wix
+wix eula accept wix7
+wix extension add --global WixToolset.Util.wixext
 ```
 
 ## Adding a new feature
