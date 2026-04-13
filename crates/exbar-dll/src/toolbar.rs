@@ -1087,10 +1087,10 @@ static RENAME_STATE: std::sync::Mutex<Option<RenameState>> = std::sync::Mutex::n
 
 struct RenameState {
     edit_hwnd: isize,
-    folder_index: usize,
-    toolbar_hwnd: isize,
     /// Raw `Box<RenameSubclassData>` pointer handed to `SetWindowSubclass`.
     /// Stored so `cancel_inline_rename` can reclaim the Box on parent teardown.
+    /// `folder_index` and `toolbar_hwnd` live in the Box; the subclass proc
+    /// reads them from `ref_data`.
     subclass_data: usize,
 }
 
@@ -1148,8 +1148,6 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
 
     *RENAME_STATE.lock().unwrap() = Some(RenameState {
         edit_hwnd: edit.0 as isize,
-        folder_index,
-        toolbar_hwnd: toolbar.0 as isize,
         subclass_data: data as usize,
     });
 }
