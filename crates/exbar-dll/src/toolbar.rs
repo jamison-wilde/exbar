@@ -1081,6 +1081,9 @@ struct RenameState {
     edit_hwnd: isize,
     folder_index: usize,
     toolbar_hwnd: isize,
+    /// Raw `Box<RenameSubclassData>` pointer handed to `SetWindowSubclass`.
+    /// Stored so `cancel_inline_rename` can reclaim the Box on parent teardown.
+    subclass_data: usize,
 }
 
 fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, initial_name: &str) {
@@ -1139,6 +1142,7 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
         edit_hwnd: edit.0 as isize,
         folder_index,
         toolbar_hwnd: toolbar.0 as isize,
+        subclass_data: data as usize,
     });
 }
 
@@ -1177,6 +1181,7 @@ unsafe extern "system" fn rename_subclass_proc(
         }
         WM_KILLFOCUS => {
             commit_rename(hwnd, ref_data);
+            return LRESULT(0);
         }
         _ => {}
     }
@@ -1227,5 +1232,12 @@ fn cancel_inline_rename() {
     if let Some(s) = state {
         let edit = HWND(s.edit_hwnd as *mut _);
         destroy_rename_edit(edit);
+        // Reclaim the Box leaked into SetWindowSubclass; RemoveWindowSubclass
+        // inside destroy_rename_edit ran before this, so no callback can race.
+        if s.subclass_data != 0 {
+            unsafe {
+                drop(Box::from_raw(s.subclass_data as *mut RenameSubclassData));
+            }
+        }
     }
 }
