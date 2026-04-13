@@ -93,7 +93,10 @@ pub fn open_in_new_tab(target_explorer: Option<HWND>, path: &str, timeout_ms: u3
 }
 
 fn open_in_new_window(path: &str) {
-    let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    // Quote the path so explorer.exe's command-line parser treats
+    // paths like "C:\Program Files" as one argument.
+    let quoted = format!("\"{path}\"");
+    let path_wide: Vec<u16> = quoted.encode_utf16().chain(std::iter::once(0)).collect();
     let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
     let exe: Vec<u16> = "explorer.exe".encode_utf16().chain(std::iter::once(0)).collect();
 
