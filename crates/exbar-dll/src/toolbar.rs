@@ -402,7 +402,10 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
 
         if let Some(ref config) = state.config.clone() {
             for entry in &config.folders {
-                let w = pad_h + (entry.name.chars().count() as i32 * char_w) + pad_h;
+                // Match the vertical formula: padding + icon + gap + text + padding.
+                // The drawn label is "📁 Name"; omitting the icon width cuts
+                // off short names like "3D".
+                let w = pad_h + s(14) + s(4) + (entry.name.chars().count() as i32 * char_w) + pad_h;
                 state.buttons.push(ButtonLayout {
                     rect: RECT { left: x, top: 0, right: x + w, bottom: btn_h },
                     folder: entry.clone(),

@@ -44,12 +44,23 @@ pub enum DropAction {
 /// Closure type: given client (x, y), returns the drop action for that location.
 pub type DropResolver = Box<dyn Fn(i32, i32) -> Option<DropAction> + Send + Sync>;
 
+/// Per-drag data cached at DragEnter so DragOver can recompute the effect
+/// whenever the cursor moves to a different target — without re-reading the
+/// IDataObject on every mouse move.
+#[derive(Clone)]
+struct DragSession {
+    /// Drive letter of the first dragged item, if resolvable.
+    source_drive: Option<char>,
+    /// True if CF_HDROP contains exactly one path and it is a directory.
+    is_single_directory: bool,
+}
+
 #[implement(IDropTarget)]
 pub struct FolderDropTarget {
     hwnd: HWND,
     resolver: DropResolver,
-    current_effect: Mutex<DROPEFFECT>,
     current_action: Mutex<Option<DropAction>>,
+    session: Mutex<Option<DragSession>>,
 }
 
 impl FolderDropTarget {
@@ -57,8 +68,8 @@ impl FolderDropTarget {
         FolderDropTarget {
             hwnd,
             resolver,
-            current_effect: Mutex::new(DROPEFFECT_NONE),
             current_action: Mutex::new(None),
+            session: Mutex::new(None),
         }
     }
 }
@@ -215,7 +226,7 @@ unsafe fn hdrop_file_count(data_object: &IDataObject) -> Option<u32> {
 
 fn determine_effect(
     key_state: MODIFIERKEYS_FLAGS,
-    data_object: &IDataObject,
+    source_drive: Option<char>,
     target_path: &str,
 ) -> DROPEFFECT {
     if key_state.contains(MK_CONTROL) {
@@ -229,16 +240,22 @@ fn determine_effect(
     let real_target = resolve_to_real_path(target_path);
     let target_drive = drive_letter(&real_target);
 
-    let source_drive = unsafe { first_path_from_data_object(data_object) }
-        .map(|p| resolve_to_real_path(&p))
-        .and_then(|p| drive_letter(&p));
-
     match (source_drive, target_drive) {
         (Some(s), Some(t)) if s == t => DROPEFFECT_MOVE,
         // If resolution failed for target, default to MOVE (same-drive is more common).
         (_, None) => DROPEFFECT_MOVE,
         _ => DROPEFFECT_COPY,
     }
+}
+
+/// Read the IDataObject once and cache everything DragOver will need.
+/// Called at DragEnter.
+fn build_session(data_object: &IDataObject) -> DragSession {
+    let source_drive = unsafe { first_path_from_data_object(data_object) }
+        .map(|p| resolve_to_real_path(&p))
+        .and_then(|p| drive_letter(&p));
+    let is_single_directory = dropped_is_single_directory(data_object);
+    DragSession { source_drive, is_single_directory }
 }
 
 // ── Execute drop ──────────────────────────────────────────────────────────────
@@ -291,6 +308,29 @@ impl FolderDropTarget_Impl {
     }
 }
 
+/// Compute the effect for the current (action, session, keystate) tuple.
+/// Pure function over cached state — no IDataObject access.
+fn effect_for(
+    action: Option<&DropAction>,
+    session: Option<&DragSession>,
+    keystate: MODIFIERKEYS_FLAGS,
+) -> DROPEFFECT {
+    match action {
+        Some(DropAction::MoveCopyTo(target)) => {
+            let src = session.and_then(|s| s.source_drive);
+            determine_effect(keystate, src, target)
+        }
+        Some(DropAction::AddFolder) => {
+            if session.map(|s| s.is_single_directory).unwrap_or(false) {
+                DROPEFFECT_COPY
+            } else {
+                DROPEFFECT_NONE
+            }
+        }
+        None => DROPEFFECT_NONE,
+    }
+}
+
 impl IDropTarget_Impl for FolderDropTarget_Impl {
     fn DragEnter(
         &self,
@@ -299,18 +339,14 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         pt: &windows::Win32::Foundation::POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
+        // Cache everything we'll need for every subsequent DragOver.
+        let session = pdataobj.as_ref().map(build_session);
+        *self.session.lock().unwrap() = session.clone();
+
         let action = self.resolve_action(pt);
         *self.current_action.lock().unwrap() = action.clone();
 
-        let effect = match (pdataobj.as_ref(), action.as_ref()) {
-            (Some(d), Some(DropAction::MoveCopyTo(p))) => determine_effect(grfkeystate, d, p),
-            (Some(d), Some(DropAction::AddFolder)) => {
-                if dropped_is_single_directory(d) { DROPEFFECT_COPY } else { DROPEFFECT_NONE }
-            }
-            _ => DROPEFFECT_NONE,
-        };
-
-        *self.current_effect.lock().unwrap() = effect;
+        let effect = effect_for(action.as_ref(), session.as_ref(), grfkeystate);
         if !pdweffect.is_null() { unsafe { *pdweffect = effect }; }
         Ok(())
     }
@@ -324,27 +360,15 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         let action = self.resolve_action(pt);
         *self.current_action.lock().unwrap() = action.clone();
 
-        let effect = match action.as_ref() {
-            Some(DropAction::MoveCopyTo(_)) => {
-                if grfkeystate.contains(MK_CONTROL) { DROPEFFECT_COPY }
-                else if grfkeystate.contains(MK_SHIFT) { DROPEFFECT_MOVE }
-                else { *self.current_effect.lock().unwrap() }
-            }
-            Some(DropAction::AddFolder) => {
-                // Effect decided in DragEnter based on data; keep it.
-                *self.current_effect.lock().unwrap()
-            }
-            None => DROPEFFECT_NONE,
-        };
-
-        *self.current_effect.lock().unwrap() = effect;
+        let session = self.session.lock().unwrap().clone();
+        let effect = effect_for(action.as_ref(), session.as_ref(), grfkeystate);
         if !pdweffect.is_null() { unsafe { *pdweffect = effect }; }
         Ok(())
     }
 
     fn DragLeave(&self) -> Result<()> {
-        *self.current_effect.lock().unwrap() = DROPEFFECT_NONE;
         *self.current_action.lock().unwrap() = None;
+        *self.session.lock().unwrap() = None;
         Ok(())
     }
 
@@ -362,17 +386,19 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
 
         let action = self.resolve_action(pt)
             .or_else(|| self.current_action.lock().unwrap().clone());
+        let session = self.session.lock().unwrap().clone();
 
-        match action {
+        let result = match action {
             Some(DropAction::MoveCopyTo(target_path)) => {
-                let effect = determine_effect(grfkeystate, data_obj, &target_path);
+                let src = session.as_ref().and_then(|s| s.source_drive);
+                let effect = determine_effect(grfkeystate, src, &target_path);
                 if !pdweffect.is_null() { unsafe { *pdweffect = effect }; }
                 crate::log::info(&format!("drop: target={target_path:?} effect={effect:?}"));
                 unsafe { execute_drop(data_obj, effect, &target_path) }
             }
             Some(DropAction::AddFolder) => {
                 // Guard against multi-selection/file drops that slipped past DragOver.
-                if !dropped_is_single_directory(data_obj) {
+                if !session.map(|s| s.is_single_directory).unwrap_or(false) {
                     if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_NONE }; }
                     return Ok(());
                 }
@@ -388,7 +414,12 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
                 if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_NONE }; }
                 Ok(())
             }
-        }
+        };
+
+        // Clear session after the drop completes.
+        *self.session.lock().unwrap() = None;
+        *self.current_action.lock().unwrap() = None;
+        result
     }
 }
 
