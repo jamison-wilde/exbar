@@ -12,6 +12,7 @@ pub mod explorer;
 pub mod toolbar;
 pub mod navigate;
 pub mod hook;
+pub mod contextmenu;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static mut HMODULE: HINSTANCE = HINSTANCE(std::ptr::null_mut());

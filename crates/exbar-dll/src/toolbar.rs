@@ -46,6 +46,9 @@ const ADD_SIZE: i32 = 28;
 /// Logical pixel width/height of the drag handle grip area.
 const GRIP_SIZE: i32 = 12;
 
+const MENU_ID_EDIT_CONFIG: u32 = 101;
+const MENU_ID_RELOAD_CONFIG: u32 = 102;
+
 // ── Global state ──────────────────────────────────────────────────────────────
 
 /// The single global toolbar HWND (None if not yet created or destroyed).
@@ -733,13 +736,25 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     let mut pt = POINT { x, y };
                     unsafe { ClientToScreen(hwnd, &mut pt); }
                     if state.buttons[idx].is_add {
-                        // Task 5 will wire the + menu here.
-                        crate::log::info("right-click on + (menu coming in task 5)");
+                        let items = [
+                            crate::contextmenu::MenuItem { id: MENU_ID_EDIT_CONFIG,   label: "Edit config" },
+                            crate::contextmenu::MenuItem { id: MENU_ID_RELOAD_CONFIG, label: "Reload config" },
+                        ];
+                        let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
+                        match chosen {
+                            MENU_ID_EDIT_CONFIG => open_config_in_editor(),
+                            MENU_ID_RELOAD_CONFIG => {
+                                unsafe {
+                                    let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
+                                }
+                            }
+                            _ => {}
+                        }
                     } else {
                         // Task 8 will wire the folder menu here.
                         crate::log::info(&format!("right-click on folder[{idx}] (menu coming in task 8)"));
+                        let _ = pt;
                     }
-                    let _ = pt; // silence unused warning until menus are wired
                 }
             }
             LRESULT(0)
@@ -909,5 +924,25 @@ pub fn refresh_toolbar(hwnd: HWND) {
         let _ = SetWindowPos(hwnd, None, 0, 0, w, h,
             SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE);
         let _ = InvalidateRect(Some(hwnd), None, true);
+    }
+}
+
+fn open_config_in_editor() {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let path = crate::config::default_config_path();
+    let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let verb_wide: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let _ = ShellExecuteW(
+            None,
+            PCWSTR(verb_wide.as_ptr()),
+            PCWSTR(path_wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
