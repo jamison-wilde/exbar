@@ -30,7 +30,7 @@ Every release MUST pass this checklist before the tag is pushed and the MSI is p
 
 - [ ] Open Explorer (Win+E). Toolbar appears within ~1 second
 - [ ] Click a configured folder button → Explorer navigates to that folder
-- [ ] Click refresh button (⟳) → no error (config reloads silently if unchanged)
+- [ ] Toolbar shows `+` button (not the old ↻ glyph)
 - [ ] Drag a file on `C:` to a folder button whose target is also on `C:` → file moves
 - [ ] Drag a file on `D:` to a folder button whose target is on `C:` → file copies
 - [ ] Drag a file while holding `Ctrl` → forces copy
@@ -47,6 +47,27 @@ Every release MUST pass this checklist before the tag is pushed and the MSI is p
 - [ ] `taskkill /f /im exbar.exe` — Explorer does NOT crash; toolbar stays visible
 - [ ] Open a save dialog in another app (e.g., Notepad → File → Save As) — the dialog opens normally without crash
 - [ ] Click Start menu → "Exbar" → Enter — toolbar still visible (re-launching doesn't break things)
+
+## v0.2.0 UI additions
+
+- [ ] Click `+` → folder picker opens at `C:\`; pick any folder → button appears at end
+- [ ] Click `+` → Cancel → no-op, nothing added
+- [ ] Drag a folder from Explorer onto `+` → button appears at end with the folder's basename
+- [ ] Drag a file (not folder) onto `+` → cursor shows "no", nothing added
+- [ ] Right-click `+` → menu shows **Edit config** and **Reload config**
+- [ ] **Edit config** opens `~/.exbar.json` in Notepad (or default `.json` handler)
+- [ ] Edit the JSON manually, save, then right-click `+` → **Reload config** — toolbar updates
+- [ ] Right-click a folder button → menu shows **Open / Open in new tab / Copy path / --- / Rename / Remove**
+- [ ] **Open** navigates current Explorer to the folder (same as left-click)
+- [ ] **Copy path** places the literal path on the clipboard (paste into Notepad to verify)
+- [ ] **Remove** deletes the entry immediately, no confirmation
+- [ ] **Rename** shows an inline edit field over the button; Enter commits and updates config
+- [ ] Rename: press Esc → cancels, name unchanged
+- [ ] Rename: click elsewhere → commits (focus loss)
+- [ ] Rename: clear the name (empty string) + Enter → old name preserved
+- [ ] Ctrl+left-click a folder button → opens in a new Explorer tab in the current window
+- [ ] Set `newTabTimeoutMsZeroDisables: 0` in config + Reload → ctrl-click opens a new Explorer window instead
+- [ ] Test a path with spaces (e.g., `C:\Program Files`) — both tab and fallback-window open the correct folder
 
 ## Uninstall
 
