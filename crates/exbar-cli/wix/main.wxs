@@ -49,7 +49,10 @@
                       Return="asyncNoWait" />
 
         <InstallExecuteSequence>
-            <Custom Action="LaunchHook" After="InstallFinalize" Condition="NOT Installed" />
+            <!-- Deferred actions must run inside the install transaction,
+                 i.e. between InstallInitialize and InstallFinalize. Scheduling
+                 after InstallFinalize causes Windows Installer error 2762. -->
+            <Custom Action="LaunchHook" Before="InstallFinalize" Condition="NOT Installed" />
         </InstallExecuteSequence>
 
         <StandardDirectory Id="LocalAppDataFolder">
