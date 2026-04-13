@@ -49,7 +49,12 @@ unsafe extern "system" fn DllMain(
                 return TRUE;
             }
             INITIALIZED.store(false, Ordering::SeqCst);
-            log::info("DllMain: DLL_PROCESS_DETACH");
+            log::info("DllMain: DLL_PROCESS_DETACH — cleaning up");
+            // Critical: tear down anything that holds callbacks into our DLL.
+            // Without this, explorer.exe crashes on the next message dispatch
+            // after our DLL gets unmapped (the toolbar's wndproc and the
+            // SetWinEventHook callback both live in this DLL).
+            toolbar::cleanup_for_unload();
         }
         _ => {}
     }

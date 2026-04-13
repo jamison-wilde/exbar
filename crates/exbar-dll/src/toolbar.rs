@@ -91,6 +91,9 @@ fn get_global_toolbar_hwnd() -> Option<HWND> {
 static FOREGROUND_HOOK_INSTALLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Stored HWINEVENTHOOK so we can UnhookWinEvent on DLL unload.
+static FOREGROUND_HOOK: Mutex<Option<isize>> = Mutex::new(None);
+
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
 const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
@@ -183,7 +186,7 @@ fn install_foreground_hook() {
     if FOREGROUND_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
-    unsafe {
+    let hook = unsafe {
         SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
             EVENT_SYSTEM_MINIMIZEEND, // range covers FOREGROUND, MINIMIZESTART, MINIMIZEEND
@@ -191,9 +194,32 @@ fn install_foreground_hook() {
             Some(foreground_event_proc),
             0, 0,
             WINEVENT_OUTOFCONTEXT,
-        );
-    }
+        )
+    };
+    *FOREGROUND_HOOK.lock().unwrap() = Some(hook.0 as isize);
     crate::log::info("Installed foreground event hook");
+}
+
+/// Tear down the toolbar window and unhook the WinEvent hook.
+/// Called from DllMain DLL_PROCESS_DETACH so explorer.exe doesn't crash
+/// when our DLL gets unloaded (the toolbar's wndproc and the WinEvent
+/// callback are both in our DLL — they MUST stop being referenced before
+/// our code is unmapped).
+pub fn cleanup_for_unload() {
+    use windows::Win32::UI::Accessibility::UnhookWinEvent;
+    use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+    // Unhook WinEvent first so no more events dispatch into our about-to-be-gone callback
+    if let Some(hook_raw) = FOREGROUND_HOOK.lock().unwrap().take() {
+        let hook = HWINEVENTHOOK(hook_raw as *mut _);
+        unsafe { let _ = UnhookWinEvent(hook); }
+    }
+
+    // Destroy the toolbar window so its wndproc doesn't get called after unload
+    if let Some(hwnd_raw) = GLOBAL_TOOLBAR.lock().unwrap().take() {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        unsafe { let _ = DestroyWindow(hwnd); }
+    }
 }
 
 // ── Position persistence ──────────────────────────────────────────────────────
