@@ -35,14 +35,14 @@ use crate::theme;
 
 static CLASS_REGISTERED: Once = Once::new();
 const CLASS_NAME: &str = "ExbarToolbar";
-const WM_USER_REFRESH: u32 = 0x0401;
+const WM_USER_RELOAD: u32 = 0x0401;
 const WM_DPICHANGED: u32 = 0x02E0;
 
 // Layout constants (logical pixels, scale by DPI)
 const BTN_PAD_H: i32 = 10;
 const BTN_PAD_V: i32 = 4;
 const BTN_GAP: i32 = 2;
-const REFRESH_SIZE: i32 = 28;
+const ADD_SIZE: i32 = 28;
 /// Logical pixel width/height of the drag handle grip area.
 const GRIP_SIZE: i32 = 12;
 
@@ -293,7 +293,8 @@ fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, ref_hwnd: Option<HWND>) ->
 struct ButtonLayout {
     rect: RECT,
     folder: FolderEntry,
-    is_refresh: bool,
+    /// The synthetic "add folder" button (formerly the refresh glyph).
+    is_add: bool,
 }
 
 struct ToolbarState {
@@ -334,7 +335,7 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
     let dpi = state.dpi;
     let s = |px: i32| theme::scale(px, dpi);
 
-    let btn_h = s(REFRESH_SIZE);
+    let btn_h = s(ADD_SIZE);
     let pad_h = s(BTN_PAD_H);
     let gap = s(BTN_GAP);
     let grip = state.grip_size;
@@ -346,7 +347,7 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
 
     let char_w = s(8);
 
-    let mut max_btn_w = s(REFRESH_SIZE);
+    let mut max_btn_w = s(ADD_SIZE);
     for name in &folder_names {
         let w = pad_h + s(14) + s(4) + (name.chars().count() as i32 * char_w) + pad_h;
         if w > max_btn_w { max_btn_w = w; }
@@ -358,8 +359,8 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
 
         state.buttons.push(ButtonLayout {
             rect: RECT { left: 0, top: y, right: max_btn_w, bottom: y + btn_h },
-            folder: FolderEntry { name: "\u{21BB}".into(), path: String::new(), icon: None },
-            is_refresh: true,
+            folder: FolderEntry { name: "+".into(), path: String::new(), icon: None },
+            is_add: true,
         });
         y += btn_h + gap;
 
@@ -368,7 +369,7 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
                 state.buttons.push(ButtonLayout {
                     rect: RECT { left: 0, top: y, right: max_btn_w, bottom: y + btn_h },
                     folder: entry.clone(),
-                    is_refresh: false,
+                    is_add: false,
                 });
                 y += btn_h + gap;
             }
@@ -379,11 +380,11 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
         // Grip on left, then refresh, then folder buttons
         let mut x = grip; // skip grip column
 
-        let refresh_w = s(REFRESH_SIZE);
+        let refresh_w = s(ADD_SIZE);
         state.buttons.push(ButtonLayout {
             rect: RECT { left: x, top: 0, right: x + refresh_w, bottom: btn_h },
-            folder: FolderEntry { name: "\u{21BB}".into(), path: String::new(), icon: None },
-            is_refresh: true,
+            folder: FolderEntry { name: "+".into(), path: String::new(), icon: None },
+            is_add: true,
         });
         x += refresh_w + gap;
 
@@ -393,7 +394,7 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
                 state.buttons.push(ButtonLayout {
                     rect: RECT { left: x, top: 0, right: x + w, bottom: btn_h },
                     folder: entry.clone(),
-                    is_refresh: false,
+                    is_add: false,
                 });
                 x += w + gap;
             }
@@ -517,20 +518,20 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
             unsafe { DeleteObject(hbr.into()); }
         }
 
-        let label = if btn.is_refresh {
-            "\u{21BB}".to_string()
+        let label = if btn.is_add {
+            "+".to_string()
         } else {
             format!("\u{1F4C1} {}", btn.folder.name)
         };
 
         let mut label_wide: Vec<u16> = label.encode_utf16().collect();
         let mut draw_rect = btn.rect;
-        let flags = if btn.is_refresh {
+        let flags = if btn.is_add {
             DT_SINGLELINE | DT_VCENTER | DT_CENTER
         } else {
             DT_SINGLELINE | DT_VCENTER
         };
-        if !btn.is_refresh {
+        if !btn.is_add {
             draw_rect.left += theme::scale(BTN_PAD_H, state.dpi);
         }
         unsafe { DrawTextW(hdc, &mut label_wide, &mut draw_rect, flags); }
@@ -704,8 +705,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let clicked = hit_test(state, x, y);
                 if clicked.is_some() && clicked == state.pressed_index {
                     let idx = clicked.unwrap();
-                    if state.buttons[idx].is_refresh {
-                        unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_REFRESH, WPARAM(0), LPARAM(0)); }
+                    if state.buttons[idx].is_add {
+                        unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
                     } else {
                         let path = state.buttons[idx].folder.path.clone();
                         // Get the active Explorer fresh at click time.
@@ -722,7 +723,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
-        x if x == WM_USER_REFRESH => {
+        x if x == WM_USER_RELOAD => {
             refresh_toolbar(hwnd);
             LRESULT(0)
         }
@@ -777,7 +778,7 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
 
     // Capture button rects + paths for the closure (avoids holding borrow on state).
     let button_info: Vec<(RECT, String)> = state.buttons.iter()
-        .filter(|b| !b.is_refresh)
+        .filter(|b| !b.is_add)
         .map(|b| (b.rect, b.folder.path.clone()))
         .collect();
 
