@@ -20,6 +20,9 @@ mod theme;
 mod config;
 mod explorer;
 mod shell_windows;
+mod navigate;
+mod picker;
+mod contextmenu;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
