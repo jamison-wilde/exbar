@@ -1,3 +1,12 @@
+// In release builds, mark this binary as Windows-subsystem so no console
+// is allocated at launch. A console-subsystem binary, when launched via
+// the MSI post-install action, the Run key, or a Start Menu shortcut,
+// causes Windows Terminal (if set as default terminal) to briefly claim
+// the console as a new tab — which then vanishes when `FreeConsole()`
+// runs inside `run_hook()`. Debug builds remain console-subsystem so
+// `cargo run -- status` prints to the terminal during development.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use clap::{Parser, Subcommand};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
