@@ -20,7 +20,7 @@ use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, PostMessageW, RegisterClassExW,
     SetWindowLongPtrW, GetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, GWLP_USERDATA, WNDCLASSEXW, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    CS_VREDRAW, GWLP_USERDATA, WNDCLASSEXW, WM_CREATE, WM_CLOSE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_PAINT, WS_POPUP, WS_VISIBLE, WS_EX_TOOLWINDOW,
     WM_NCHITTEST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE, HTCAPTION,
     WS_EX_LAYERED, SetLayeredWindowAttributes, LWA_ALPHA,
@@ -695,10 +695,21 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
+        WM_CLOSE => {
+            // Never let the toolbar be closed via WM_CLOSE (Alt+F4, explorer
+            // taskbar "close window", etc.). DefWindowProc's default for
+            // WM_CLOSE is DestroyWindow, which would orphan the global state
+            // and cause us to recreate the toolbar from scratch on the next
+            // Explorer activation.
+            crate::log::info("toolbar: ignoring WM_CLOSE");
+            LRESULT(0)
+        }
+
         WM_DESTROY => {
+            crate::log::info("toolbar: WM_DESTROY (window is being torn down)");
             clear_global_toolbar();
             cancel_inline_rename();
-            crate::dragdrop::unregister_drop_target(hwnd);
+            let _ = crate::dragdrop::unregister_drop_target(hwnd);
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
@@ -802,12 +813,19 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         }
 
         x if x == WM_CAPTURECHANGED => {
+            // Only tear down state for an externally-interrupted active
+            // reorder (alt-tab, etc.). WM_LBUTTONUP's own ReleaseCapture
+            // also triggers this synchronously — if we cleared pressed_index
+            // here, the click-firing check further down in WM_LBUTTONUP would
+            // see None and silently drop the navigate call.
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
                 let state = unsafe { &mut *ptr };
-                state.reorder = None;
-                state.pressed_index = None;
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                if state.reorder.as_ref().map(|r| r.active).unwrap_or(false) {
+                    state.reorder = None;
+                    state.pressed_index = None;
+                    unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                }
             }
             LRESULT(0)
         }
