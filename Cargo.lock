@@ -137,16 +137,6 @@ name = "exbar-cli"
 version = "0.2.0"
 dependencies = [
  "clap",
- "serde_json",
- "windows",
- "windows-core",
- "winres",
-]
-
-[[package]]
-name = "exbar-dll"
-version = "0.2.0"
-dependencies = [
  "serde",
  "serde_json",
  "tempfile",

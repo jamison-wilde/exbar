@@ -35,7 +35,6 @@
 
         <Feature Id="Main" Title="Exbar" Level="1">
             <ComponentRef Id="ExbarExe" />
-            <ComponentRef Id="ExbarDll" />
             <ComponentRef Id="RunKey" />
             <ComponentRef Id="UninstallEntry" />
             <ComponentRef Id="StartMenuShortcut" />
@@ -83,13 +82,6 @@
         <Component Id="ExbarExe" Directory="INSTALLDIR" Guid="*" Bitness="always64">
             <File Id="ExbarExeFile"
                   Source="$(CargoTargetBinDir)\exbar.exe"
-                  KeyPath="yes" />
-        </Component>
-
-        <!-- exbar_dll.dll component -->
-        <Component Id="ExbarDll" Directory="INSTALLDIR" Guid="*" Bitness="always64">
-            <File Id="ExbarDllFile"
-                  Source="$(CargoTargetBinDir)\exbar_dll.dll"
                   KeyPath="yes" />
         </Component>
 
