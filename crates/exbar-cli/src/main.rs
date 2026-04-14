@@ -23,6 +23,8 @@ mod shell_windows;
 mod navigate;
 mod picker;
 mod contextmenu;
+mod dragdrop;
+mod toolbar;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
