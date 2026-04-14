@@ -18,6 +18,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 mod log;
 mod theme;
 mod config;
+mod explorer;
+mod shell_windows;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
