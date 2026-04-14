@@ -18,9 +18,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DLGC_WANTALLKEYS, DefWindowProcW,
     DestroyWindow, GWLP_USERDATA, GetClientRect, GetForegroundWindow, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowTextW, HTCAPTION, LWA_ALPHA, PostMessageW,
-    RegisterClassExW, SPI_GETWORKAREA, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetLayeredWindowAttributes,
+    GetWindowTextLengthW, GetWindowTextW, HTCAPTION, LWA_ALPHA, PostMessageW, RegisterClassExW,
+    SPI_GETWORKAREA, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetLayeredWindowAttributes,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, WM_CAPTURECHANGED,
     WM_CREATE, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WNDCLASSEXW, WS_BORDER, WS_CHILD,
@@ -194,7 +194,9 @@ unsafe extern "system" fn foreground_event_proc(
         set_active_explorer(hwnd);
         // First time we see an Explorer foreground, create the toolbar.
         // If not ready, retry logic is deferred to Task 8.
-        if tb_opt.is_none() && let Some(info) = crate::explorer::check_explorer_ready(hwnd) {
+        if tb_opt.is_none()
+            && let Some(info) = crate::explorer::check_explorer_ready(hwnd)
+        {
             let hinst = exe_hinstance();
             let _ = create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
         }

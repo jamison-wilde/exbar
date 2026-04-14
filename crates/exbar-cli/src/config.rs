@@ -110,8 +110,7 @@ impl Config {
     }
 
     pub fn save_to_path(&self, path: &str) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         fs::write(path, json)
     }
 

@@ -48,4 +48,3 @@ pub fn get_dpi(hwnd: HWND) -> u32 {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     if dpi == 0 { 96 } else { dpi }
 }
-
