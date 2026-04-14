@@ -20,7 +20,7 @@ use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, PostMessageW, RegisterClassExW,
     SetWindowLongPtrW, GetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, GWLP_USERDATA, WNDCLASSEXW, WM_CREATE, WM_CLOSE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    CS_VREDRAW, GWLP_USERDATA, WNDCLASSEXW, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_PAINT, WS_POPUP, WS_VISIBLE, WS_EX_TOOLWINDOW,
     WM_NCHITTEST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE, HTCAPTION,
     WS_EX_LAYERED, SetLayeredWindowAttributes, LWA_ALPHA,
@@ -724,18 +724,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
-        WM_CLOSE => {
-            // Never let the toolbar be closed via WM_CLOSE (Alt+F4, explorer
-            // taskbar "close window", etc.). DefWindowProc's default for
-            // WM_CLOSE is DestroyWindow, which would orphan the global state
-            // and cause us to recreate the toolbar from scratch on the next
-            // Explorer activation.
-            crate::log::info("toolbar: ignoring WM_CLOSE");
-            LRESULT(0)
-        }
-
         WM_DESTROY => {
-            crate::log::info("toolbar: WM_DESTROY (window is being torn down)");
+            crate::log::info("toolbar: WM_DESTROY — exiting process");
             clear_global_toolbar();
             cancel_inline_rename();
             let _ = crate::dragdrop::unregister_drop_target(hwnd);
@@ -743,6 +733,19 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             if !ptr.is_null() {
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
                 drop(unsafe { Box::from_raw(ptr) });
+            }
+            // Tell the message loop to exit — the toolbar is the only
+            // reason exbar.exe runs, so its destruction should end the
+            // process. This lets `taskkill /im exbar.exe` (polite) AND
+            // the MSI's util:CloseApplication actually terminate us
+            // cleanly instead of waiting for the force-terminate timeout.
+            //
+            // WS_EX_NOACTIVATE means Alt+F4 can never target our window,
+            // and we're in our own process so Explorer's taskbar can't
+            // touch us — so the only paths into WM_DESTROY are our own
+            // cleanup code and legitimate close requests.
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
             }
             LRESULT(0)
         }
