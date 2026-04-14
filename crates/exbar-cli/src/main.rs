@@ -36,8 +36,10 @@ mod toolbar;
 #[derive(Parser)]
 #[command(name = "exbar", about = "Manage the Exbar Explorer toolbar")]
 struct Cli {
+    /// No subcommand = run as hook (this is how the MSI's WixShellExec
+    /// launches us post-install, and how the Start Menu shortcut works).
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -58,7 +60,7 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
-    match cli.command {
+    match cli.command.unwrap_or(Commands::Hook) {
         Commands::Install => {
             if let Err(e) = install() {
                 eprintln!("Install failed: {e}");

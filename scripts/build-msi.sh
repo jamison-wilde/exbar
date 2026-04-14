@@ -26,8 +26,10 @@ mkdir -p "$REPO_ROOT/target/wix"
 wix build -arch x64 \
   -d "Version=${VERSION}" \
   -d "CargoTargetBinDir=$REPO_ROOT/target/release" \
+  -b "$REPO_ROOT/crates/exbar-cli/wix" \
   "$REPO_ROOT/crates/exbar-cli/wix/main.wxs" \
   -o "${OUT}" \
-  -ext WixToolset.Util.wixext
+  -ext WixToolset.Util.wixext \
+  -ext WixToolset.UI.wixext
 
 echo "Done. MSI: ${OUT}"

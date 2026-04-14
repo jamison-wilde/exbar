@@ -6,7 +6,8 @@
                -ext WixToolset.Util.wixext
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
     <Package
         Name="Exbar"
@@ -40,20 +41,36 @@
             <ComponentRef Id="StartMenuShortcut" />
         </Feature>
 
-        <!-- Post-install: launch the hook process in the user's context -->
-        <CustomAction Id="LaunchHook"
-                      FileRef="ExbarExeFile"
-                      ExeCommand="hook"
-                      Impersonate="yes"
-                      Execute="deferred"
-                      Return="asyncNoWait" />
+        <!-- UI: WixUI_Minimal = Welcome/License → Finish. Finish dialog has
+             a "Launch Exbar now" checkbox wired to WixShellExec. ShellExecute
+             does NOT inherit msiexec's STARTUPINFO / console pipe, so Windows
+             Terminal doesn't claim a phantom tab the way an ExeCommand-type
+             deferred CustomAction would. -->
+        <ui:WixUI Id="WixUI_Minimal" />
+        <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
 
-        <InstallExecuteSequence>
-            <!-- Deferred actions must run inside the install transaction,
-                 i.e. between InstallInitialize and InstallFinalize. Scheduling
-                 after InstallFinalize causes Windows Installer error 2762. -->
-            <Custom Action="LaunchHook" Before="InstallFinalize" Condition="NOT Installed" />
-        </InstallExecuteSequence>
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Exbar now" />
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
+        <!-- ShellExecute target — [#FileId] resolves to installed exe path.
+             WixShellExec passes no arguments, so the CLI treats no-args as
+             the `hook` subcommand (see main.rs). -->
+        <Property Id="WixShellExecTarget" Value="[#ExbarExeFile]" />
+
+        <CustomAction Id="LaunchApplication"
+                      BinaryRef="Wix4UtilCA_X64"
+                      DllEntry="WixShellExec"
+                      Impersonate="yes"
+                      Execute="immediate"
+                      Return="check" />
+
+        <UI>
+            <Publish Dialog="ExitDialog"
+                     Control="Finish"
+                     Event="DoAction"
+                     Value="LaunchApplication"
+                     Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+        </UI>
 
         <StandardDirectory Id="LocalAppDataFolder">
             <Directory Id="INSTALLDIR" Name="Exbar" />
