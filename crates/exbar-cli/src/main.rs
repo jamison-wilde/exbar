@@ -47,7 +47,7 @@ enum Commands {
     Install,
     /// [DEV ONLY] Uninstall the Explorer extension (end users should use Windows Settings → Apps)
     Uninstall {
-        /// Also delete the DLL and local data
+        /// Also delete the config and local data
         #[arg(long)]
         clean: bool,
     },
@@ -192,8 +192,6 @@ fn run_hook() -> WinResult<()> {
     // Without this, Windows treats exbar.exe as a legacy DPI-unaware
     // app and applies bitmap upscaling on top of our layout — which
     // manifests as a giant toolbar with tiny text on high-DPI monitors.
-    // Previously (DLL architecture) we inherited DPI awareness from
-    // explorer.exe's context; now we must set it ourselves.
     unsafe {
         use windows::Win32::UI::HiDpi::{
             DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,

@@ -89,7 +89,7 @@ fn get_global_toolbar_hwnd() -> Option<HWND> {
 static FOREGROUND_HOOK_INSTALLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Stored HWINEVENTHOOK so we can UnhookWinEvent on DLL unload.
+/// Stored HWINEVENTHOOK so we can UnhookWinEvent at process exit.
 static FOREGROUND_HOOK: Mutex<Option<isize>> = Mutex::new(None);
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
@@ -845,10 +845,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // Register drop target
             register_drop_targets(hwnd, state);
 
-            // Initial visibility: prefer the Explorer HWND that triggered creation
-            // (tracked in ACTIVE_EXPLORER by the CBT hook). GetForegroundWindow() is
-            // unreliable during HCBT_ACTIVATE handling because activation hasn't
-            // completed yet.
+            // The foreground WinEvent fires reliably; GetForegroundWindow() does not.
+            // Track ACTIVE_EXPLORER to reliably find the window that triggered creation.
             let explorer_hwnd =
                 get_active_explorer().unwrap_or_else(|| unsafe { GetForegroundWindow() });
             let class = crate::explorer::get_class_name(explorer_hwnd);

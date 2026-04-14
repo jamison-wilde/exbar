@@ -17,7 +17,7 @@ pub struct ExplorerInfo {
     pub default_pos: RECT,
 }
 
-/// Check if an Explorer window is ready for injection.
+/// Check if an Explorer window's UI bridge is ready.
 /// Returns None if the DesktopChildSiteBridge doesn't exist yet
 /// (Explorer hasn't finished initializing).
 pub fn check_explorer_ready(cabinet_hwnd: HWND) -> Option<ExplorerInfo> {

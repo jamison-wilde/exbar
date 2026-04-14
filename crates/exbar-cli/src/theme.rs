@@ -12,7 +12,7 @@ pub fn scale(logical_px: i32, dpi: u32) -> i32 {
 
 static DARK_MODE_CACHE: OnceLock<bool> = OnceLock::new();
 
-/// Query the system dark mode setting (cached per DLL load).
+/// Query the system dark mode setting (cached for the life of the process).
 /// Returns true if apps are set to dark mode.
 pub fn is_dark_mode() -> bool {
     *DARK_MODE_CACHE.get_or_init(|| {
