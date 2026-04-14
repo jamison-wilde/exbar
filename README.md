@@ -87,6 +87,8 @@ It should hide when non-Explorer apps are in the foreground. If it isn't hiding,
 
 ## For developers
 
+- **Planned CI:** see [docs/ci-plan.md](docs/ci-plan.md) for the deferred GitHub Actions workflow.
+
 <details>
 <summary>Build from source</summary>
 
