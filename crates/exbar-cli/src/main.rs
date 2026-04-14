@@ -15,6 +15,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowsHookExW, GetMessageW, WH_CBT, MSG, HOOKPROC,
 };
 
+mod log;
+mod theme;
+mod config;
+
 // ── CLI definition ────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
