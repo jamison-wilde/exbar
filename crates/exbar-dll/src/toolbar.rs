@@ -758,7 +758,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     let moved = (x - r.press_x).abs() + (y - r.press_y).abs();
                     if !r.active && moved > theme::scale(REORDER_THRESHOLD, state.dpi) {
                         r.active = true;
-                        unsafe { SetCapture(hwnd); }
+                        // Capture was already taken on WM_LBUTTONDOWN.
                     }
                     if r.active {
                         r.insertion = compute_insertion_index(state, x);
@@ -829,8 +829,11 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             press_x: x,
                             press_y: y,
                             active: false,
-                            insertion: idx - 1, // initial insertion is current position
+                            insertion: idx - 1, // overwritten on first WM_MOUSEMOVE once active
                         });
+                        // Capture on press so a fast flick out of the toolbar
+                        // still routes WM_MOUSEMOVE / WM_LBUTTONUP back to us.
+                        unsafe { let _ = SetCapture(hwnd); }
                     }
                 }
                 unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
