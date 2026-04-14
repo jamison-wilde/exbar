@@ -18,7 +18,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DLGC_WANTALLKEYS, DefWindowProcW,
     DestroyWindow, GWLP_USERDATA, GetClientRect, GetForegroundWindow, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowTextW, HTCAPTION, IsWindow, LWA_ALPHA, PostMessageW,
+    GetWindowTextLengthW, GetWindowTextW, HTCAPTION, LWA_ALPHA, PostMessageW,
     RegisterClassExW, SPI_GETWORKAREA, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetLayeredWindowAttributes,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, WM_CAPTURECHANGED,
@@ -40,7 +40,6 @@ const WM_DPICHANGED: u32 = 0x02E0;
 
 // Layout constants (logical pixels, scale by DPI)
 const BTN_PAD_H: i32 = 10;
-const BTN_PAD_V: i32 = 4;
 const BTN_GAP: i32 = 2;
 const ADD_SIZE: i32 = 28;
 /// Logical pixel width/height of the drag handle grip area.
@@ -71,18 +70,6 @@ pub fn set_active_explorer(hwnd: HWND) {
 
 pub fn get_active_explorer() -> Option<HWND> {
     ACTIVE_EXPLORER.lock().unwrap().map(|h| HWND(h as *mut _))
-}
-
-/// Check whether the global toolbar already exists (window is still valid).
-pub fn global_toolbar_exists() -> bool {
-    let guard = GLOBAL_TOOLBAR.lock().unwrap();
-    match *guard {
-        None => false,
-        Some(h) => {
-            let hwnd = HWND(h as *mut _);
-            unsafe { IsWindow(Some(hwnd)).as_bool() }
-        }
-    }
 }
 
 fn set_global_toolbar(hwnd: HWND) {
@@ -862,9 +849,6 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
             // Register drop target
             register_drop_targets(hwnd, state);
-
-            // Install foreground window hook to auto-show/hide the toolbar
-            install_foreground_hook();
 
             // Initial visibility: prefer the Explorer HWND that triggered creation
             // (tracked in ACTIVE_EXPLORER by the CBT hook). GetForegroundWindow() is
