@@ -66,10 +66,7 @@ pub unsafe fn get_shell_browser_for(cabinet_hwnd: HWND) -> Option<IShellBrowser>
             continue;
         }
 
-        let sp = match wba.cast::<IServiceProvider>().ok() {
-            Some(s) => s,
-            None => return None,
-        };
+        let sp = wba.cast::<IServiceProvider>().ok()?;
 
         let browser: IShellBrowser = unsafe { sp.QueryService(&SID_STopLevelBrowser).ok()? };
         return Some(browser);

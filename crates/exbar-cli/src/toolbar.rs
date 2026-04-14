@@ -171,19 +171,15 @@ unsafe extern "system" fn foreground_event_proc(
 
     if event == EVENT_SYSTEM_MINIMIZESTART {
         // Only hide if NOT our process (avoid hiding on Explorer's internal popups)
-        if !in_our_process {
-            if let Some(tb) = tb_opt {
-                update_toolbar_visibility(tb);
-            }
+        if !in_our_process && let Some(tb) = tb_opt {
+            update_toolbar_visibility(tb);
         }
         return;
     }
 
     if event == EVENT_SYSTEM_MINIMIZEEND {
-        if is_explorer {
-            if let Some(tb) = tb_opt {
-                show_above(tb, hwnd);
-            }
+        if is_explorer && let Some(tb) = tb_opt {
+            show_above(tb, hwnd);
         }
         return;
     }
@@ -197,12 +193,10 @@ unsafe extern "system" fn foreground_event_proc(
     if is_explorer {
         set_active_explorer(hwnd);
         // First time we see an Explorer foreground, create the toolbar.
-        if tb_opt.is_none() {
-            if let Some(info) = crate::explorer::check_explorer_ready(hwnd) {
-                let hinst = exe_hinstance();
-                let _ = create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
-            }
-            // If not ready, retry logic is deferred to Task 8.
+        // If not ready, retry logic is deferred to Task 8.
+        if tb_opt.is_none() && let Some(info) = crate::explorer::check_explorer_ready(hwnd) {
+            let hinst = exe_hinstance();
+            let _ = create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
         }
         if let Some(tb) = get_global_toolbar_hwnd() {
             show_above(tb, hwnd);
@@ -771,36 +765,37 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     }
 
     // Reorder insertion caret (horizontal layout only).
-    if let Some(r) = state.reorder {
-        if r.active && state.layout == Layout::Horizontal {
-            let folder_buttons: Vec<&ButtonLayout> =
-                state.buttons.iter().filter(|b| !b.is_add).collect();
-            if !folder_buttons.is_empty() {
-                // X coordinate of the caret.
-                let caret_x = if r.insertion >= folder_buttons.len() {
-                    folder_buttons.last().unwrap().rect.right + 1
-                } else {
-                    folder_buttons[r.insertion].rect.left - 1
-                };
-                let caret_w = theme::scale(2, state.dpi);
-                let caret_color = if is_dark {
-                    COLORREF(0x00A0A0FF)
-                } else {
-                    COLORREF(0x004040C0)
-                };
-                let caret_brush = unsafe { CreateSolidBrush(caret_color) };
-                let caret_rect = RECT {
-                    left: caret_x,
-                    top: client.top + 2,
-                    right: caret_x + caret_w,
-                    bottom: client.bottom - 2,
-                };
-                unsafe {
-                    FillRect(hdc, &caret_rect, caret_brush);
-                }
-                unsafe {
-                    let _ = DeleteObject(caret_brush.into());
-                }
+    if let Some(r) = state.reorder
+        && r.active
+        && state.layout == Layout::Horizontal
+    {
+        let folder_buttons: Vec<&ButtonLayout> =
+            state.buttons.iter().filter(|b| !b.is_add).collect();
+        if !folder_buttons.is_empty() {
+            // X coordinate of the caret.
+            let caret_x = if r.insertion >= folder_buttons.len() {
+                folder_buttons.last().unwrap().rect.right + 1
+            } else {
+                folder_buttons[r.insertion].rect.left - 1
+            };
+            let caret_w = theme::scale(2, state.dpi);
+            let caret_color = if is_dark {
+                COLORREF(0x00A0A0FF)
+            } else {
+                COLORREF(0x004040C0)
+            };
+            let caret_brush = unsafe { CreateSolidBrush(caret_color) };
+            let caret_rect = RECT {
+                left: caret_x,
+                top: client.top + 2,
+                right: caret_x + caret_w,
+                bottom: client.bottom - 2,
+            };
+            unsafe {
+                FillRect(hdc, &caret_rect, caret_brush);
+            }
+            unsafe {
+                let _ = DeleteObject(caret_brush.into());
             }
         }
     }
@@ -1034,22 +1029,22 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 state.pressed_index = hit_test(state, x, y);
                 // Only start a potential reorder on a folder button (not + and not grip).
-                if let Some(idx) = state.pressed_index {
-                    if !state.buttons[idx].is_add {
-                        // Cancel any active inline rename before starting a reorder gesture.
-                        cancel_inline_rename();
-                        state.reorder = Some(ReorderState {
-                            source_button: idx,
-                            press_x: x,
-                            press_y: y,
-                            active: false,
-                            insertion: idx - 1, // overwritten on first WM_MOUSEMOVE once active
-                        });
-                        // Capture on press so a fast flick out of the toolbar
-                        // still routes WM_MOUSEMOVE / WM_LBUTTONUP back to us.
-                        unsafe {
-                            let _ = SetCapture(hwnd);
-                        }
+                if let Some(idx) = state.pressed_index
+                    && !state.buttons[idx].is_add
+                {
+                    // Cancel any active inline rename before starting a reorder gesture.
+                    cancel_inline_rename();
+                    state.reorder = Some(ReorderState {
+                        source_button: idx,
+                        press_x: x,
+                        press_y: y,
+                        active: false,
+                        insertion: idx - 1, // overwritten on first WM_MOUSEMOVE once active
+                    });
+                    // Capture on press so a fast flick out of the toolbar
+                    // still routes WM_MOUSEMOVE / WM_LBUTTONUP back to us.
+                    unsafe {
+                        let _ = SetCapture(hwnd);
                     }
                 }
                 unsafe {
@@ -1083,9 +1078,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     // Not active = plain click; fall through to existing click logic.
                 }
 
-                let clicked = hit_test(state, x, y);
-                if clicked.is_some() && clicked == state.pressed_index {
-                    let idx = clicked.unwrap();
+                if let Some(idx) = hit_test(state, x, y)
+                    && Some(idx) == state.pressed_index
+                {
                     if state.buttons[idx].is_add {
                         if let Some(path) = crate::picker::pick_folder() {
                             append_folder_and_reload(&path);
@@ -1100,12 +1095,12 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 .map(|c| c.new_tab_timeout_ms_zero_disables)
                                 .unwrap_or(500);
                             crate::navigate::open_in_new_tab(get_active_explorer(), &path, timeout);
-                        } else if let Some(explorer_hwnd) = get_active_explorer() {
-                            if let Some(sb) = unsafe {
+                        } else if let Some(explorer_hwnd) = get_active_explorer()
+                            && let Some(sb) = unsafe {
                                 crate::shell_windows::get_shell_browser_for(explorer_hwnd)
-                            } {
-                                let _ = crate::navigate::navigate_to(&sb, &path);
                             }
+                        {
+                            let _ = crate::navigate::navigate_to(&sb, &path);
                         }
                     }
                 }
@@ -1176,12 +1171,12 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         let path = state.buttons[idx].folder.path.clone();
                         match chosen {
                             MENU_ID_OPEN => {
-                                if let Some(explorer_hwnd) = get_active_explorer() {
-                                    if let Some(sb) = unsafe {
+                                if let Some(explorer_hwnd) = get_active_explorer()
+                                    && let Some(sb) = unsafe {
                                         crate::shell_windows::get_shell_browser_for(explorer_hwnd)
-                                    } {
-                                        let _ = crate::navigate::navigate_to(&sb, &path);
                                     }
+                                {
+                                    let _ = crate::navigate::navigate_to(&sb, &path);
                                 }
                             }
                             MENU_ID_OPEN_NEW_TAB => {
@@ -1591,7 +1586,7 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
 
     // ES_AUTOHSCROLL = 0x0080
     const ES_AUTOHSCROLL: u32 = 0x0080;
-    let style = (WS_CHILD.0 | WS_VISIBLE.0 | WS_BORDER.0 | ES_AUTOHSCROLL) as u32;
+    let style = WS_CHILD.0 | WS_VISIBLE.0 | WS_BORDER.0 | ES_AUTOHSCROLL;
 
     let edit = unsafe {
         CreateWindowExW(
@@ -1659,7 +1654,7 @@ unsafe extern "system" fn rename_subclass_proc(
             return LRESULT(DLGC_WANTALLKEYS as isize);
         }
         WM_KEYDOWN => {
-            let vk = wparam.0 as usize;
+            let vk = wparam.0;
             if vk == VK_RETURN {
                 commit_rename(hwnd, ref_data);
                 return LRESULT(0);

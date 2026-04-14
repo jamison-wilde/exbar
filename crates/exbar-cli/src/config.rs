@@ -2,17 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Layout {
+    #[default]
     Horizontal,
     Vertical,
-}
-
-impl Default for Layout {
-    fn default() -> Self {
-        Layout::Horizontal
-    }
 }
 
 fn default_opacity() -> f32 {
@@ -116,7 +111,7 @@ impl Config {
 
     pub fn save_to_path(&self, path: &str) -> std::io::Result<()> {
         let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         fs::write(path, json)
     }
 
