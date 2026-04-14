@@ -194,6 +194,19 @@ fn run_hook() -> WinResult<()> {
     // Detach from any inherited console so no terminal window appears.
     unsafe { let _ = FreeConsole(); }
 
+    // Declare per-monitor DPI awareness BEFORE any window is created.
+    // Without this, Windows treats exbar.exe as a legacy DPI-unaware
+    // app and applies bitmap upscaling on top of our layout — which
+    // manifests as a giant toolbar with tiny text on high-DPI monitors.
+    // Previously (DLL architecture) we inherited DPI awareness from
+    // explorer.exe's context; now we must set it ourselves.
+    unsafe {
+        use windows::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+
     // STA for COM — IShellWindows, IFileOperation, drag-drop, folder picker.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
