@@ -27,6 +27,14 @@
 
         <MediaTemplate EmbedCab="yes" />
 
+        <!-- Force file replacement on every install, even when version
+             numbers match. Without this, Windows Installer's default
+             version-comparison logic sees exbar.exe at the same 0.x.y
+             version and skips the file copy, leaving an old binary in
+             place across rebuilds. 'amus' = ignore Age/Date/Size, Must
+             reinstall, Update side-by-side files, Shortcuts refreshed. -->
+        <Property Id="REINSTALLMODE" Value="amus" />
+
         <!-- Shut down any running exbar.exe before replacing files -->
         <util:CloseApplication Id="CloseExbar"
                                Target="exbar.exe"
