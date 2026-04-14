@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_NCHITTEST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE, HTCAPTION,
     WS_EX_LAYERED, SetLayeredWindowAttributes, LWA_ALPHA,
     SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WM_MOVE, IsWindow, SW_HIDE, SW_SHOWNA, GetForegroundWindow, WM_RBUTTONUP,
+    WM_MOVE, IsWindow, SW_HIDE, SW_SHOWNA, GetForegroundWindow, WM_RBUTTONUP, WS_EX_NOACTIVATE,
     DestroyWindow, GetWindowTextLengthW, GetWindowTextW, SendMessageW,
     WS_CHILD, WS_BORDER, WM_KEYDOWN, WM_KILLFOCUS, WM_GETDLGCODE, DLGC_WANTALLKEYS,
     WM_CAPTURECHANGED,
@@ -1081,8 +1081,11 @@ pub fn create_toolbar(
     // Explorer window closures. The `owner` HWND is used for monitor
     // detection only, not as the parent/owner.
     let hwnd_result = unsafe {
+        // WS_EX_NOACTIVATE: the toolbar is a companion window — clicking it
+        // must NOT steal foreground focus from Explorer, or folder clicks
+        // end up routed to a newly-activated toolbar and navigation fails.
         CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+            WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
             PCWSTR(class_wide.as_ptr()),
             PCWSTR::null(),
             WS_POPUP | WS_VISIBLE,
