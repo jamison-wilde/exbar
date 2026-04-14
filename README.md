@@ -66,8 +66,6 @@ Or sign out and back in.
 
 Your config file (`~\.exbar.json`) is preserved.
 
-> **Heads up:** Uninstall (and major-version upgrade) may briefly close Windows Explorer. This is Windows' "file in use" handling — Exbar's DLL is loaded inside `explorer.exe`, so the installer uses Restart Manager to free the file. Explorer should relaunch automatically; if it doesn't, press **Ctrl+Shift+Esc** → **File** → **Run new task** → `explorer.exe`. A planned architecture change will eliminate this in a later release.
-
 ## Requirements
 
 - Windows 11 (x86_64)
