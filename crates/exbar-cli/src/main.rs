@@ -9,11 +9,7 @@ use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyW, RegSetValueExW,
     HKEY, HKEY_CURRENT_USER, REG_SZ,
 };
-use windows::Win32::Foundation::{WIN32_ERROR, HINSTANCE, FreeLibrary};
-use windows::Win32::System::LibraryLoader::{LoadLibraryW, GetProcAddress};
-use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowsHookExW, GetMessageW, WH_CBT, MSG, HOOKPROC,
-};
+use windows::Win32::Foundation::WIN32_ERROR;
 
 mod log;
 mod theme;
@@ -154,26 +150,6 @@ fn install_dir() -> PathBuf {
     local_appdata().join("Exbar")
 }
 
-fn install_dll_path() -> PathBuf {
-    install_dir().join("exbar_dll.dll")
-}
-
-/// Directory containing the currently-running exbar.exe.
-/// This is the source of truth for "where the DLL lives at runtime"
-/// regardless of how the binary was installed.
-fn running_exe_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn source_dll_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dll = exe.parent()?.join("exbar_dll.dll");
-    if dll.exists() { Some(dll) } else { None }
-}
-
 fn config_path() -> PathBuf {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
@@ -197,84 +173,61 @@ const RUN_VALUE: &str = "Exbar";
 
 // ── hook ──────────────────────────────────────────────────────────────────────
 
-/// Load exbar_dll.dll and install a global CBT hook, then run a message
-/// loop to keep it alive.  This function never returns normally.
 fn run_hook() -> WinResult<()> {
-    // Detach from any inherited console so no terminal window appears
-    // (the MSI custom action launches us with a console; FreeConsole is
-    // a no-op if the process wasn't attached to one).
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::System::Console::FreeConsole;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, TranslateMessage, MSG,
+    };
+
+    // Detach from any inherited console so no terminal window appears.
+    unsafe { let _ = FreeConsole(); }
+
+    // STA for COM — IShellWindows, IFileOperation, drag-drop, folder picker.
     unsafe {
-        use windows::Win32::System::Console::FreeConsole;
-        let _ = FreeConsole();
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
 
-    let dll_path = running_exe_dir().join("exbar_dll.dll");
-    let dll_path_wide = to_wide_null(&dll_path.to_string_lossy());
+    // Install the foreground event hook. Because WINEVENT_OUTOFCONTEXT
+    // marshals callbacks to the thread that installed the hook (provided
+    // that thread has a message pump), our GetMessage loop below will
+    // drive the toolbar's wndproc AND receive foreground-change events
+    // — both on the same thread.
+    //
+    // The first CabinetWClass foreground event triggers toolbar creation
+    // inside foreground_event_proc.
+    crate::toolbar::install_foreground_hook();
+    crate::log::info("run_hook: foreground hook installed; entering message pump");
 
-    // Load the DLL
-    let hmod = unsafe {
-        LoadLibraryW(PCWSTR(dll_path_wide.as_ptr()))?
-    };
-
-    // Get the hook proc address
-    let proc_name = std::ffi::CString::new("ExbarCBTHook").unwrap();
-    let hook_fn = unsafe {
-        GetProcAddress(hmod, windows::core::PCSTR(proc_name.as_ptr().cast()))
-    };
-    let hook_fn = hook_fn.ok_or_else(|| {
-        windows_core::Error::new(
-            windows_core::HRESULT(0x80004005u32 as i32),
-            "ExbarCBTHook export not found in exbar_dll.dll",
-        )
-    })?;
-
-    // Transmute to HOOKPROC — safe because we verified the export exists
-    let hook_proc: HOOKPROC = unsafe { std::mem::transmute(hook_fn) };
-
-    // Convert HMODULE to HINSTANCE (same underlying pointer)
-    let hinstance = HINSTANCE(hmod.0);
-
-    // Install the global CBT hook (thread_id = 0 → all threads)
-    let _hhook = unsafe {
-        SetWindowsHookExW(WH_CBT, hook_proc, Some(hinstance), 0)?
-    };
-
-    // Run the message loop to keep the hook alive (no println — console is detached)
+    // Message pump — runs indefinitely.
     let mut msg = MSG::default();
     loop {
         let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if ret.0 == 0 || ret.0 == -1 {
             break;
         }
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
 
-    // Cleanup (unreachable in normal operation; process is killed externally)
-    unsafe { let _ = FreeLibrary(hmod); }
+    // Cleanup — unreachable in normal operation.
+    unsafe { CoUninitialize(); }
     Ok(())
 }
 
 // ── install ───────────────────────────────────────────────────────────────────
 
 fn install() -> WinResult<()> {
-    // 1. Find source DLL
-    let src = source_dll_path().ok_or_else(|| {
-        windows_core::Error::new(
-            windows_core::HRESULT(0x80070002u32 as i32),
-            "exbar_dll.dll not found next to the executable",
-        )
-    })?;
-
-    // 2. Copy to %LOCALAPPDATA%\Exbar\
+    // Create install directory (for the config stub; the MSI handles
+    // the real install path for end users).
     let dst_dir = install_dir();
     std::fs::create_dir_all(&dst_dir).map_err(io_err)?;
-    let dst = install_dll_path();
-    std::fs::copy(&src, &dst).map_err(io_err)?;
-    println!("Copied DLL to {}", dst.display());
 
-    let dll_path = dst.to_string_lossy().into_owned();
-    let _ = dll_path;
-
-    // 3. Create stub config if missing
+    // Create stub config if missing
     let cfg = config_path();
     if !cfg.exists() {
         let stub = serde_json::json!({
@@ -291,7 +244,7 @@ fn install() -> WinResult<()> {
         println!("Config already exists at {}", cfg.display());
     }
 
-    // 4. Register Run key so hook starts at logon
+    // Register Run key
     let exe_path = std::env::current_exe()
         .map_err(io_err)?
         .to_string_lossy()
@@ -302,8 +255,7 @@ fn install() -> WinResult<()> {
     unsafe { let _ = RegCloseKey(hkey); }
     println!("Registered Run key: {run_value}");
 
-    // 5. Start hook process (detached)
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    // Start hook process (detached)
     let _ = Command::new(&exe_path)
         .arg("hook")
         .stdout(std::process::Stdio::null())
@@ -356,9 +308,8 @@ fn uninstall(clean: bool) -> WinResult<()> {
 // ── status ────────────────────────────────────────────────────────────────────
 
 fn status() -> WinResult<()> {
-    let dll = install_dll_path();
-    let dll_ok = dll.exists();
-    println!("DLL installed:  {} ({})", if dll_ok { "YES" } else { "NO" }, dll.display());
+    let exe = std::env::current_exe().map_err(io_err)?;
+    println!("exbar.exe:      {}", exe.display());
 
     let cfg = config_path();
     if cfg.exists() {

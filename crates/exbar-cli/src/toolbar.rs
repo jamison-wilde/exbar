@@ -247,7 +247,7 @@ fn update_toolbar_visibility(toolbar: HWND) {
     }
 }
 
-fn install_foreground_hook() {
+pub(crate) fn install_foreground_hook() {
     use std::sync::atomic::Ordering;
     if FOREGROUND_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
         return;
