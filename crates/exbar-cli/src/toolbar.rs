@@ -571,7 +571,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
         FillRect(hdc, &client, bg_brush);
     }
     unsafe {
-        DeleteObject(bg_brush.into());
+        let _ = DeleteObject(bg_brush.into());
     }
 
     // Grip area — draw dots
@@ -624,7 +624,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
         }
     }
     unsafe {
-        DeleteObject(grip_brush.into());
+        let _ = DeleteObject(grip_brush.into());
     }
 
     // Border
@@ -671,7 +671,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
         FillRect(hdc, &right_border, border_brush);
     }
     unsafe {
-        DeleteObject(border_brush.into());
+        let _ = DeleteObject(border_brush.into());
     }
 
     unsafe {
@@ -712,7 +712,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
                 FillRect(hdc, &btn.rect, hbr);
             }
             unsafe {
-                DeleteObject(hbr.into());
+                let _ = DeleteObject(hbr.into());
             }
         } else if is_hover {
             let hl = if is_dark {
@@ -725,7 +725,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
                 FillRect(hdc, &btn.rect, hbr);
             }
             unsafe {
-                DeleteObject(hbr.into());
+                let _ = DeleteObject(hbr.into());
             }
         }
 
@@ -799,7 +799,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
                     FillRect(hdc, &caret_rect, caret_brush);
                 }
                 unsafe {
-                    DeleteObject(caret_brush.into());
+                    let _ = DeleteObject(caret_brush.into());
                 }
             }
         }
@@ -904,7 +904,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
             let mut pt = POINT { x, y };
             unsafe {
-                ScreenToClient(hwnd, &mut pt);
+                let _ = ScreenToClient(hwnd, &mut pt);
             }
 
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
@@ -1126,7 +1126,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 if let Some(idx) = hit_test(state, x, y) {
                     let mut pt = POINT { x, y };
                     unsafe {
-                        ClientToScreen(hwnd, &mut pt);
+                        let _ = ClientToScreen(hwnd, &mut pt);
                     }
                     if state.buttons[idx].is_add {
                         let items = [

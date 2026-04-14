@@ -308,7 +308,7 @@ impl FolderDropTarget_Impl {
     fn resolve_action(&self, pt: &windows::Win32::Foundation::POINTL) -> Option<DropAction> {
         let mut client_pt = POINT { x: pt.x, y: pt.y };
         unsafe {
-            ScreenToClient(self.hwnd, &mut client_pt);
+            let _ = ScreenToClient(self.hwnd, &mut client_pt);
         }
         (self.resolver)(client_pt.x, client_pt.y)
     }
