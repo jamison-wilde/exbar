@@ -7,23 +7,21 @@ use std::sync::Mutex;
 
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
-use windows::Win32::System::Com::{FORMATETC, TYMED_HGLOBAL, IDataObject};
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::{FORMATETC, IDataObject, TYMED_HGLOBAL};
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{
-    CF_HDROP, IDropTarget, IDropTarget_Impl,
-    RegisterDragDrop, RevokeDragDrop,
-    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+    CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE, IDropTarget,
+    IDropTarget_Impl, RegisterDragDrop, RevokeDragDrop,
 };
-use windows::Win32::System::SystemServices::{MODIFIERKEYS_FLAGS, MK_CONTROL, MK_SHIFT};
-use windows::Win32::UI::Shell::{
-    DragQueryFileW, FileOperation, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
-    HDROP, IFileOperation, IShellItemArray,
-    SHCreateItemFromParsingName, SHCreateShellItemArrayFromDataObject,
-    SHParseDisplayName, SHGetPathFromIDListW,
-};
+use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
-use windows::Win32::System::Com::CoTaskMemFree;
-use windows_core::{implement, Result, PCWSTR};
+use windows::Win32::UI::Shell::{
+    DragQueryFileW, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR, FileOperation, HDROP, IFileOperation,
+    IShellItemArray, SHCreateItemFromParsingName, SHCreateShellItemArrayFromDataObject,
+    SHGetPathFromIDListW, SHParseDisplayName,
+};
+use windows_core::{PCWSTR, Result, implement};
 
 // ── FolderDropTarget ──────────────────────────────────────────────────────────
 
@@ -90,9 +88,7 @@ fn resolve_to_real_path(path: &str) -> String {
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
 
-    let ok = unsafe {
-        SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).is_ok()
-    };
+    let ok = unsafe { SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).is_ok() };
 
     if !ok || pidl.is_null() {
         return path.to_owned();
@@ -100,7 +96,9 @@ fn resolve_to_real_path(path: &str) -> String {
 
     let mut buf = [0u16; 260];
     let got_path = unsafe { SHGetPathFromIDListW(pidl as *const _, &mut buf) };
-    unsafe { CoTaskMemFree(Some(pidl as *const _)); }
+    unsafe {
+        CoTaskMemFree(Some(pidl as *const _));
+    }
 
     if got_path.as_bool() {
         let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
@@ -197,11 +195,15 @@ unsafe fn first_path_from_data_object(data_object: &IDataObject) -> Option<Strin
 
 /// True if the CF_HDROP payload contains exactly one path and that path is a directory.
 fn dropped_is_single_directory(data_object: &IDataObject) -> bool {
-    let Some(first) = (unsafe { first_path_from_data_object(data_object) }) else { return false; };
+    let Some(first) = (unsafe { first_path_from_data_object(data_object) }) else {
+        return false;
+    };
     // We only count 1 here because first_path_from_data_object already returns just the first;
     // consult the raw HDROP for the count.
     let count = unsafe { hdrop_file_count(data_object) }.unwrap_or(0);
-    if count != 1 { return false; }
+    if count != 1 {
+        return false;
+    }
     std::path::Path::new(&first).is_dir()
 }
 
@@ -216,7 +218,9 @@ unsafe fn hdrop_file_count(data_object: &IDataObject) -> Option<u32> {
     };
     let medium = unsafe { data_object.GetData(&fmt).ok()? };
     let hglobal = unsafe { medium.u.hGlobal };
-    if hglobal.is_invalid() { return None; }
+    if hglobal.is_invalid() {
+        return None;
+    }
 
     let hdrop = HDROP(hglobal.0);
     // 0xFFFFFFFF asks for the count.
@@ -255,7 +259,10 @@ fn build_session(data_object: &IDataObject) -> DragSession {
         .map(|p| resolve_to_real_path(&p))
         .and_then(|p| drive_letter(&p));
     let is_single_directory = dropped_is_single_directory(data_object);
-    DragSession { source_drive, is_single_directory }
+    DragSession {
+        source_drive,
+        is_single_directory,
+    }
 }
 
 // ── Execute drop ──────────────────────────────────────────────────────────────
@@ -265,11 +272,9 @@ unsafe fn execute_drop(
     effect: DROPEFFECT,
     target_path: &str,
 ) -> Result<()> {
-    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
 
-    let file_op: IFileOperation = unsafe {
-        CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?
-    };
+    let file_op: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
 
     unsafe {
         file_op.SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR)?;
@@ -283,9 +288,8 @@ unsafe fn execute_drop(
         )?
     };
 
-    let source_items: IShellItemArray = unsafe {
-        SHCreateShellItemArrayFromDataObject(data_object)?
-    };
+    let source_items: IShellItemArray =
+        unsafe { SHCreateShellItemArrayFromDataObject(data_object)? };
 
     if effect == DROPEFFECT_MOVE {
         unsafe { file_op.MoveItems(&source_items, &target_item)? };
@@ -303,7 +307,9 @@ unsafe fn execute_drop(
 impl FolderDropTarget_Impl {
     fn resolve_action(&self, pt: &windows::Win32::Foundation::POINTL) -> Option<DropAction> {
         let mut client_pt = POINT { x: pt.x, y: pt.y };
-        unsafe { ScreenToClient(self.hwnd, &mut client_pt); }
+        unsafe {
+            ScreenToClient(self.hwnd, &mut client_pt);
+        }
         (self.resolver)(client_pt.x, client_pt.y)
     }
 }
@@ -347,7 +353,9 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         *self.current_action.lock().unwrap() = action.clone();
 
         let effect = effect_for(action.as_ref(), session.as_ref(), grfkeystate);
-        if !pdweffect.is_null() { unsafe { *pdweffect = effect }; }
+        if !pdweffect.is_null() {
+            unsafe { *pdweffect = effect };
+        }
         Ok(())
     }
 
@@ -362,7 +370,9 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
 
         let session = self.session.lock().unwrap().clone();
         let effect = effect_for(action.as_ref(), session.as_ref(), grfkeystate);
-        if !pdweffect.is_null() { unsafe { *pdweffect = effect }; }
+        if !pdweffect.is_null() {
+            unsafe { *pdweffect = effect };
+        }
         Ok(())
     }
 
@@ -380,11 +390,14 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
         let Some(data_obj) = pdataobj.as_ref() else {
-            if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_NONE }; }
+            if !pdweffect.is_null() {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+            }
             return Ok(());
         };
 
-        let action = self.resolve_action(pt)
+        let action = self
+            .resolve_action(pt)
             .or_else(|| self.current_action.lock().unwrap().clone());
         let session = self.session.lock().unwrap().clone();
 
@@ -392,14 +405,18 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
             Some(DropAction::MoveCopyTo(target_path)) => {
                 let src = session.as_ref().and_then(|s| s.source_drive);
                 let effect = determine_effect(grfkeystate, src, &target_path);
-                if !pdweffect.is_null() { unsafe { *pdweffect = effect }; }
+                if !pdweffect.is_null() {
+                    unsafe { *pdweffect = effect };
+                }
                 crate::log::info(&format!("drop: target={target_path:?} effect={effect:?}"));
                 unsafe { execute_drop(data_obj, effect, &target_path) }
             }
             Some(DropAction::AddFolder) => {
                 // Guard against multi-selection/file drops that slipped past DragOver.
                 if !session.map(|s| s.is_single_directory).unwrap_or(false) {
-                    if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_NONE }; }
+                    if !pdweffect.is_null() {
+                        unsafe { *pdweffect = DROPEFFECT_NONE };
+                    }
                     return Ok(());
                 }
                 if let Some(folder) = unsafe { first_path_from_data_object(data_obj) } {
@@ -407,11 +424,15 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
                     crate::log::info(&format!("drop: add-folder {folder:?}"));
                     crate::toolbar::append_folder_and_reload(&pb);
                 }
-                if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_COPY }; }
+                if !pdweffect.is_null() {
+                    unsafe { *pdweffect = DROPEFFECT_COPY };
+                }
                 Ok(())
             }
             None => {
-                if !pdweffect.is_null() { unsafe { *pdweffect = DROPEFFECT_NONE }; }
+                if !pdweffect.is_null() {
+                    unsafe { *pdweffect = DROPEFFECT_NONE };
+                }
                 Ok(())
             }
         };

@@ -1,6 +1,6 @@
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
-use windows::Win32::UI::Shell::{IShellBrowser, SHParseDisplayName, SBSP_SAMEBROWSER};
+use windows::Win32::UI::Shell::{IShellBrowser, SBSP_SAMEBROWSER, SHParseDisplayName};
 use windows_core::PCWSTR;
 
 pub fn navigate_to(shell_browser: &IShellBrowser, path: &str) -> Result<(), String> {
@@ -18,7 +18,10 @@ pub fn navigate_to(shell_browser: &IShellBrowser, path: &str) -> Result<(), Stri
 
     // Guard: if somehow we got a null PIDL without an error, bail.
     if pidl.is_null() {
-        return Err(format!("SHParseDisplayName returned null PIDL for {:?}", path));
+        return Err(format!(
+            "SHParseDisplayName returned null PIDL for {:?}",
+            path
+        ));
     }
 
     let browse_result = unsafe {
@@ -36,8 +39,8 @@ pub fn navigate_to(shell_browser: &IShellBrowser, path: &str) -> Result<(), Stri
 }
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN, WM_KEYUP, SW_SHOWNORMAL};
 use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL, WM_KEYDOWN, WM_KEYUP};
 
 const VK_CONTROL: usize = 0x11;
 const VK_T_KEY: usize = 0x54;
@@ -60,15 +63,17 @@ pub fn open_in_new_tab(target_explorer: Option<HWND>, path: &str, timeout_ms: u3
         return;
     };
 
-    let before: std::collections::HashSet<isize> = unsafe {
-        crate::shell_windows::enumerate_shell_browsers()
-    }.into_iter().map(|(h, _)| h).collect();
+    let before: std::collections::HashSet<isize> =
+        unsafe { crate::shell_windows::enumerate_shell_browsers() }
+            .into_iter()
+            .map(|(h, _)| h)
+            .collect();
 
     unsafe {
         let _ = PostMessageW(Some(target), WM_KEYDOWN, WPARAM(VK_CONTROL), LPARAM(0));
         let _ = PostMessageW(Some(target), WM_KEYDOWN, WPARAM(VK_T_KEY), LPARAM(0));
-        let _ = PostMessageW(Some(target), WM_KEYUP,   WPARAM(VK_T_KEY), LPARAM(0));
-        let _ = PostMessageW(Some(target), WM_KEYUP,   WPARAM(VK_CONTROL), LPARAM(0));
+        let _ = PostMessageW(Some(target), WM_KEYUP, WPARAM(VK_T_KEY), LPARAM(0));
+        let _ = PostMessageW(Some(target), WM_KEYUP, WPARAM(VK_CONTROL), LPARAM(0));
     }
 
     let start = std::time::Instant::now();
@@ -98,7 +103,10 @@ fn open_in_new_window(path: &str) {
     let quoted = format!("\"{path}\"");
     let path_wide: Vec<u16> = quoted.encode_utf16().chain(std::iter::once(0)).collect();
     let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
-    let exe: Vec<u16> = "explorer.exe".encode_utf16().chain(std::iter::once(0)).collect();
+    let exe: Vec<u16> = "explorer.exe"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
     unsafe {
         let _ = ShellExecuteW(

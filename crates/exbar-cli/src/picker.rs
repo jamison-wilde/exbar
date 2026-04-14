@@ -3,12 +3,11 @@
 use std::path::PathBuf;
 
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
 use windows::Win32::UI::Shell::{
-    FileOpenDialog, IFileOpenDialog, IShellItem,
-    SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
-    FOS_PICKFOLDERS, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+    FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
+    IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
 };
 use windows_core::PCWSTR;
 
@@ -39,7 +38,9 @@ pub fn pick_folder() -> Option<PathBuf> {
 
         let result: IShellItem = dialog.GetResult().ok()?;
         let pwstr = result.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-        if pwstr.is_null() { return None; }
+        if pwstr.is_null() {
+            return None;
+        }
         // Always free the COM-allocated buffer, even if to_string fails.
         let parsed = pwstr.to_string();
         windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.0 as *const _));

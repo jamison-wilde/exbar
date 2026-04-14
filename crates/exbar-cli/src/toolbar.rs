@@ -5,32 +5,27 @@ use std::sync::{Mutex, Once};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject,
-    DrawTextW, EndPaint, FillRect, GetStockObject,
-    InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT, DT_SINGLELINE, DT_VCENTER, DT_CENTER,
-    ScreenToClient, ClientToScreen,
-};
-use windows::Win32::UI::Controls::{WM_MOUSELEAVE, WC_EDITW};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, SetFocus,
-    SetCapture, ReleaseCapture,
+    BeginPaint, ClientToScreen, CreateSolidBrush, DEFAULT_GUI_FONT, DT_CENTER, DT_SINGLELINE,
+    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject, InvalidateRect,
+    PAINTSTRUCT, ScreenToClient, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::SystemServices::MK_CONTROL;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, PostMessageW, RegisterClassExW,
-    SetWindowLongPtrW, GetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, GWLP_USERDATA, WNDCLASSEXW, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WS_POPUP, WS_VISIBLE, WS_EX_TOOLWINDOW,
-    WM_NCHITTEST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE, HTCAPTION,
-    WS_EX_LAYERED, SetLayeredWindowAttributes, LWA_ALPHA,
-    SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WM_MOVE, IsWindow, SW_HIDE, SW_SHOWNA, GetForegroundWindow, WM_RBUTTONUP, WS_EX_NOACTIVATE,
-    DestroyWindow, GetWindowTextLengthW, GetWindowTextW, SendMessageW,
-    WS_CHILD, WS_BORDER, WM_KEYDOWN, WM_KILLFOCUS, WM_GETDLGCODE, DLGC_WANTALLKEYS,
-    WM_CAPTURECHANGED,
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
+use windows::Win32::UI::Controls::{WC_EDITW, WM_MOUSELEAVE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
-use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DLGC_WANTALLKEYS, DefWindowProcW,
+    DestroyWindow, GWLP_USERDATA, GetClientRect, GetForegroundWindow, GetWindowLongPtrW,
+    GetWindowTextLengthW, GetWindowTextW, HTCAPTION, IsWindow, LWA_ALPHA, PostMessageW,
+    RegisterClassExW, SPI_GETWORKAREA, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, WM_CAPTURECHANGED,
+    WM_CREATE, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WNDCLASSEXW, WS_BORDER, WS_CHILD,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+};
 use windows_core::PCWSTR;
 
 use crate::config::{Config, FolderEntry, Layout};
@@ -120,7 +115,9 @@ const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 fn hwnd_in_our_process(hwnd: HWND) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
     let mut pid: u32 = 0;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
     pid != 0 && pid == std::process::id()
 }
 
@@ -138,18 +135,27 @@ fn hwnd_process_name_is(hwnd: HWND, want: &str) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
     let mut pid: u32 = 0;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
-    if pid == 0 { return false; }
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    if pid == 0 {
+        return false;
+    }
     let h = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
         Ok(h) => h,
         Err(_) => return false,
     };
     let mut buf = [0u16; 260];
     let len = unsafe { GetModuleFileNameExW(Some(h), None, &mut buf) } as usize;
-    unsafe { let _ = CloseHandle(h); }
-    if len == 0 { return false; }
+    unsafe {
+        let _ = CloseHandle(h);
+    }
+    if len == 0 {
+        return false;
+    }
     let path = String::from_utf16_lossy(&buf[..len]);
-    path.rsplit('\\').next()
+    path.rsplit('\\')
+        .next()
         .map(|name| name.eq_ignore_ascii_case(want))
         .unwrap_or(false)
 }
@@ -218,7 +224,9 @@ unsafe extern "system" fn foreground_event_proc(
         // Transient popup — either Explorer's own tooltips/tree-views or our
         // own popup menu / rename edit / folder picker. Keep visible.
     } else if let Some(tb) = tb_opt {
-        unsafe { let _ = ShowWindow(tb, SW_HIDE); }
+        unsafe {
+            let _ = ShowWindow(tb, SW_HIDE);
+        }
     }
 }
 
@@ -232,7 +240,10 @@ fn show_above(toolbar: HWND, _explorer: HWND) {
         let _ = SetWindowPos(
             toolbar,
             Some(HWND_TOPMOST),
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
@@ -243,7 +254,9 @@ fn show_above(toolbar: HWND, _explorer: HWND) {
 fn update_toolbar_visibility(toolbar: HWND) {
     let fg = unsafe { GetForegroundWindow() };
     if !hwnd_in_our_process(fg) {
-        unsafe { let _ = ShowWindow(toolbar, SW_HIDE); }
+        unsafe {
+            let _ = ShowWindow(toolbar, SW_HIDE);
+        }
     }
 }
 
@@ -258,7 +271,8 @@ pub(crate) fn install_foreground_hook() {
             EVENT_SYSTEM_MINIMIZEEND, // range covers FOREGROUND, MINIMIZESTART, MINIMIZEEND
             None,
             Some(foreground_event_proc),
-            0, 0,
+            0,
+            0,
             WINEVENT_OUTOFCONTEXT,
         )
     };
@@ -266,11 +280,13 @@ pub(crate) fn install_foreground_hook() {
     crate::log::info("Installed foreground event hook");
 }
 
-
 // ── Position persistence ──────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct SavedPos { x: i32, y: i32 }
+struct SavedPos {
+    x: i32,
+    y: i32,
+}
 
 fn pos_file_path() -> std::path::PathBuf {
     let home = std::env::var("USERPROFILE")
@@ -299,7 +315,9 @@ fn save_pos(x: i32, y: i32) {
 /// Return the work area of the monitor containing `ref_hwnd`, or the primary
 /// monitor work area if that fails.
 fn work_area_for(ref_hwnd: Option<HWND>) -> RECT {
-    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    };
 
     if let Some(hwnd) = ref_hwnd {
         let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
@@ -401,15 +419,18 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
 
     let is_vertical = state.layout == Layout::Vertical;
 
-    let folder_names: Vec<String> = state.config.as_ref()
-        .map_or(Vec::new(), |c| c.folders.iter().map(|f| f.name.clone()).collect());
+    let folder_names: Vec<String> = state.config.as_ref().map_or(Vec::new(), |c| {
+        c.folders.iter().map(|f| f.name.clone()).collect()
+    });
 
     let char_w = s(8);
 
     let mut max_btn_w = s(ADD_SIZE);
     for name in &folder_names {
         let w = pad_h + s(14) + s(4) + (name.chars().count() as i32 * char_w) + pad_h;
-        if w > max_btn_w { max_btn_w = w; }
+        if w > max_btn_w {
+            max_btn_w = w;
+        }
     }
 
     if is_vertical {
@@ -417,8 +438,17 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
         let mut y = grip; // skip grip row
 
         state.buttons.push(ButtonLayout {
-            rect: RECT { left: 0, top: y, right: max_btn_w, bottom: y + btn_h },
-            folder: FolderEntry { name: "+".into(), path: String::new(), icon: None },
+            rect: RECT {
+                left: 0,
+                top: y,
+                right: max_btn_w,
+                bottom: y + btn_h,
+            },
+            folder: FolderEntry {
+                name: "+".into(),
+                path: String::new(),
+                icon: None,
+            },
             is_add: true,
         });
         y += btn_h + gap;
@@ -426,7 +456,12 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
         if let Some(ref config) = state.config.clone() {
             for entry in &config.folders {
                 state.buttons.push(ButtonLayout {
-                    rect: RECT { left: 0, top: y, right: max_btn_w, bottom: y + btn_h },
+                    rect: RECT {
+                        left: 0,
+                        top: y,
+                        right: max_btn_w,
+                        bottom: y + btn_h,
+                    },
                     folder: entry.clone(),
                     is_add: false,
                 });
@@ -441,8 +476,17 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
 
         let refresh_w = s(ADD_SIZE);
         state.buttons.push(ButtonLayout {
-            rect: RECT { left: x, top: 0, right: x + refresh_w, bottom: btn_h },
-            folder: FolderEntry { name: "+".into(), path: String::new(), icon: None },
+            rect: RECT {
+                left: x,
+                top: 0,
+                right: x + refresh_w,
+                bottom: btn_h,
+            },
+            folder: FolderEntry {
+                name: "+".into(),
+                path: String::new(),
+                icon: None,
+            },
             is_add: true,
         });
         x += refresh_w + gap;
@@ -454,7 +498,12 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
                 // off short names like "3D".
                 let w = pad_h + s(14) + s(4) + (entry.name.chars().count() as i32 * char_w) + pad_h;
                 state.buttons.push(ButtonLayout {
-                    rect: RECT { left: x, top: 0, right: x + w, bottom: btn_h },
+                    rect: RECT {
+                        left: x,
+                        top: 0,
+                        right: x + w,
+                        bottom: btn_h,
+                    },
                     folder: entry.clone(),
                     is_add: false,
                 });
@@ -469,9 +518,10 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
 // ── Hit test ─────────────────────────────────────────────────────────────────
 
 fn hit_test(state: &ToolbarState, x: i32, y: i32) -> Option<usize> {
-    state.buttons.iter().position(|b| {
-        x >= b.rect.left && x < b.rect.right && y >= b.rect.top && y < b.rect.bottom
-    })
+    state
+        .buttons
+        .iter()
+        .position(|b| x >= b.rect.left && x < b.rect.right && y >= b.rect.top && y < b.rect.bottom)
 }
 
 /// Given a horizontal cursor position, compute the folder-index insertion
@@ -481,12 +531,14 @@ fn hit_test(state: &ToolbarState, x: i32, y: i32) -> Option<usize> {
 /// function always returns a valid folder-index insertion (never index 0
 /// for the + button slot — the + stays pinned at button[0]).
 fn compute_insertion_index(state: &ToolbarState, cursor_x: i32) -> usize {
-    let folder_buttons: Vec<&ButtonLayout> = state.buttons.iter()
-        .filter(|b| !b.is_add)
-        .collect();
-    if folder_buttons.is_empty() { return 0; }
+    let folder_buttons: Vec<&ButtonLayout> = state.buttons.iter().filter(|b| !b.is_add).collect();
+    if folder_buttons.is_empty() {
+        return 0;
+    }
     // For vertical layout, fall back to "end" — visual isn't supported.
-    if state.layout == Layout::Vertical { return folder_buttons.len(); }
+    if state.layout == Layout::Vertical {
+        return folder_buttons.len();
+    }
 
     for (i, b) in folder_buttons.iter().enumerate() {
         let mid = (b.rect.left + b.rect.right) / 2;
@@ -501,7 +553,7 @@ fn compute_insertion_index(state: &ToolbarState, cursor_x: i32) -> usize {
 fn in_grip(state: &ToolbarState, x: i32, y: i32) -> bool {
     match state.layout {
         Layout::Horizontal => x < state.grip_size,
-        Layout::Vertical   => y < state.grip_size,
+        Layout::Vertical => y < state.grip_size,
     }
 }
 
@@ -510,25 +562,41 @@ fn in_grip(state: &ToolbarState, x: i32, y: i32) -> bool {
 unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-    if hdc.is_invalid() { return; }
+    if hdc.is_invalid() {
+        return;
+    }
 
     let mut client = RECT::default();
-    unsafe { let _ = GetClientRect(hwnd, &mut client); }
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+    }
 
     let is_dark = theme::is_dark_mode();
 
     // Background
-    let bg_color = if is_dark { COLORREF(0x002D2D2D) } else { COLORREF(0x00F0F0F0) };
+    let bg_color = if is_dark {
+        COLORREF(0x002D2D2D)
+    } else {
+        COLORREF(0x00F0F0F0)
+    };
     let bg_brush = unsafe { CreateSolidBrush(bg_color) };
-    unsafe { FillRect(hdc, &client, bg_brush); }
-    unsafe { DeleteObject(bg_brush.into()); }
+    unsafe {
+        FillRect(hdc, &client, bg_brush);
+    }
+    unsafe {
+        DeleteObject(bg_brush.into());
+    }
 
     // Grip area — draw dots
     let grip = state.grip_size;
-    let grip_color = if is_dark { COLORREF(0x00888888) } else { COLORREF(0x00999999) };
+    let grip_color = if is_dark {
+        COLORREF(0x00888888)
+    } else {
+        COLORREF(0x00999999)
+    };
     let grip_brush = unsafe { CreateSolidBrush(grip_color) };
     let dot_size = theme::scale(2, state.dpi);
-    let dot_gap  = theme::scale(4, state.dpi);
+    let dot_gap = theme::scale(4, state.dpi);
 
     match state.layout {
         Layout::Horizontal => {
@@ -540,11 +608,13 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
                 let dy = start_y + i * (dot_size + dot_gap);
                 let dot = RECT {
                     left: cx - dot_size / 2,
-                    top:  dy,
-                    right:  cx + dot_size / 2 + 1,
+                    top: dy,
+                    right: cx + dot_size / 2 + 1,
                     bottom: dy + dot_size,
                 };
-                unsafe { FillRect(hdc, &dot, grip_brush); }
+                unsafe {
+                    FillRect(hdc, &dot, grip_brush);
+                }
             }
         }
         Layout::Vertical => {
@@ -555,57 +625,121 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
             for i in 0..3i32 {
                 let dx = start_x + i * (dot_size + dot_gap);
                 let dot = RECT {
-                    left:   dx,
-                    top:    cy - dot_size / 2,
-                    right:  dx + dot_size,
+                    left: dx,
+                    top: cy - dot_size / 2,
+                    right: dx + dot_size,
                     bottom: cy + dot_size / 2 + 1,
                 };
-                unsafe { FillRect(hdc, &dot, grip_brush); }
+                unsafe {
+                    FillRect(hdc, &dot, grip_brush);
+                }
             }
         }
     }
-    unsafe { DeleteObject(grip_brush.into()); }
+    unsafe {
+        DeleteObject(grip_brush.into());
+    }
 
     // Border
-    let border_color = if is_dark { COLORREF(0x00555555) } else { COLORREF(0x00CCCCCC) };
+    let border_color = if is_dark {
+        COLORREF(0x00555555)
+    } else {
+        COLORREF(0x00CCCCCC)
+    };
     let border_brush = unsafe { CreateSolidBrush(border_color) };
-    let top_border = RECT { left: client.left, top: client.top, right: client.right, bottom: client.top + 1 };
-    unsafe { FillRect(hdc, &top_border, border_brush); }
-    let bottom_border = RECT { left: client.left, top: client.bottom - 1, right: client.right, bottom: client.bottom };
-    unsafe { FillRect(hdc, &bottom_border, border_brush); }
-    let left_border = RECT { left: client.left, top: client.top, right: client.left + 1, bottom: client.bottom };
-    unsafe { FillRect(hdc, &left_border, border_brush); }
-    let right_border = RECT { left: client.right - 1, top: client.top, right: client.right, bottom: client.bottom };
-    unsafe { FillRect(hdc, &right_border, border_brush); }
-    unsafe { DeleteObject(border_brush.into()); }
+    let top_border = RECT {
+        left: client.left,
+        top: client.top,
+        right: client.right,
+        bottom: client.top + 1,
+    };
+    unsafe {
+        FillRect(hdc, &top_border, border_brush);
+    }
+    let bottom_border = RECT {
+        left: client.left,
+        top: client.bottom - 1,
+        right: client.right,
+        bottom: client.bottom,
+    };
+    unsafe {
+        FillRect(hdc, &bottom_border, border_brush);
+    }
+    let left_border = RECT {
+        left: client.left,
+        top: client.top,
+        right: client.left + 1,
+        bottom: client.bottom,
+    };
+    unsafe {
+        FillRect(hdc, &left_border, border_brush);
+    }
+    let right_border = RECT {
+        left: client.right - 1,
+        top: client.top,
+        right: client.right,
+        bottom: client.bottom,
+    };
+    unsafe {
+        FillRect(hdc, &right_border, border_brush);
+    }
+    unsafe {
+        DeleteObject(border_brush.into());
+    }
 
-    unsafe { SetBkMode(hdc, TRANSPARENT); }
+    unsafe {
+        SetBkMode(hdc, TRANSPARENT);
+    }
 
-    let text_cr = if is_dark { COLORREF(0x00FFFFFF) } else { COLORREF(0x00202020) };
-    unsafe { SetTextColor(hdc, text_cr); }
+    let text_cr = if is_dark {
+        COLORREF(0x00FFFFFF)
+    } else {
+        COLORREF(0x00202020)
+    };
+    unsafe {
+        SetTextColor(hdc, text_cr);
+    }
 
     let default_font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
     let old_font = unsafe { SelectObject(hdc, default_font) };
 
     for (i, btn) in state.buttons.iter().enumerate() {
-        let is_hover   = state.hover_index   == Some(i);
+        let is_hover = state.hover_index == Some(i);
         let is_pressed = state.pressed_index == Some(i);
-        let is_dragging_source = state.reorder.as_ref()
+        let is_dragging_source = state
+            .reorder
+            .as_ref()
             .map(|r| r.active && r.source_button == i)
             .unwrap_or(false);
 
         if is_dragging_source {
             // Don't draw hover/pressed highlight for the dragged button.
         } else if is_pressed {
-            let hl = if is_dark { COLORREF(0x00505050) } else { COLORREF(0x00D0D0D0) };
+            let hl = if is_dark {
+                COLORREF(0x00505050)
+            } else {
+                COLORREF(0x00D0D0D0)
+            };
             let hbr = unsafe { CreateSolidBrush(hl) };
-            unsafe { FillRect(hdc, &btn.rect, hbr); }
-            unsafe { DeleteObject(hbr.into()); }
+            unsafe {
+                FillRect(hdc, &btn.rect, hbr);
+            }
+            unsafe {
+                DeleteObject(hbr.into());
+            }
         } else if is_hover {
-            let hl = if is_dark { COLORREF(0x003D3D3D) } else { COLORREF(0x00E0E0E0) };
+            let hl = if is_dark {
+                COLORREF(0x003D3D3D)
+            } else {
+                COLORREF(0x00E0E0E0)
+            };
             let hbr = unsafe { CreateSolidBrush(hl) };
-            unsafe { FillRect(hdc, &btn.rect, hbr); }
-            unsafe { DeleteObject(hbr.into()); }
+            unsafe {
+                FillRect(hdc, &btn.rect, hbr);
+            }
+            unsafe {
+                DeleteObject(hbr.into());
+            }
         }
 
         let label = if btn.is_add {
@@ -616,11 +750,17 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
 
         // Dim text for the button being dragged.
         let text_cr_this = if is_dragging_source {
-            if is_dark { COLORREF(0x00808080) } else { COLORREF(0x00A0A0A0) }
+            if is_dark {
+                COLORREF(0x00808080)
+            } else {
+                COLORREF(0x00A0A0A0)
+            }
         } else {
             text_cr
         };
-        unsafe { SetTextColor(hdc, text_cr_this); }
+        unsafe {
+            SetTextColor(hdc, text_cr_this);
+        }
 
         let mut label_wide: Vec<u16> = label.encode_utf16().collect();
         let mut draw_rect = btn.rect;
@@ -632,19 +772,22 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
         if !btn.is_add {
             draw_rect.left += theme::scale(BTN_PAD_H, state.dpi);
         }
-        unsafe { DrawTextW(hdc, &mut label_wide, &mut draw_rect, flags); }
+        unsafe {
+            DrawTextW(hdc, &mut label_wide, &mut draw_rect, flags);
+        }
     }
 
     if !old_font.is_invalid() {
-        unsafe { SelectObject(hdc, old_font); }
+        unsafe {
+            SelectObject(hdc, old_font);
+        }
     }
 
     // Reorder insertion caret (horizontal layout only).
     if let Some(r) = state.reorder {
         if r.active && state.layout == Layout::Horizontal {
-            let folder_buttons: Vec<&ButtonLayout> = state.buttons.iter()
-                .filter(|b| !b.is_add)
-                .collect();
+            let folder_buttons: Vec<&ButtonLayout> =
+                state.buttons.iter().filter(|b| !b.is_add).collect();
             if !folder_buttons.is_empty() {
                 // X coordinate of the caret.
                 let caret_x = if r.insertion >= folder_buttons.len() {
@@ -653,7 +796,11 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
                     folder_buttons[r.insertion].rect.left - 1
                 };
                 let caret_w = theme::scale(2, state.dpi);
-                let caret_color = if is_dark { COLORREF(0x00A0A0FF) } else { COLORREF(0x004040C0) };
+                let caret_color = if is_dark {
+                    COLORREF(0x00A0A0FF)
+                } else {
+                    COLORREF(0x004040C0)
+                };
                 let caret_brush = unsafe { CreateSolidBrush(caret_color) };
                 let caret_rect = RECT {
                     left: caret_x,
@@ -661,13 +808,19 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
                     right: caret_x + caret_w,
                     bottom: client.bottom - 2,
                 };
-                unsafe { FillRect(hdc, &caret_rect, caret_brush); }
-                unsafe { DeleteObject(caret_brush.into()); }
+                unsafe {
+                    FillRect(hdc, &caret_rect, caret_brush);
+                }
+                unsafe {
+                    DeleteObject(caret_brush.into());
+                }
             }
         }
     }
 
-    unsafe { let _ = EndPaint(hwnd, &ps); }
+    unsafe {
+        let _ = EndPaint(hwnd, &ps);
+    }
 }
 
 // ── Window procedure ─────────────────────────────────────────────────────────
@@ -685,17 +838,23 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // Now that we know the real size, re-clamp position to fit entirely
             // within the current monitor's work area (the Explorer's monitor).
             let mut current_rect = RECT::default();
-            unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut current_rect); }
-            let (final_x, final_y) = clamp_to_work_area(
-                current_rect.left,
-                current_rect.top,
-                w, h,
-                Some(hwnd),
-            );
+            unsafe {
+                let _ =
+                    windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut current_rect);
+            }
+            let (final_x, final_y) =
+                clamp_to_work_area(current_rect.left, current_rect.top, w, h, Some(hwnd));
 
             unsafe {
-                let _ = SetWindowPos(hwnd, None, final_x, final_y, w, h,
-                    SWP_NOZORDER | SWP_NOACTIVATE);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    final_x,
+                    final_y,
+                    w,
+                    h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
             }
 
             // Apply layered window transparency
@@ -711,14 +870,19 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // (tracked in ACTIVE_EXPLORER by the CBT hook). GetForegroundWindow() is
             // unreliable during HCBT_ACTIVATE handling because activation hasn't
             // completed yet.
-            let explorer_hwnd = get_active_explorer().unwrap_or_else(|| unsafe { GetForegroundWindow() });
+            let explorer_hwnd =
+                get_active_explorer().unwrap_or_else(|| unsafe { GetForegroundWindow() });
             let class = crate::explorer::get_class_name(explorer_hwnd);
             if class == "CabinetWClass" {
-                crate::log::info(&format!("toolbar create: showing above explorer={explorer_hwnd:?}"));
+                crate::log::info(&format!(
+                    "toolbar create: showing above explorer={explorer_hwnd:?}"
+                ));
                 show_above(hwnd, explorer_hwnd);
             } else {
                 crate::log::info(&format!("toolbar create: fg class={class}, hiding"));
-                unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
             }
 
             LRESULT(0)
@@ -755,7 +919,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
             let mut pt = POINT { x, y };
-            unsafe { ScreenToClient(hwnd, &mut pt); }
+            unsafe {
+                ScreenToClient(hwnd, &mut pt);
+            }
 
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
@@ -773,11 +939,17 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         WM_PAINT => {
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
-                unsafe { paint(hwnd, &*ptr); }
+                unsafe {
+                    paint(hwnd, &*ptr);
+                }
             } else {
                 let mut ps = PAINTSTRUCT::default();
-                unsafe { BeginPaint(hwnd, &mut ps); }
-                unsafe { let _ = EndPaint(hwnd, &ps); }
+                unsafe {
+                    BeginPaint(hwnd, &mut ps);
+                }
+                unsafe {
+                    let _ = EndPaint(hwnd, &ps);
+                }
             }
             LRESULT(0)
         }
@@ -807,7 +979,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         r.insertion = compute_insertion_index(state, x);
                         state.reorder = Some(r);
                         state.hover_index = None;
-                        unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                        unsafe {
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
                         return LRESULT(0);
                     }
                     state.reorder = Some(r);
@@ -817,7 +991,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let new_hover = hit_test(state, x, y);
                 if new_hover != state.hover_index {
                     state.hover_index = new_hover;
-                    unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
                 }
                 if !state.tracking_mouse {
                     let mut tme = TRACKMOUSEEVENT {
@@ -839,7 +1015,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let state = unsafe { &mut *ptr };
                 state.hover_index = None;
                 state.tracking_mouse = false;
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
             }
             LRESULT(0)
         }
@@ -856,7 +1034,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 if state.reorder.as_ref().map(|r| r.active).unwrap_or(false) {
                     state.reorder = None;
                     state.pressed_index = None;
-                    unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
                 }
             }
             LRESULT(0)
@@ -883,10 +1063,14 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         });
                         // Capture on press so a fast flick out of the toolbar
                         // still routes WM_MOUSEMOVE / WM_LBUTTONUP back to us.
-                        unsafe { let _ = SetCapture(hwnd); }
+                        unsafe {
+                            let _ = SetCapture(hwnd);
+                        }
                     }
                 }
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
             }
             LRESULT(0)
         }
@@ -900,12 +1084,16 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
                 // Handle reorder first: if the gesture became active, commit and skip click.
                 if let Some(r) = state.reorder.take() {
-                    unsafe { let _ = ReleaseCapture(); }
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
                     if r.active {
                         let source_folder = r.source_button - 1; // button 0 is +
                         commit_reorder(hwnd, source_folder, r.insertion);
                         state.pressed_index = None;
-                        unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                        unsafe {
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
                         return LRESULT(0);
                     }
                     // Not active = plain click; fall through to existing click logic.
@@ -922,19 +1110,25 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         let path = state.buttons[idx].folder.path.clone();
                         let ctrl = (wparam.0 & MK_CONTROL.0 as usize) != 0;
                         if ctrl {
-                            let timeout = state.config.as_ref()
+                            let timeout = state
+                                .config
+                                .as_ref()
                                 .map(|c| c.new_tab_timeout_ms_zero_disables)
                                 .unwrap_or(500);
                             crate::navigate::open_in_new_tab(get_active_explorer(), &path, timeout);
                         } else if let Some(explorer_hwnd) = get_active_explorer() {
-                            if let Some(sb) = unsafe { crate::shell_windows::get_shell_browser_for(explorer_hwnd) } {
+                            if let Some(sb) = unsafe {
+                                crate::shell_windows::get_shell_browser_for(explorer_hwnd)
+                            } {
                                 let _ = crate::navigate::navigate_to(&sb, &path);
                             }
                         }
                     }
                 }
                 state.pressed_index = None;
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
             }
             LRESULT(0)
         }
@@ -947,55 +1141,89 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 if let Some(idx) = hit_test(state, x, y) {
                     let mut pt = POINT { x, y };
-                    unsafe { ClientToScreen(hwnd, &mut pt); }
+                    unsafe {
+                        ClientToScreen(hwnd, &mut pt);
+                    }
                     if state.buttons[idx].is_add {
                         let items = [
-                            crate::contextmenu::MenuItem { id: MENU_ID_EDIT_CONFIG,   label: "Edit config" },
-                            crate::contextmenu::MenuItem { id: MENU_ID_RELOAD_CONFIG, label: "Reload config" },
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_EDIT_CONFIG,
+                                label: "Edit config",
+                            },
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_RELOAD_CONFIG,
+                                label: "Reload config",
+                            },
                         ];
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
                         match chosen {
                             MENU_ID_EDIT_CONFIG => open_config_in_editor(),
-                            MENU_ID_RELOAD_CONFIG => {
-                                unsafe {
-                                    let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
-                                }
-                            }
+                            MENU_ID_RELOAD_CONFIG => unsafe {
+                                let _ =
+                                    PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
+                            },
                             _ => {}
                         }
                     } else {
                         let items = [
-                            crate::contextmenu::MenuItem { id: MENU_ID_OPEN,         label: "Open" },
-                            crate::contextmenu::MenuItem { id: MENU_ID_OPEN_NEW_TAB, label: "Open in new tab" },
-                            crate::contextmenu::MenuItem { id: MENU_ID_COPY_PATH,    label: "Copy path" },
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_OPEN,
+                                label: "Open",
+                            },
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_OPEN_NEW_TAB,
+                                label: "Open in new tab",
+                            },
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_COPY_PATH,
+                                label: "Copy path",
+                            },
                             crate::contextmenu::SEPARATOR,
-                            crate::contextmenu::MenuItem { id: MENU_ID_RENAME,       label: "Rename" },
-                            crate::contextmenu::MenuItem { id: MENU_ID_REMOVE,       label: "Remove" },
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_RENAME,
+                                label: "Rename",
+                            },
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_REMOVE,
+                                label: "Remove",
+                            },
                         ];
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
                         let path = state.buttons[idx].folder.path.clone();
                         match chosen {
                             MENU_ID_OPEN => {
                                 if let Some(explorer_hwnd) = get_active_explorer() {
-                                    if let Some(sb) = unsafe { crate::shell_windows::get_shell_browser_for(explorer_hwnd) } {
+                                    if let Some(sb) = unsafe {
+                                        crate::shell_windows::get_shell_browser_for(explorer_hwnd)
+                                    } {
                                         let _ = crate::navigate::navigate_to(&sb, &path);
                                     }
                                 }
                             }
                             MENU_ID_OPEN_NEW_TAB => {
-                                let timeout = state.config.as_ref()
+                                let timeout = state
+                                    .config
+                                    .as_ref()
                                     .map(|c| c.new_tab_timeout_ms_zero_disables)
                                     .unwrap_or(500);
-                                crate::navigate::open_in_new_tab(get_active_explorer(), &path, timeout);
+                                crate::navigate::open_in_new_tab(
+                                    get_active_explorer(),
+                                    &path,
+                                    timeout,
+                                );
                             }
-                            MENU_ID_COPY_PATH => { copy_to_clipboard(&path); }
+                            MENU_ID_COPY_PATH => {
+                                copy_to_clipboard(&path);
+                            }
                             MENU_ID_RENAME => {
                                 let rect = state.buttons[idx].rect;
                                 let name = state.buttons[idx].folder.name.clone();
                                 let folder_index = idx - 1; // + button at index 0
                                 start_inline_rename(hwnd, rect, folder_index, &name);
                             }
-                            MENU_ID_REMOVE => { remove_folder_at(hwnd, idx); }
+                            MENU_ID_REMOVE => {
+                                remove_folder_at(hwnd, idx);
+                            }
                             _ => {}
                         }
                     }
@@ -1018,8 +1246,17 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 state.grip_size = theme::scale(GRIP_SIZE, new_dpi);
                 let (w, h) = compute_layout(state);
                 unsafe {
-                    let _ = SetWindowPos(hwnd, None, 0, 0, w, h,
-                        SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        0,
+                        0,
+                        w,
+                        h,
+                        SWP_NOZORDER
+                            | SWP_NOACTIVATE
+                            | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE,
+                    );
                     let _ = InvalidateRect(Some(hwnd), None, true);
                 }
             }
@@ -1031,7 +1268,10 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 }
 
 unsafe extern "system" fn toolbar_wndproc_safe(
-    hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
 ) -> LRESULT {
     match std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
         toolbar_wndproc(hwnd, msg, wparam, lparam)
@@ -1054,22 +1294,39 @@ fn apply_opacity(hwnd: HWND, state: &ToolbarState) {
 // ── Drop target registration ─────────────────────────────────────────────────
 
 fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
-    if state.drop_registered { return; }
+    if state.drop_registered {
+        return;
+    }
 
     // Capture everything needed for the closure (must be Send+Sync, no borrows on state).
     #[derive(Clone)]
-    struct Info { rect: RECT, action: ActionSource }
+    struct Info {
+        rect: RECT,
+        action: ActionSource,
+    }
     #[derive(Clone)]
-    enum ActionSource { Folder(String), Add }
+    enum ActionSource {
+        Folder(String),
+        Add,
+    }
 
-    let button_info: Vec<Info> = state.buttons.iter().map(|b| Info {
-        rect: b.rect,
-        action: if b.is_add { ActionSource::Add } else { ActionSource::Folder(b.folder.path.clone()) },
-    }).collect();
+    let button_info: Vec<Info> = state
+        .buttons
+        .iter()
+        .map(|b| Info {
+            rect: b.rect,
+            action: if b.is_add {
+                ActionSource::Add
+            } else {
+                ActionSource::Folder(b.folder.path.clone())
+            },
+        })
+        .collect();
 
     let resolver = move |cx: i32, cy: i32| -> Option<crate::dragdrop::DropAction> {
-        let hit = button_info.iter()
-            .find(|i| cx >= i.rect.left && cx < i.rect.right && cy >= i.rect.top && cy < i.rect.bottom)?;
+        let hit = button_info.iter().find(|i| {
+            cx >= i.rect.left && cx < i.rect.right && cy >= i.rect.top && cy < i.rect.bottom
+        })?;
         Some(match &hit.action {
             ActionSource::Folder(p) => crate::dragdrop::DropAction::MoveCopyTo(p.clone()),
             ActionSource::Add => crate::dragdrop::DropAction::AddFolder,
@@ -1090,7 +1347,10 @@ pub fn create_toolbar(
     hinstance: windows::Win32::Foundation::HINSTANCE,
 ) -> Option<HWND> {
     CLASS_REGISTERED.call_once(|| {
-        let class_wide: Vec<u16> = CLASS_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+        let class_wide: Vec<u16> = CLASS_NAME
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -1112,7 +1372,10 @@ pub fn create_toolbar(
     let state = Box::new(ToolbarState::new(dpi, config));
     let state_ptr = Box::into_raw(state);
 
-    let class_wide: Vec<u16> = CLASS_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    let class_wide: Vec<u16> = CLASS_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
     // Determine initial window position: saved pos > default pos
     let (mut x, mut y) = load_saved_pos().unwrap_or((screen_pos.left, screen_pos.top));
@@ -1139,8 +1402,10 @@ pub fn create_toolbar(
             PCWSTR(class_wide.as_ptr()),
             PCWSTR::null(),
             WS_POPUP | WS_VISIBLE,
-            x, y,
-            placeholder_w, placeholder_h,
+            x,
+            y,
+            placeholder_w,
+            placeholder_h,
             None, // no owner — independent top-level window
             None,
             Some(hinstance),
@@ -1165,18 +1430,30 @@ pub fn create_toolbar(
 
 pub fn refresh_toolbar(hwnd: HWND) {
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-    if ptr.is_null() { return; }
+    if ptr.is_null() {
+        return;
+    }
     let state = unsafe { &mut *ptr };
     state.config = Config::load();
-    state.layout = state.config.as_ref().map_or(Layout::Horizontal, |c| c.layout);
+    state.layout = state
+        .config
+        .as_ref()
+        .map_or(Layout::Horizontal, |c| c.layout);
 
     // Re-apply opacity in case config changed.
     apply_opacity(hwnd, state);
 
     let (w, h) = compute_layout(state);
     unsafe {
-        let _ = SetWindowPos(hwnd, None, 0, 0, w, h,
-            SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE,
+        );
         let _ = InvalidateRect(Some(hwnd), None, true);
     }
 }
@@ -1204,7 +1481,9 @@ pub(crate) fn append_folder_and_reload(path: &std::path::Path) {
     }
 
     if let Some(hwnd) = get_global_toolbar_hwnd() {
-        unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
+        }
     }
 }
 
@@ -1233,21 +1512,24 @@ fn copy_to_clipboard(text: &str) {
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
-    use windows::Win32::System::Memory::{
-        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
-    };
+    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
     use windows::Win32::System::Ole::CF_UNICODETEXT;
 
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let byte_size = wide.len() * std::mem::size_of::<u16>();
 
     unsafe {
-        if OpenClipboard(None).is_err() { return; }
+        if OpenClipboard(None).is_err() {
+            return;
+        }
         let _ = EmptyClipboard();
 
         let hmem = match GlobalAlloc(GMEM_MOVEABLE, byte_size) {
             Ok(h) if !h.is_invalid() => h,
-            _ => { let _ = CloseClipboard(); return; }
+            _ => {
+                let _ = CloseClipboard();
+                return;
+            }
         };
         let dest = GlobalLock(hmem);
         if dest.is_null() {
@@ -1273,7 +1555,9 @@ fn commit_reorder(hwnd: HWND, from: usize, to: usize) {
         crate::log::error(&format!("commit_reorder: save failed: {e}"));
         return;
     }
-    unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
+    }
 }
 
 fn remove_folder_at(hwnd: HWND, index: usize) {
@@ -1282,14 +1566,18 @@ fn remove_folder_at(hwnd: HWND, index: usize) {
         None => return,
     };
     // The toolbar's button index includes the + button at position 0; adjust.
-    if index == 0 { return; } // safety: + button never reaches here (is_add branch)
+    if index == 0 {
+        return;
+    } // safety: + button never reaches here (is_add branch)
     let folder_index = index - 1;
     cfg.remove_folder(folder_index);
     if let Err(e) = cfg.save() {
         crate::log::error(&format!("remove_folder_at: save failed: {e}"));
         return;
     }
-    unsafe { let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0)); }
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
+    }
 }
 
 // ── Inline rename ───────────────────────────────────────────────────────────
@@ -1312,7 +1600,10 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
 
     let hinstance = exe_hinstance();
 
-    let wide_initial: Vec<u16> = initial_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide_initial: Vec<u16> = initial_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
     // ES_AUTOHSCROLL = 0x0080
     const ES_AUTOHSCROLL: u32 = 0x0080;
@@ -1334,17 +1625,14 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
             None,
         )
     };
-    let Ok(edit) = edit else { return; };
+    let Ok(edit) = edit else {
+        return;
+    };
 
     // Select all text
     const EM_SETSEL: u32 = 0x00B1;
     unsafe {
-        SendMessageW(
-            edit,
-            EM_SETSEL,
-            Some(WPARAM(0)),
-            Some(LPARAM(-1)),
-        );
+        SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
         let _ = SetFocus(Some(edit));
     }
 

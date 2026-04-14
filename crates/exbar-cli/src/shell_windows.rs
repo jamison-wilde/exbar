@@ -5,12 +5,14 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     IServiceProvider,
 };
-use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4, VARENUM};
+use windows::Win32::System::Variant::{
+    VARENUM, VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4,
+};
 use windows::Win32::UI::Shell::{
-    IShellBrowser, IShellWindows, IWebBrowserApp, ShellWindows, SID_STopLevelBrowser,
+    IShellBrowser, IShellWindows, IWebBrowserApp, SID_STopLevelBrowser, ShellWindows,
 };
 use windows_core::Interface;
 
@@ -69,8 +71,7 @@ pub unsafe fn get_shell_browser_for(cabinet_hwnd: HWND) -> Option<IShellBrowser>
             None => return None,
         };
 
-        let browser: IShellBrowser =
-            unsafe { sp.QueryService(&SID_STopLevelBrowser).ok()? };
+        let browser: IShellBrowser = unsafe { sp.QueryService(&SID_STopLevelBrowser).ok()? };
         return Some(browser);
     }
 
@@ -95,15 +96,22 @@ pub unsafe fn enumerate_shell_browsers() -> Vec<(isize, IShellBrowser)> {
 
     for i in 0..count {
         let index = unsafe { variant_i4(i) };
-        let Some(disp) = (unsafe { shell_windows.Item(&index).ok() }) else { continue };
-        let Some(wba) = disp.cast::<IWebBrowserApp>().ok() else { continue };
-        let Ok(hw) = (unsafe { wba.HWND() }) else { continue };
-        let Some(sp) = wba.cast::<IServiceProvider>().ok() else { continue };
-        let browser: IShellBrowser =
-            match unsafe { sp.QueryService(&SID_STopLevelBrowser) } {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
+        let Some(disp) = (unsafe { shell_windows.Item(&index).ok() }) else {
+            continue;
+        };
+        let Some(wba) = disp.cast::<IWebBrowserApp>().ok() else {
+            continue;
+        };
+        let Ok(hw) = (unsafe { wba.HWND() }) else {
+            continue;
+        };
+        let Some(sp) = wba.cast::<IServiceProvider>().ok() else {
+            continue;
+        };
+        let browser: IShellBrowser = match unsafe { sp.QueryService(&SID_STopLevelBrowser) } {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
         out.push((hw.0, browser));
     }
     out

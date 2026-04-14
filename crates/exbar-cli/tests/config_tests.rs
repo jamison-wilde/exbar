@@ -71,7 +71,10 @@ fn serialize_round_trip() {
     assert_eq!(cfg.folders.len(), cfg2.folders.len());
     assert_eq!(cfg.folders[0].name, cfg2.folders[0].name);
     assert_eq!(cfg.folders[1].icon, cfg2.folders[1].icon);
-    assert_eq!(cfg.new_tab_timeout_ms_zero_disables, cfg2.new_tab_timeout_ms_zero_disables);
+    assert_eq!(
+        cfg.new_tab_timeout_ms_zero_disables,
+        cfg2.new_tab_timeout_ms_zero_disables
+    );
     assert_eq!(cfg.new_tab_timeout_ms_zero_disables, 200);
 }
 
@@ -102,7 +105,9 @@ fn add_folder_appends_to_end() {
 #[test]
 fn remove_folder_deletes_by_index() {
     let mut cfg = config::Config::from_str(
-        r#"{"folders":[{"name":"A","path":"C:\\a"},{"name":"B","path":"C:\\b"}]}"#).unwrap();
+        r#"{"folders":[{"name":"A","path":"C:\\a"},{"name":"B","path":"C:\\b"}]}"#,
+    )
+    .unwrap();
     cfg.remove_folder(0);
     assert_eq!(cfg.folders.len(), 1);
     assert_eq!(cfg.folders[0].name, "B");
@@ -155,7 +160,13 @@ fn move_folder_forward() {
         r#"{"folders":[{"name":"A","path":"C:\\a"},{"name":"B","path":"C:\\b"},{"name":"C","path":"C:\\c"}]}"#
     ).unwrap();
     cfg.move_folder(0, 3);
-    assert_eq!(cfg.folders.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["B", "C", "A"]);
+    assert_eq!(
+        cfg.folders
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["B", "C", "A"]
+    );
 }
 
 #[test]
@@ -164,25 +175,36 @@ fn move_folder_backward() {
         r#"{"folders":[{"name":"A","path":"C:\\a"},{"name":"B","path":"C:\\b"},{"name":"C","path":"C:\\c"}]}"#
     ).unwrap();
     cfg.move_folder(2, 0);
-    assert_eq!(cfg.folders.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["C", "A", "B"]);
+    assert_eq!(
+        cfg.folders
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["C", "A", "B"]
+    );
 }
 
 #[test]
 fn move_folder_same_position_is_noop() {
     let mut cfg = config::Config::from_str(
-        r#"{"folders":[{"name":"A","path":"C:\\a"},{"name":"B","path":"C:\\b"}]}"#
-    ).unwrap();
+        r#"{"folders":[{"name":"A","path":"C:\\a"},{"name":"B","path":"C:\\b"}]}"#,
+    )
+    .unwrap();
     cfg.move_folder(0, 0);
     cfg.move_folder(1, 1);
     cfg.move_folder(1, 2); // insertion index equals source+1 → no-op too
-    assert_eq!(cfg.folders.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["A", "B"]);
+    assert_eq!(
+        cfg.folders
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["A", "B"]
+    );
 }
 
 #[test]
 fn move_folder_out_of_bounds_is_noop() {
-    let mut cfg = config::Config::from_str(
-        r#"{"folders":[{"name":"A","path":"C:\\a"}]}"#
-    ).unwrap();
+    let mut cfg = config::Config::from_str(r#"{"folders":[{"name":"A","path":"C:\\a"}]}"#).unwrap();
     cfg.move_folder(5, 0);
     cfg.move_folder(0, 99);
     assert_eq!(cfg.folders[0].name, "A");

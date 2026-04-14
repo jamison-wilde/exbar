@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
-use windows::Win32::Graphics::Gdi::{GetSysColor, SYS_COLOR_INDEX};
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Gdi::{GetSysColor, SYS_COLOR_INDEX};
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::core::w;
 
@@ -35,7 +35,9 @@ pub fn is_dark_mode() -> bool {
         #[cfg(not(test))]
         crate::log::info(&format!(
             "theme: AppsUseLightTheme registry read ok={} raw_value={} dark_mode={}",
-            result.is_ok(), data, dark
+            result.is_ok(),
+            data,
+            dark
         ));
         dark
     })

@@ -2,9 +2,8 @@
 
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, TrackPopupMenu,
-    MF_STRING, MF_SEPARATOR, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    SetForegroundWindow,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, MF_SEPARATOR, MF_STRING, SetForegroundWindow,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
 };
 use windows_core::PCWSTR;
 
@@ -29,32 +28,36 @@ pub fn show_menu(owner: HWND, pt: POINT, items: &[MenuItem]) -> u32 {
                 let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
             }
         } else {
-            let wide: Vec<u16> = item.label.encode_utf16().chain(std::iter::once(0)).collect();
+            let wide: Vec<u16> = item
+                .label
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
             unsafe {
-                let _ = AppendMenuW(
-                    hmenu,
-                    MF_STRING,
-                    item.id as usize,
-                    PCWSTR(wide.as_ptr()),
-                );
+                let _ = AppendMenuW(hmenu, MF_STRING, item.id as usize, PCWSTR(wide.as_ptr()));
             }
         }
     }
 
-    unsafe { let _ = SetForegroundWindow(owner); }
+    unsafe {
+        let _ = SetForegroundWindow(owner);
+    }
 
     let result = unsafe {
         TrackPopupMenu(
             hmenu,
             TPM_RETURNCMD | TPM_RIGHTBUTTON,
-            pt.x, pt.y,
+            pt.x,
+            pt.y,
             Some(0),
             owner,
             None,
         )
     };
 
-    unsafe { let _ = DestroyMenu(hmenu); }
+    unsafe {
+        let _ = DestroyMenu(hmenu);
+    }
 
     result.0 as u32
 }

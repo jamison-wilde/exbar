@@ -13,22 +13,21 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use windows::core::PCWSTR;
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyW, RegSetValueExW,
-    HKEY, HKEY_CURRENT_USER, REG_SZ,
-};
 use windows::Win32::Foundation::WIN32_ERROR;
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, REG_SZ, RegCloseKey, RegCreateKeyW, RegSetValueExW,
+};
+use windows::core::PCWSTR;
 
-mod log;
-mod theme;
 mod config;
-mod explorer;
-mod shell_windows;
-mod navigate;
-mod picker;
 mod contextmenu;
 mod dragdrop;
+mod explorer;
+mod log;
+mod navigate;
+mod picker;
+mod shell_windows;
+mod theme;
 mod toolbar;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
@@ -109,13 +108,8 @@ fn win_err(err: WIN32_ERROR) -> windows_core::Error {
 fn reg_create_key(subkey: &str) -> WinResult<HKEY> {
     let subkey_w = to_wide_null(subkey);
     let mut hkey = HKEY::default();
-    let err: WIN32_ERROR = unsafe {
-        RegCreateKeyW(
-            HKEY_CURRENT_USER,
-            PCWSTR(subkey_w.as_ptr()),
-            &mut hkey,
-        )
-    };
+    let err: WIN32_ERROR =
+        unsafe { RegCreateKeyW(HKEY_CURRENT_USER, PCWSTR(subkey_w.as_ptr()), &mut hkey) };
     if err.is_ok() {
         Ok(hkey)
     } else {
@@ -126,12 +120,8 @@ fn reg_create_key(subkey: &str) -> WinResult<HKEY> {
 fn reg_set_string(hkey: HKEY, value_name: &str, data: &str) -> WinResult<()> {
     let name_w = to_wide_null(value_name);
     let data_w = to_wide_null(data);
-    let data_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(
-            data_w.as_ptr().cast::<u8>(),
-            data_w.len() * 2,
-        )
-    };
+    let data_bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(data_w.as_ptr().cast::<u8>(), data_w.len() * 2) };
     let err: WIN32_ERROR = unsafe {
         RegSetValueExW(
             hkey,
@@ -141,20 +131,22 @@ fn reg_set_string(hkey: HKEY, value_name: &str, data: &str) -> WinResult<()> {
             Some(data_bytes),
         )
     };
-    if err.is_ok() { Ok(()) } else { Err(win_err(err)) }
+    if err.is_ok() {
+        Ok(())
+    } else {
+        Err(win_err(err))
+    }
 }
 
 // ── Install paths ─────────────────────────────────────────────────────────────
 
 fn local_appdata() -> PathBuf {
-    PathBuf::from(
-        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
-            format!(
-                r"C:\Users\{}\AppData\Local",
-                std::env::var("USERNAME").unwrap_or_default()
-            )
-        }),
-    )
+    PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+        format!(
+            r"C:\Users\{}\AppData\Local",
+            std::env::var("USERNAME").unwrap_or_default()
+        )
+    }))
 }
 
 fn install_dir() -> PathBuf {
@@ -185,16 +177,16 @@ const RUN_VALUE: &str = "Exbar";
 // ── hook ──────────────────────────────────────────────────────────────────────
 
 fn run_hook() -> WinResult<()> {
-    use windows::Win32::System::Com::{
-        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
-    };
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     use windows::Win32::System::Console::FreeConsole;
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, TranslateMessage, MSG,
+        DispatchMessageW, GetMessageW, MSG, TranslateMessage,
     };
 
     // Detach from any inherited console so no terminal window appears.
-    unsafe { let _ = FreeConsole(); }
+    unsafe {
+        let _ = FreeConsole();
+    }
 
     // Declare per-monitor DPI awareness BEFORE any window is created.
     // Without this, Windows treats exbar.exe as a legacy DPI-unaware
@@ -204,7 +196,7 @@ fn run_hook() -> WinResult<()> {
     // explorer.exe's context; now we must set it ourselves.
     unsafe {
         use windows::Win32::UI::HiDpi::{
-            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
         };
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
@@ -239,7 +231,9 @@ fn run_hook() -> WinResult<()> {
     }
 
     // Cleanup — unreachable in normal operation.
-    unsafe { CoUninitialize(); }
+    unsafe {
+        CoUninitialize();
+    }
     Ok(())
 }
 
@@ -261,8 +255,7 @@ fn install() -> WinResult<()> {
                 { "name": "Desktop",   "path": "shell:Desktop" }
             ]
         });
-        std::fs::write(&cfg, serde_json::to_string_pretty(&stub).unwrap())
-            .map_err(io_err)?;
+        std::fs::write(&cfg, serde_json::to_string_pretty(&stub).unwrap()).map_err(io_err)?;
         println!("Created config at {}", cfg.display());
     } else {
         println!("Config already exists at {}", cfg.display());
@@ -276,7 +269,9 @@ fn install() -> WinResult<()> {
     let run_value = format!("\"{exe_path}\" hook");
     let hkey = reg_create_key(RUN_KEY)?;
     reg_set_string(hkey, RUN_VALUE, &run_value)?;
-    unsafe { let _ = RegCloseKey(hkey); }
+    unsafe {
+        let _ = RegCloseKey(hkey);
+    }
     println!("Registered Run key: {run_value}");
 
     // Start hook process (detached)
@@ -297,15 +292,19 @@ fn install() -> WinResult<()> {
 
 fn uninstall(clean: bool) -> WinResult<()> {
     // 1. Remove Run key
-    use windows::Win32::System::Registry::{RegOpenKeyW, RegDeleteValueW, HKEY_CURRENT_USER};
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteValueW, RegOpenKeyW};
     {
         let run_key_w = to_wide_null(RUN_KEY);
         let mut hkey = HKEY::default();
         let err = unsafe { RegOpenKeyW(HKEY_CURRENT_USER, PCWSTR(run_key_w.as_ptr()), &mut hkey) };
         if err.is_ok() {
             let val_w = to_wide_null(RUN_VALUE);
-            unsafe { let _ = RegDeleteValueW(hkey, PCWSTR(val_w.as_ptr())); }
-            unsafe { let _ = RegCloseKey(hkey); }
+            unsafe {
+                let _ = RegDeleteValueW(hkey, PCWSTR(val_w.as_ptr()));
+            }
+            unsafe {
+                let _ = RegCloseKey(hkey);
+            }
             println!("Removed Run key.");
         }
     }
