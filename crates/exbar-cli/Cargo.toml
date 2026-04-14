@@ -46,3 +46,15 @@ tempfile = "3"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
+
+# Lint gate: deny warnings and clippy::all at build time. Pedantic is
+# held at `allow` because `warnings = "deny"` in [lints.rust] captures
+# clippy warnings too, which would promote every pedantic finding to
+# a hard error. Auditing pedantic findings is documented as follow-up
+# in docs/ci-plan.md.
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
