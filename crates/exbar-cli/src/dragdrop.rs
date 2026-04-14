@@ -77,7 +77,7 @@ impl FolderDropTarget {
 /// Resolve a path (including `shell:` aliases) to a real filesystem path.
 /// Returns the original path if resolution fails or the path is already absolute.
 fn resolve_to_real_path(path: &str) -> String {
-    if !path.starts_with("shell:") && !path.is_empty() {
+    if !crate::config::is_shell_alias(path) && !path.is_empty() {
         // Already a filesystem path; check it starts with a drive letter.
         if path.len() >= 2 && path.as_bytes()[1] == b':' {
             return path.to_owned();

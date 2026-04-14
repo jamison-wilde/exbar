@@ -129,7 +129,6 @@ pub fn default_config_path() -> String {
     path.to_string_lossy().into_owned()
 }
 
-#[allow(dead_code)]
 pub fn is_shell_alias(path: &str) -> bool {
     path.starts_with("shell:")
 }
