@@ -1309,7 +1309,7 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
             cx >= i.rect.left && cx < i.rect.right && cy >= i.rect.top && cy < i.rect.bottom
         })?;
         Some(match &hit.action {
-            ActionSource::Folder(p) => crate::dragdrop::DropAction::MoveCopyTo(p.clone()),
+            ActionSource::Folder(p) => crate::dragdrop::DropAction::MoveCopyTo { target: std::path::PathBuf::from(p) },
             ActionSource::Add => crate::dragdrop::DropAction::AddFolder,
         })
     };
