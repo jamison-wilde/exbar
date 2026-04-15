@@ -2031,6 +2031,25 @@ mod tests {
     }
 
     #[test]
+    fn fire_folder_click_when_no_active_explorer_is_noop() {
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("D", "C:\\D")]);
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.buttons = vec![mk_add_button(), mk_folder_button("D", "C:\\D", 42)];
+        // active_explorer intentionally left None.
+
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireFolderClick { folder_button: 0, ctrl: false },
+        );
+
+        assert!(deps.navigate_calls.lock().unwrap().is_empty(),
+            "navigate should not be called when no active explorer");
+        assert!(deps.new_tab_calls.lock().unwrap().is_empty(),
+            "open_in_new_tab should not be called when no active explorer");
+    }
+
+    #[test]
     fn fire_add_click_when_picker_returns_some_appends_and_saves() {
         let deps = mk_deps();
         *deps.picker.next_result.lock().unwrap() = Some(PathBuf::from("C:\\NewFolder"));
