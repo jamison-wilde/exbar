@@ -397,7 +397,7 @@ struct ToolbarState {
     config_store: Box<dyn ConfigStore>,
     // SP4 consolidation — populated in Tasks 2-3:
     active_explorer: Option<HWND>,
-    #[allow(dead_code)] rename_state: Option<RenameState>,
+    rename_state: Option<RenameState>,
 }
 
 impl ToolbarState {
@@ -503,7 +503,7 @@ impl ToolbarState {
                     crate::warn_on_err!(ReleaseCapture());
                 }
             }
-            CancelInlineRename => cancel_inline_rename(),
+            CancelInlineRename => cancel_inline_rename(self),
             FireAddClick => {
                 if let Some(path) = self.folder_picker.pick_folder() {
                     append_folder_and_reload(self, &path);
@@ -971,10 +971,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         WM_DESTROY => {
             log::info!("toolbar: WM_DESTROY — exiting process");
             clear_global_toolbar();
-            cancel_inline_rename();
             let _ = crate::dragdrop::unregister_drop_target(hwnd);
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
+                // Cancel any active inline rename before freeing state.
+                // SAFETY: ptr is non-null and state is still live at this point;
+                // we zero the USERDATA slot and drop state below.
+                cancel_inline_rename(unsafe { &mut *ptr });
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
                 // SAFETY: The pointer was produced by Box::into_raw in WM_CREATE;
                 // Box::from_raw reclaims it so the Drop runs and state is freed.
@@ -1577,9 +1580,6 @@ fn remove_folder_at(state: &mut ToolbarState, hwnd: HWND, index: usize) {
 
 // ── Inline rename ───────────────────────────────────────────────────────────
 
-/// Global: HWND of the active rename edit control, and the folder index it is editing.
-static RENAME_STATE: std::sync::Mutex<Option<RenameState>> = std::sync::Mutex::new(None);
-
 struct RenameState {
     edit_hwnd: isize,
     /// Raw `Box<RenameSubclassData>` pointer handed to `SetWindowSubclass`.
@@ -1591,7 +1591,9 @@ struct RenameState {
 
 fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, initial_name: &str) {
     // Cancel any existing rename first.
-    cancel_inline_rename();
+    // SAFETY: toolbar is the toolbar HWND; we are on the message-pump thread.
+    let Some(state) = (unsafe { toolbar_state(toolbar) }) else { return; };
+    cancel_inline_rename(state);
 
     let hinstance = exe_hinstance();
 
@@ -1643,10 +1645,14 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
         );
     }
 
-    *RENAME_STATE.lock().unwrap() = Some(RenameState {
-        edit_hwnd: edit.0 as isize,
-        subclass_data: data as usize,
-    });
+    // SAFETY: toolbar_state called at the top of this function; we are still on the
+    // message-pump thread and no other code mutated GWLP_USERDATA since that call.
+    if let Some(state) = unsafe { toolbar_state(toolbar) } {
+        state.rename_state = Some(RenameState {
+            edit_hwnd: edit.0 as isize,
+            subclass_data: data as usize,
+        });
+    }
 }
 
 struct RenameSubclassData {
@@ -1718,7 +1724,12 @@ fn commit_rename(edit: HWND, ref_data: usize) {
     }
 
     destroy_rename_edit(edit);
-    *RENAME_STATE.lock().unwrap() = None;
+    // Clear rename_state from ToolbarState.
+    // SAFETY: commit_rename is called from the EDIT subclass wndproc (same message-pump
+    // thread as the toolbar); toolbar_state's single-thread invariant is satisfied.
+    if let Some(state) = unsafe { toolbar_state(toolbar) } {
+        state.rename_state = None;
+    }
     unsafe {
         let _ = PostMessageW(Some(toolbar), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
     }
@@ -1727,9 +1738,15 @@ fn commit_rename(edit: HWND, ref_data: usize) {
 fn cancel_rename(edit: HWND, ref_data: usize) {
     // SAFETY: Same provenance as commit_rename; this is the Esc path reclaim point.
     let data = unsafe { Box::from_raw(ref_data as *mut RenameSubclassData) };
+    let toolbar = HWND(data.toolbar_hwnd as *mut _);
     let _ = data;
     destroy_rename_edit(edit);
-    *RENAME_STATE.lock().unwrap() = None;
+    // Clear rename_state from ToolbarState.
+    // SAFETY: cancel_rename is called from the EDIT subclass wndproc on the toolbar's
+    // message-pump thread; toolbar_state's single-thread invariant is satisfied.
+    if let Some(state) = unsafe { toolbar_state(toolbar) } {
+        state.rename_state = None;
+    }
 }
 
 fn destroy_rename_edit(edit: HWND) {
@@ -1740,9 +1757,8 @@ fn destroy_rename_edit(edit: HWND) {
     }
 }
 
-fn cancel_inline_rename() {
-    let state = RENAME_STATE.lock().unwrap().take();
-    if let Some(s) = state {
+fn cancel_inline_rename(state: &mut ToolbarState) {
+    if let Some(s) = state.rename_state.take() {
         let edit = HWND(s.edit_hwnd as *mut _);
         destroy_rename_edit(edit);
         // Reclaim the Box leaked into SetWindowSubclass; RemoveWindowSubclass
