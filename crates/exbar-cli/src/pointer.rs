@@ -110,9 +110,121 @@ pub fn transition(
         (Hovering { button: b }, Release { .. }) => (Hovering { button: b }, vec![]),
         (Hovering { button: b }, CaptureLost) => (Hovering { button: b }, vec![]),
 
-        // ── PressedNonFolder / PressedFolder / DraggingReorder ──────────
-        // (Implemented in Task 3.)
-        (s, _) => (s, vec![]),
+        // ── PressedNonFolder ────────────────────────────────────────────
+        (PressedNonFolder { button: b }, Move { .. }) => {
+            // Hovering suppressed while press-in-progress on + button.
+            (PressedNonFolder { button: b }, vec![])
+        }
+        (PressedNonFolder { button: b }, Leave) => {
+            (PressedNonFolder { button: b }, vec![])
+        }
+        (PressedNonFolder { button: b }, Press { .. }) => {
+            // Defensive: shouldn't happen (no intervening release), ignore.
+            (PressedNonFolder { button: b }, vec![])
+        }
+        (PressedNonFolder { button: b }, Release { hit, .. }) => {
+            let fires_click = matches!(hit, Some(h) if h.button == b);
+            let mut cmds = vec![];
+            if fires_click {
+                cmds.push(FireAddClick);
+            }
+            cmds.push(Redraw);
+            (post_release_state(hit), cmds)
+        }
+        (PressedNonFolder { .. }, CaptureLost) => {
+            // We don't hold capture in this state; defensive no-op.
+            (Idle, vec![])
+        }
+
+        // ── PressedFolder ───────────────────────────────────────────────
+        (
+            PressedFolder { button: b, press_x: px, press_y: py },
+            Move { x, y, reorder_threshold_px, insertion_if_reordering, .. },
+        ) => {
+            let moved = (x - px).abs() + (y - py).abs();
+            if moved > reorder_threshold_px {
+                (
+                    DraggingReorder {
+                        source_button: b,
+                        insertion: insertion_if_reordering,
+                    },
+                    vec![CancelInlineRename, Redraw],
+                )
+            } else {
+                (
+                    PressedFolder { button: b, press_x: px, press_y: py },
+                    vec![],
+                )
+            }
+        }
+        (PressedFolder { button: b, press_x: px, press_y: py }, Leave) => {
+            // Capture still held; cursor outside doesn't end the gesture.
+            (PressedFolder { button: b, press_x: px, press_y: py }, vec![])
+        }
+        (PressedFolder { button: b, press_x: px, press_y: py }, Press { .. }) => {
+            // Defensive.
+            (PressedFolder { button: b, press_x: px, press_y: py }, vec![])
+        }
+        (PressedFolder { button: b, .. }, Release { hit, ctrl, .. }) => {
+            let fires_click = matches!(hit, Some(h) if h.button == b && h.is_folder);
+            let mut cmds = vec![ReleaseMouse];
+            if fires_click {
+                cmds.push(FireFolderClick {
+                    folder_button: b - 1,
+                    ctrl,
+                });
+            }
+            cmds.push(Redraw);
+            (post_release_state(hit), cmds)
+        }
+        (PressedFolder { .. }, CaptureLost) => (Idle, vec![Redraw]),
+
+        // ── DraggingReorder ─────────────────────────────────────────────
+        (
+            DraggingReorder { source_button: src, insertion: ins },
+            Move { insertion_if_reordering, .. },
+        ) => {
+            if insertion_if_reordering != ins {
+                (
+                    DraggingReorder {
+                        source_button: src,
+                        insertion: insertion_if_reordering,
+                    },
+                    vec![Redraw],
+                )
+            } else {
+                (
+                    DraggingReorder { source_button: src, insertion: ins },
+                    vec![],
+                )
+            }
+        }
+        (DraggingReorder { source_button: src, insertion: ins }, Leave) => {
+            (DraggingReorder { source_button: src, insertion: ins }, vec![])
+        }
+        (DraggingReorder { source_button: src, insertion: ins }, Press { .. }) => {
+            (DraggingReorder { source_button: src, insertion: ins }, vec![])
+        }
+        (DraggingReorder { source_button: src, insertion: ins }, Release { hit, .. }) => {
+            let cmds = vec![
+                ReleaseMouse,
+                CommitReorder {
+                    from_folder: src - 1,
+                    to_folder: ins,
+                },
+                Redraw,
+            ];
+            (post_release_state(hit), cmds)
+        }
+        (DraggingReorder { .. }, CaptureLost) => (Idle, vec![Redraw]),
+    }
+}
+
+/// Helper: the state you land in after a `Release`, based on the release-point hit.
+fn post_release_state(hit: Option<HitResult>) -> PointerState {
+    match hit {
+        Some(h) => PointerState::Hovering { button: h.button },
+        None => PointerState::Idle,
     }
 }
 
@@ -311,5 +423,265 @@ mod tests {
             transition(PointerState::Hovering { button: 2 }, PointerEvent::CaptureLost);
         assert_eq!(state, PointerState::Hovering { button: 2 });
         assert!(cmds.is_empty());
+    }
+
+    // ── PressedNonFolder ─────────────────────────────────────────────────
+
+    #[test]
+    fn pressed_non_folder_move_is_noop() {
+        let (state, cmds) = transition(
+            PointerState::PressedNonFolder { button: 0 },
+            PointerEvent::Move {
+                x: 100, y: 14,
+                hit: Some(hit(2, true)),
+                reorder_threshold_px: 5,
+                insertion_if_reordering: 1,
+            },
+        );
+        assert_eq!(state, PointerState::PressedNonFolder { button: 0 });
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn pressed_non_folder_release_on_same_button_fires_add_click() {
+        let (state, cmds) = transition(
+            PointerState::PressedNonFolder { button: 0 },
+            PointerEvent::Release {
+                x: 10, y: 14,
+                hit: Some(hit(0, false)),
+                ctrl: false,
+            },
+        );
+        assert_eq!(state, PointerState::Hovering { button: 0 });
+        assert_eq!(
+            cmds,
+            vec![PointerCommand::FireAddClick, PointerCommand::Redraw]
+        );
+    }
+
+    #[test]
+    fn pressed_non_folder_release_on_different_button_does_not_fire_click() {
+        let (state, cmds) = transition(
+            PointerState::PressedNonFolder { button: 0 },
+            PointerEvent::Release {
+                x: 100, y: 14,
+                hit: Some(hit(1, true)),
+                ctrl: false,
+            },
+        );
+        assert_eq!(state, PointerState::Hovering { button: 1 });
+        assert_eq!(cmds, vec![PointerCommand::Redraw]);
+    }
+
+    #[test]
+    fn pressed_non_folder_release_off_all_buttons_returns_to_idle() {
+        let (state, cmds) = transition(
+            PointerState::PressedNonFolder { button: 0 },
+            PointerEvent::Release {
+                x: 1000, y: 1000,
+                hit: None,
+                ctrl: false,
+            },
+        );
+        assert_eq!(state, PointerState::Idle);
+        assert_eq!(cmds, vec![PointerCommand::Redraw]);
+    }
+
+    // ── PressedFolder ────────────────────────────────────────────────────
+
+    #[test]
+    fn pressed_folder_move_within_threshold_stays() {
+        let (state, cmds) = transition(
+            PointerState::PressedFolder { button: 1, press_x: 60, press_y: 14 },
+            PointerEvent::Move {
+                x: 62, y: 15,
+                hit: Some(hit(1, true)),
+                reorder_threshold_px: 5,
+                insertion_if_reordering: 0,
+            },
+        );
+        assert_eq!(
+            state,
+            PointerState::PressedFolder { button: 1, press_x: 60, press_y: 14 }
+        );
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn pressed_folder_move_past_threshold_begins_reorder() {
+        let (state, cmds) = transition(
+            PointerState::PressedFolder { button: 2, press_x: 60, press_y: 14 },
+            PointerEvent::Move {
+                x: 90, y: 14,
+                hit: Some(hit(2, true)),
+                reorder_threshold_px: 5,
+                insertion_if_reordering: 3,
+            },
+        );
+        assert_eq!(
+            state,
+            PointerState::DraggingReorder { source_button: 2, insertion: 3 }
+        );
+        assert_eq!(
+            cmds,
+            vec![PointerCommand::CancelInlineRename, PointerCommand::Redraw]
+        );
+    }
+
+    #[test]
+    fn pressed_folder_release_on_same_folder_fires_folder_click() {
+        let (state, cmds) = transition(
+            PointerState::PressedFolder { button: 2, press_x: 60, press_y: 14 },
+            PointerEvent::Release {
+                x: 60, y: 14,
+                hit: Some(hit(2, true)),
+                ctrl: false,
+            },
+        );
+        assert_eq!(state, PointerState::Hovering { button: 2 });
+        assert_eq!(
+            cmds,
+            vec![
+                PointerCommand::ReleaseMouse,
+                PointerCommand::FireFolderClick { folder_button: 1, ctrl: false },
+                PointerCommand::Redraw,
+            ]
+        );
+    }
+
+    #[test]
+    fn pressed_folder_release_ctrl_threads_ctrl_flag_to_click() {
+        let (state, cmds) = transition(
+            PointerState::PressedFolder { button: 2, press_x: 60, press_y: 14 },
+            PointerEvent::Release {
+                x: 60, y: 14,
+                hit: Some(hit(2, true)),
+                ctrl: true,
+            },
+        );
+        assert_eq!(state, PointerState::Hovering { button: 2 });
+        assert_eq!(
+            cmds,
+            vec![
+                PointerCommand::ReleaseMouse,
+                PointerCommand::FireFolderClick { folder_button: 1, ctrl: true },
+                PointerCommand::Redraw,
+            ]
+        );
+    }
+
+    #[test]
+    fn pressed_folder_release_on_different_button_does_not_fire_click() {
+        let (state, cmds) = transition(
+            PointerState::PressedFolder { button: 2, press_x: 60, press_y: 14 },
+            PointerEvent::Release {
+                x: 200, y: 14,
+                hit: Some(hit(3, true)),
+                ctrl: false,
+            },
+        );
+        assert_eq!(state, PointerState::Hovering { button: 3 });
+        assert_eq!(
+            cmds,
+            vec![PointerCommand::ReleaseMouse, PointerCommand::Redraw]
+        );
+    }
+
+    #[test]
+    fn pressed_folder_release_off_all_buttons_returns_to_idle_releases_capture() {
+        let (state, cmds) = transition(
+            PointerState::PressedFolder { button: 2, press_x: 60, press_y: 14 },
+            PointerEvent::Release {
+                x: 1000, y: 1000,
+                hit: None,
+                ctrl: false,
+            },
+        );
+        assert_eq!(state, PointerState::Idle);
+        assert_eq!(
+            cmds,
+            vec![PointerCommand::ReleaseMouse, PointerCommand::Redraw]
+        );
+    }
+
+    #[test]
+    fn pressed_folder_capture_lost_returns_to_idle() {
+        let (state, cmds) = transition(
+            PointerState::PressedFolder { button: 2, press_x: 60, press_y: 14 },
+            PointerEvent::CaptureLost,
+        );
+        assert_eq!(state, PointerState::Idle);
+        assert_eq!(cmds, vec![PointerCommand::Redraw]);
+    }
+
+    // ── DraggingReorder ──────────────────────────────────────────────────
+
+    #[test]
+    fn dragging_reorder_move_with_new_insertion_redraws() {
+        let (state, cmds) = transition(
+            PointerState::DraggingReorder { source_button: 2, insertion: 1 },
+            PointerEvent::Move {
+                x: 150, y: 14,
+                hit: Some(hit(3, true)),
+                reorder_threshold_px: 5,
+                insertion_if_reordering: 3,
+            },
+        );
+        assert_eq!(
+            state,
+            PointerState::DraggingReorder { source_button: 2, insertion: 3 }
+        );
+        assert_eq!(cmds, vec![PointerCommand::Redraw]);
+    }
+
+    #[test]
+    fn dragging_reorder_move_with_same_insertion_is_noop() {
+        let (state, cmds) = transition(
+            PointerState::DraggingReorder { source_button: 2, insertion: 3 },
+            PointerEvent::Move {
+                x: 150, y: 14,
+                hit: Some(hit(3, true)),
+                reorder_threshold_px: 5,
+                insertion_if_reordering: 3,
+            },
+        );
+        assert_eq!(
+            state,
+            PointerState::DraggingReorder { source_button: 2, insertion: 3 }
+        );
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn dragging_reorder_release_commits_and_releases_capture() {
+        let (state, cmds) = transition(
+            PointerState::DraggingReorder { source_button: 3, insertion: 0 },
+            PointerEvent::Release {
+                x: 0, y: 14,
+                hit: None,
+                ctrl: false,
+            },
+        );
+        assert_eq!(state, PointerState::Idle);
+        assert_eq!(
+            cmds,
+            vec![
+                PointerCommand::ReleaseMouse,
+                PointerCommand::CommitReorder { from_folder: 2, to_folder: 0 },
+                PointerCommand::Redraw,
+            ]
+        );
+    }
+
+    #[test]
+    fn dragging_reorder_capture_lost_returns_to_idle_no_commit() {
+        let (state, cmds) = transition(
+            PointerState::DraggingReorder { source_button: 3, insertion: 2 },
+            PointerEvent::CaptureLost,
+        );
+        assert_eq!(state, PointerState::Idle);
+        assert_eq!(cmds, vec![PointerCommand::Redraw]);
+        assert!(!cmds.iter().any(|c| matches!(c, PointerCommand::CommitReorder { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, PointerCommand::ReleaseMouse)));
     }
 }
