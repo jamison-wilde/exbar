@@ -132,3 +132,193 @@ pub unsafe fn enumerate_shell_browsers() -> Vec<(isize, IShellBrowser)> {
     }
     out
 }
+
+// ── SP3: ShellBrowser trait ─────────────────────────────────────────────────
+
+use crate::error::{ExbarError, ExbarResult};
+use std::path::Path;
+use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+use windows::Win32::UI::Shell::{SBSP_SAMEBROWSER, SHParseDisplayName, ShellExecuteW};
+use windows::Win32::UI::WindowsAndMessaging::{
+    PostMessageW, SW_SHOWNORMAL, WM_KEYDOWN, WM_KEYUP,
+};
+use windows_core::PCWSTR;
+
+const VK_CONTROL: usize = 0x11;
+const VK_T_KEY: usize = 0x54;
+
+pub trait ShellBrowser: Send + Sync {
+    /// Navigate the Explorer window identified by `explorer` to `path` (same-window).
+    fn navigate(&self, explorer: HWND, path: &Path) -> ExbarResult<()>;
+
+    /// Send Ctrl+T to `explorer`; poll IShellWindows for a new browser; on
+    /// new-tab appearance, BrowseObject to `path`. On timeout or if
+    /// `timeout_ms == 0`, fall back to ShellExecuteW opening a fresh Explorer
+    /// window.
+    fn open_in_new_tab(&self, explorer: HWND, path: &Path, timeout_ms: u32);
+
+    /// The most-recently-activated Explorer (CabinetWClass) HWND.
+    fn active_explorer(&self) -> Option<HWND>;
+
+    /// Record the active Explorer HWND. Called by the foreground WinEvent hook.
+    fn set_active_explorer(&self, hwnd: HWND);
+}
+
+#[derive(Default)]
+pub struct Win32Shell;
+
+impl Win32Shell {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ShellBrowser for Win32Shell {
+    fn navigate(&self, explorer: HWND, path: &Path) -> ExbarResult<()> {
+        // SAFETY: get_shell_browser_for is an unsafe fn requiring STA + COM init;
+        // the wndproc / message-pump thread owns both.
+        let browser = unsafe { get_shell_browser_for(explorer) }.ok_or_else(|| {
+            ExbarError::Config(format!("no IShellBrowser for HWND {:?}", explorer.0))
+        })?;
+
+        let path_str = path.to_string_lossy();
+        let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let pcwstr = PCWSTR(wide.as_ptr());
+
+        let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+        // SAFETY: SHParseDisplayName writes a PIDL we own; freed below regardless.
+        unsafe {
+            SHParseDisplayName(pcwstr, None, &mut pidl, 0, None)?;
+        }
+        if pidl.is_null() {
+            return Err(ExbarError::Config(format!(
+                "SHParseDisplayName returned null PIDL for {:?}",
+                path_str
+            )));
+        }
+
+        // SAFETY: BrowseObject reads the PIDL as input; ownership retained here.
+        let browse_result =
+            unsafe { browser.BrowseObject(pidl, SBSP_SAMEBROWSER).map_err(ExbarError::from) };
+
+        // SAFETY: balance the SHParseDisplayName allocation.
+        unsafe {
+            CoTaskMemFree(Some(pidl as *const core::ffi::c_void));
+        }
+
+        browse_result
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn open_in_new_tab(&self, explorer: HWND, path: &Path, timeout_ms: u32) {
+        let path_str_owned = path.to_string_lossy().into_owned();
+        if timeout_ms == 0 {
+            open_in_new_window(&path_str_owned);
+            return;
+        }
+
+        // SAFETY: enumerate_shell_browsers is unsafe; STA + COM satisfied.
+        let before: std::collections::HashSet<isize> = unsafe { enumerate_shell_browsers() }
+            .into_iter()
+            .map(|(h, _)| h)
+            .collect();
+
+        unsafe {
+            crate::warn_on_err!(PostMessageW(
+                Some(explorer),
+                WM_KEYDOWN,
+                WPARAM(VK_CONTROL),
+                LPARAM(0)
+            ));
+            crate::warn_on_err!(PostMessageW(
+                Some(explorer),
+                WM_KEYDOWN,
+                WPARAM(VK_T_KEY),
+                LPARAM(0)
+            ));
+            crate::warn_on_err!(PostMessageW(
+                Some(explorer),
+                WM_KEYUP,
+                WPARAM(VK_T_KEY),
+                LPARAM(0)
+            ));
+            crate::warn_on_err!(PostMessageW(
+                Some(explorer),
+                WM_KEYUP,
+                WPARAM(VK_CONTROL),
+                LPARAM(0)
+            ));
+        }
+
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() >= std::time::Duration::from_millis(u64::from(timeout_ms)) {
+                log::info!("open_in_new_tab: timeout → falling back to new window");
+                open_in_new_window(&path_str_owned);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            // SAFETY: same as above.
+            let current = unsafe { enumerate_shell_browsers() };
+            for (hwnd, browser) in current {
+                if !before.contains(&hwnd) {
+                    let wide: Vec<u16> =
+                        path_str_owned.encode_utf16().chain(std::iter::once(0)).collect();
+                    let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+                    // SAFETY: SHParseDisplayName writes a PIDL we free below.
+                    let parsed = unsafe {
+                        SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None)
+                    };
+                    if parsed.is_ok() && !pidl.is_null() {
+                        // SAFETY: BrowseObject same as navigate's contract.
+                        let br = unsafe { browser.BrowseObject(pidl, SBSP_SAMEBROWSER) };
+                        // SAFETY: free PIDL regardless of outcome.
+                        unsafe {
+                            CoTaskMemFree(Some(pidl as *const core::ffi::c_void));
+                        }
+                        if let Err(e) = br {
+                            log::error!("open_in_new_tab: BrowseObject failed: {e}");
+                            open_in_new_window(&path_str_owned);
+                        }
+                    } else {
+                        log::error!(
+                            "open_in_new_tab: SHParseDisplayName failed for {path_str_owned}"
+                        );
+                        open_in_new_window(&path_str_owned);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    fn active_explorer(&self) -> Option<HWND> {
+        // Delegate to the module-level static in toolbar.rs (the foreground
+        // WinEvent hook writes to it; SP4 will consolidate fully).
+        crate::toolbar::get_active_explorer()
+    }
+
+    fn set_active_explorer(&self, hwnd: HWND) {
+        crate::toolbar::set_active_explorer(hwnd);
+    }
+}
+
+fn open_in_new_window(path: &str) {
+    let quoted = format!("\"{path}\"");
+    let path_wide: Vec<u16> = quoted.encode_utf16().chain(std::iter::once(0)).collect();
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let exe: Vec<u16> = "explorer.exe".encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let _ = ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(exe.as_ptr()),
+            PCWSTR(path_wide.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
