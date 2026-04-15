@@ -35,6 +35,44 @@ use crate::layout::{self, ButtonLayout, LayoutInput};
 use crate::pointer;
 use crate::theme;
 
+// ── Safe wrappers for repetitive patterns ───────────────────────────────────
+
+/// Retrieve the `ToolbarState` stored in the window's user data.
+///
+/// # Safety
+/// - `hwnd` must be a toolbar window (same HWND that had
+///   `SetWindowLongPtrW(GWLP_USERDATA, state)` called during its `WM_CREATE`).
+/// - Caller must be on the toolbar's message-pump thread — Win32's
+///   single-threaded message dispatch is the synchronization boundary.
+/// - The returned reference borrows the state for the caller's scope; no
+///   other code path may hold a mutable reference in parallel (guaranteed
+///   by single-threaded message dispatch).
+unsafe fn toolbar_state<'a>(hwnd: HWND) -> Option<&'a mut ToolbarState> {
+    // SAFETY: GetWindowLongPtrW returns the value set by SetWindowLongPtrW;
+    // we stored a Box::into_raw pointer in WM_CREATE.
+    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: ptr is non-null; state is owned by the window; caller is on
+    // the message-pump thread (contract above).
+    Some(unsafe { &mut *ptr })
+}
+
+/// Extract `(x, y)` from a WM_* LPARAM whose layout is
+/// `(y << 16) | (x & 0xFFFF)` with signed 16-bit components.
+fn lparam_point(lparam: LPARAM) -> (i32, i32) {
+    let x = (lparam.0 & 0xFFFF) as i16 as i32;
+    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+    (x, y)
+}
+
+/// Encode `s` as a null-terminated UTF-16 vector suitable for
+/// `PCWSTR(v.as_ptr())`. The vec must outlive the PCWSTR usage.
+fn wide_null(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 static CLASS_REGISTERED: Once = Once::new();
@@ -902,9 +940,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let _ = ScreenToClient(hwnd, &mut pt);
             }
 
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-            if !ptr.is_null() {
-                let state = unsafe { &*ptr };
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
                 if in_grip(state, pt.x, pt.y) {
                     return LRESULT(HTCAPTION as isize);
                 }
@@ -916,10 +952,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         }
 
         WM_PAINT => {
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-            if !ptr.is_null() {
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
                 unsafe {
-                    paint(hwnd, &*ptr);
+                    paint(hwnd, state);
                 }
             } else {
                 let mut ps = PAINTSTRUCT::default();
@@ -934,18 +969,14 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         }
 
         WM_MOVE => {
-            let x = (lparam.0 & 0xFFFF) as i16 as i32;
-            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let (x, y) = lparam_point(lparam);
             save_pos(x, y);
             LRESULT(0)
         }
 
         WM_MOUSEMOVE => {
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-            if !ptr.is_null() {
-                let state = unsafe { &mut *ptr };
-                let x = (lparam.0 & 0xFFFF) as i16 as i32;
-                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                let (x, y) = lparam_point(lparam);
 
                 let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| pointer::HitResult {
                     button: idx,
@@ -975,9 +1006,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         }
 
         x if x == WM_MOUSELEAVE => {
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-            if !ptr.is_null() {
-                let state = unsafe { &mut *ptr };
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
                 state.mouse_tracking_started = false; // next hover will need to re-arm.
                 state.apply_pointer_event(hwnd, pointer::PointerEvent::Leave);
             }
@@ -985,9 +1014,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         }
 
         x if x == WM_CAPTURECHANGED => {
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-            if !ptr.is_null() {
-                let state = unsafe { &mut *ptr };
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
                 if state.self_release_pending {
                     // Our own ReleaseCapture() dispatched this; consume the flag.
                     state.self_release_pending = false;
@@ -1000,11 +1027,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         }
 
         WM_LBUTTONDOWN => {
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-            if !ptr.is_null() {
-                let state = unsafe { &mut *ptr };
-                let x = (lparam.0 & 0xFFFF) as i16 as i32;
-                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                let (x, y) = lparam_point(lparam);
                 let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| pointer::HitResult {
                     button: idx,
                     is_folder: !state.buttons[idx].is_add,
@@ -1015,11 +1039,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         }
 
         WM_LBUTTONUP => {
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-            if !ptr.is_null() {
-                let state = unsafe { &mut *ptr };
-                let x = (lparam.0 & 0xFFFF) as i16 as i32;
-                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                let (x, y) = lparam_point(lparam);
                 let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| pointer::HitResult {
                     button: idx,
                     is_folder: !state.buttons[idx].is_add,
@@ -1031,11 +1052,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         }
 
         WM_RBUTTONUP => {
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-            if !ptr.is_null() {
-                let state = unsafe { &mut *ptr };
-                let x = (lparam.0 & 0xFFFF) as i16 as i32;
-                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                let (x, y) = lparam_point(lparam);
                 if let Some(idx) = hit_test::hit_test(&state.buttons, x, y) {
                     let mut pt = POINT { x, y };
                     unsafe {
@@ -1136,9 +1154,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         x if x == WM_DPICHANGED => {
             let new_dpi = (wparam.0 & 0xFFFF) as u32;
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-            if !ptr.is_null() {
-                let state = unsafe { &mut *ptr };
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
                 state.dpi = new_dpi;
                 state.grip_size = theme::scale(GRIP_SIZE, new_dpi);
                 let hdc = unsafe { GetDC(Some(hwnd)) };
@@ -1253,10 +1269,7 @@ pub fn create_toolbar(
     hinstance: windows::Win32::Foundation::HINSTANCE,
 ) -> Option<HWND> {
     CLASS_REGISTERED.call_once(|| {
-        let class_wide: Vec<u16> = CLASS_NAME
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let class_wide: Vec<u16> = wide_null(CLASS_NAME);
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -1278,10 +1291,7 @@ pub fn create_toolbar(
     let state = Box::new(ToolbarState::new(dpi, config));
     let state_ptr = Box::into_raw(state);
 
-    let class_wide: Vec<u16> = CLASS_NAME
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let class_wide: Vec<u16> = wide_null(CLASS_NAME);
 
     // Determine initial window position: saved pos > default pos
     let (mut x, mut y) = load_saved_pos().unwrap_or((screen_pos.left, screen_pos.top));
@@ -1335,11 +1345,9 @@ pub fn create_toolbar(
 }
 
 pub fn refresh_toolbar(hwnd: HWND) {
-    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
-    if ptr.is_null() {
+    let Some(state) = (unsafe { toolbar_state(hwnd) }) else {
         return;
-    }
-    let state = unsafe { &mut *ptr };
+    };
     state.config = Config::load();
     state.layout = state
         .config
@@ -1405,8 +1413,8 @@ fn open_config_in_editor() {
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let path = crate::config::default_config_path();
-    let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let verb_wide: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let path_wide: Vec<u16> = wide_null(&path);
+    let verb_wide: Vec<u16> = wide_null("open");
 
     unsafe {
         let _ = ShellExecuteW(
@@ -1428,7 +1436,7 @@ fn copy_to_clipboard(text: &str) {
     use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
     use windows::Win32::System::Ole::CF_UNICODETEXT;
 
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = wide_null(text);
     let byte_size = wide.len() * std::mem::size_of::<u16>();
 
     unsafe {
@@ -1513,10 +1521,7 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
 
     let hinstance = exe_hinstance();
 
-    let wide_initial: Vec<u16> = initial_name
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide_initial: Vec<u16> = wide_null(initial_name);
 
     // ES_AUTOHSCROLL = 0x0080
     const ES_AUTOHSCROLL: u32 = 0x0080;
