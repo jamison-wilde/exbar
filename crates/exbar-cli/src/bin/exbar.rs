@@ -19,6 +19,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::core::PCWSTR;
 
+use exbar_cli::error::{ExbarError, ExbarResult};
 use exbar_cli::log as exbar_log;
 use exbar_cli::toolbar;
 
@@ -90,14 +91,8 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 
 // ── Helper: registry ──────────────────────────────────────────────────────────
 
-type WinResult<T> = Result<T, windows_core::Error>;
-
-fn win_err(err: WIN32_ERROR) -> windows_core::Error {
-    windows_core::Error::from(err.to_hresult())
-}
-
 /// Open or create a key under HKCU.
-fn reg_create_key(subkey: &str) -> WinResult<HKEY> {
+fn reg_create_key(subkey: &str) -> ExbarResult<HKEY> {
     let subkey_w = to_wide_null(subkey);
     let mut hkey = HKEY::default();
     let err: WIN32_ERROR =
@@ -105,11 +100,11 @@ fn reg_create_key(subkey: &str) -> WinResult<HKEY> {
     if err.is_ok() {
         Ok(hkey)
     } else {
-        Err(win_err(err))
+        Err(ExbarError::Win32(windows::core::Error::from(err.to_hresult())))
     }
 }
 
-fn reg_set_string(hkey: HKEY, value_name: &str, data: &str) -> WinResult<()> {
+fn reg_set_string(hkey: HKEY, value_name: &str, data: &str) -> ExbarResult<()> {
     let name_w = to_wide_null(value_name);
     let data_w = to_wide_null(data);
     let data_bytes: &[u8] =
@@ -126,7 +121,7 @@ fn reg_set_string(hkey: HKEY, value_name: &str, data: &str) -> WinResult<()> {
     if err.is_ok() {
         Ok(())
     } else {
-        Err(win_err(err))
+        Err(ExbarError::Win32(windows::core::Error::from(err.to_hresult())))
     }
 }
 
@@ -152,15 +147,6 @@ fn config_path() -> PathBuf {
     PathBuf::from(home).join(".exbar.json")
 }
 
-// ── io err helper ─────────────────────────────────────────────────────────────
-
-fn io_err(e: std::io::Error) -> windows_core::Error {
-    windows_core::Error::new(
-        windows_core::HRESULT(0x80004005u32 as i32), // E_FAIL
-        e.to_string().as_str(),
-    )
-}
-
 // ── Run key path ──────────────────────────────────────────────────────────────
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -168,7 +154,7 @@ const RUN_VALUE: &str = "Exbar";
 
 // ── hook ──────────────────────────────────────────────────────────────────────
 
-fn run_hook() -> WinResult<()> {
+fn run_hook() -> ExbarResult<()> {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     use windows::Win32::System::Console::FreeConsole;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -236,11 +222,11 @@ fn run_hook() -> WinResult<()> {
 
 // ── install ───────────────────────────────────────────────────────────────────
 
-fn install() -> WinResult<()> {
+fn install() -> ExbarResult<()> {
     // Create install directory (for the config stub; the MSI handles
     // the real install path for end users).
     let dst_dir = install_dir();
-    std::fs::create_dir_all(&dst_dir).map_err(io_err)?;
+    std::fs::create_dir_all(&dst_dir).map_err(|e| ExbarError::io(&dst_dir, e))?;
 
     // Create stub config if missing
     let cfg = config_path();
@@ -252,7 +238,7 @@ fn install() -> WinResult<()> {
                 { "name": "Desktop",   "path": "shell:Desktop" }
             ]
         });
-        std::fs::write(&cfg, serde_json::to_string_pretty(&stub).unwrap()).map_err(io_err)?;
+        std::fs::write(&cfg, serde_json::to_string_pretty(&stub).unwrap()).map_err(|e| ExbarError::io(&cfg, e))?;
         println!("Created config at {}", cfg.display());
     } else {
         println!("Config already exists at {}", cfg.display());
@@ -260,7 +246,7 @@ fn install() -> WinResult<()> {
 
     // Register Run key
     let exe_path = std::env::current_exe()
-        .map_err(io_err)?
+        .map_err(|e| ExbarError::io("<current_exe>", e))?
         .to_string_lossy()
         .into_owned();
     let run_value = format!("\"{exe_path}\" hook");
@@ -287,7 +273,7 @@ fn install() -> WinResult<()> {
 
 // ── uninstall ─────────────────────────────────────────────────────────────────
 
-fn uninstall(clean: bool) -> WinResult<()> {
+fn uninstall(clean: bool) -> ExbarResult<()> {
     // 1. Remove Run key
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteValueW, RegOpenKeyW};
     {
@@ -316,7 +302,7 @@ fn uninstall(clean: bool) -> WinResult<()> {
     if clean {
         let dir = install_dir();
         if dir.exists() {
-            std::fs::remove_dir_all(&dir).map_err(io_err)?;
+            std::fs::remove_dir_all(&dir).map_err(|e| ExbarError::io(&dir, e))?;
             println!("Deleted {}.", dir.display());
         }
     }
@@ -327,8 +313,8 @@ fn uninstall(clean: bool) -> WinResult<()> {
 
 // ── status ────────────────────────────────────────────────────────────────────
 
-fn status() -> WinResult<()> {
-    let exe = std::env::current_exe().map_err(io_err)?;
+fn status() -> ExbarResult<()> {
+    let exe = std::env::current_exe().map_err(|e| ExbarError::io("<current_exe>", e))?;
     println!("exbar.exe:      {}", exe.display());
 
     let cfg = config_path();
