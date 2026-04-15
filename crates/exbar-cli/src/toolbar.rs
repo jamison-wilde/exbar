@@ -392,7 +392,7 @@ struct ToolbarState {
     config_store: Box<dyn ConfigStore>,
     // SP4 consolidation — populated in Tasks 2-3:
     active_explorer: Option<HWND>,
-    rename_state: Option<RenameState>,
+    rename_state: Option<rename::RenameState>,
 }
 
 impl ToolbarState {
@@ -498,7 +498,7 @@ impl ToolbarState {
                     crate::warn_on_err!(ReleaseCapture());
                 }
             }
-            CancelInlineRename => cancel_inline_rename(self),
+            CancelInlineRename => cancel_inline_rename(self, hwnd),
             FireAddClick => {
                 if let Some(path) = self.folder_picker.pick_folder() {
                     append_folder_and_reload(self, &path);
@@ -535,6 +535,46 @@ impl ToolbarState {
                 to_folder,
             } => {
                 commit_reorder(self, hwnd, from_folder, to_folder);
+            }
+        }
+    }
+
+    /// Drive the rename state machine with a single event, then execute the
+    /// resulting actions against Win32 + the `config_store` trait seam.
+    ///
+    /// Mirrors `execute_pointer_command`'s shape (SP2b). Single-threaded by
+    /// the message-pump invariant — no synchronisation needed.
+    pub(crate) fn execute_rename_event(&mut self, toolbar: HWND, event: RenameEvent) {
+        let prior = self.rename_state.clone();
+        let (next, actions) = rename::transition(prior, event);
+        self.rename_state = next;
+
+        for action in actions {
+            match action {
+                RenameAction::ApplyRename {
+                    folder_index,
+                    new_name,
+                } => {
+                    if let Some(mut cfg) = self.config_store.load() {
+                        cfg.rename_folder(folder_index, new_name);
+                        if let Err(e) = self.config_store.save(&cfg) {
+                            log::error!("rename: save failed: {e}");
+                        } else {
+                            self.config = Some(cfg);
+                        }
+                    }
+                }
+                RenameAction::DestroyEdit { edit_hwnd } => {
+                    destroy_rename_edit(HWND(edit_hwnd as *mut _));
+                }
+                RenameAction::ReloadToolbar => unsafe {
+                    crate::warn_on_err!(PostMessageW(
+                        Some(toolbar),
+                        WM_USER_RELOAD,
+                        WPARAM(0),
+                        LPARAM(0)
+                    ));
+                },
             }
         }
     }
@@ -974,7 +1014,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 // Cancel any active inline rename before freeing state.
                 // SAFETY: ptr is non-null and state is still live at this point;
                 // we zero the USERDATA slot and drop state below.
-                cancel_inline_rename(unsafe { &mut *ptr });
+                cancel_inline_rename(unsafe { &mut *ptr }, hwnd);
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
                 // SAFETY: The pointer was produced by Box::into_raw in WM_CREATE;
                 // Box::from_raw reclaims it so the Drop runs and state is freed.
@@ -1581,27 +1621,18 @@ fn remove_folder_at(state: &mut ToolbarState, hwnd: HWND, index: usize) {
 
 // ── Inline rename ───────────────────────────────────────────────────────────
 
-struct RenameState {
-    edit_hwnd: isize,
-    /// Raw `Box<RenameSubclassData>` pointer handed to `SetWindowSubclass`.
-    /// Stored so `cancel_inline_rename` can reclaim the Box on parent teardown.
-    /// `folder_index` and `toolbar_hwnd` live in the Box; the subclass proc
-    /// reads them from `ref_data`.
-    subclass_data: usize,
-}
+use crate::rename::{self, RenameAction, RenameEvent};
 
 fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, initial_name: &str) {
-    // Cancel any existing rename first.
+    // 1. Cancel any in-flight rename via the controller (idempotent if none).
     // SAFETY: toolbar is the toolbar HWND; we are on the message-pump thread.
-    let Some(state) = (unsafe { toolbar_state(toolbar) }) else {
-        return;
-    };
-    cancel_inline_rename(state);
+    if let Some(state) = unsafe { toolbar_state(toolbar) } {
+        state.execute_rename_event(toolbar, RenameEvent::Cancelled);
+    }
 
+    // 2. Create the EDIT control over the button's screen rect.
     let hinstance = exe_hinstance();
-
     let wide_initial: Vec<u16> = wide_null(initial_name);
-
     // ES_AUTOHSCROLL = 0x0080
     const ES_AUTOHSCROLL: u32 = 0x0080;
     let style = WS_CHILD.0 | WS_VISIBLE.0 | WS_BORDER.0 | ES_AUTOHSCROLL;
@@ -1626,41 +1657,34 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
         return;
     };
 
-    // Select all text
+    // 3. Select-all + focus.
     const EM_SETSEL: u32 = 0x00B1;
     unsafe {
         SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
         let _ = SetFocus(Some(edit));
     }
 
-    // Subclass for Enter/Esc/KillFocus.
-    // SAFETY: Box::into_raw leaks the allocation into SetWindowSubclass's ref_data.
-    // Ownership is reclaimed by Box::from_raw in commit_rename / cancel_rename
-    // (called from the subclass proc) or in cancel_inline_rename (WM_DESTROY path).
-    let data: *mut RenameSubclassData = Box::into_raw(Box::new(RenameSubclassData {
-        toolbar_hwnd: toolbar.0 as isize,
-        folder_index,
-    }));
+    // 4. Subclass with the toolbar HWND as ref_data — no Box::into_raw.
+    // The subclass proc reads context (folder_index) from state.rename_state
+    // via `toolbar_state(toolbar)`.
     unsafe {
         use windows::Win32::UI::Shell::SetWindowSubclass;
         crate::warn_on_err!(
-            SetWindowSubclass(edit, Some(rename_subclass_proc), 1, data as usize).ok()
+            SetWindowSubclass(edit, Some(rename_subclass_proc), 1, toolbar.0 as usize).ok()
         );
     }
 
-    // SAFETY: toolbar_state called at the top of this function; we are still on the
-    // message-pump thread and no other code mutated GWLP_USERDATA since that call.
+    // 5. Notify the controller — Started transition records the active rename.
+    // SAFETY: same single-thread invariant as the cancel call at the top.
     if let Some(state) = unsafe { toolbar_state(toolbar) } {
-        state.rename_state = Some(RenameState {
-            edit_hwnd: edit.0 as isize,
-            subclass_data: data as usize,
-        });
+        state.execute_rename_event(
+            toolbar,
+            RenameEvent::Started {
+                folder_index,
+                edit_hwnd: edit.0 as isize,
+            },
+        );
     }
-}
-
-struct RenameSubclassData {
-    toolbar_hwnd: isize,
-    folder_index: usize,
 }
 
 unsafe extern "system" fn rename_subclass_proc(
@@ -1676,28 +1700,25 @@ unsafe extern "system" fn rename_subclass_proc(
     const VK_RETURN: usize = 0x0D;
     const VK_ESCAPE: usize = 0x1B;
 
-    match msg {
-        WM_GETDLGCODE => {
-            return LRESULT(DLGC_WANTALLKEYS as isize);
-        }
-        WM_KEYDOWN => {
-            let vk = wparam.0;
-            if vk == VK_RETURN {
-                commit_rename(hwnd, ref_data);
-                return LRESULT(0);
-            }
-            if vk == VK_ESCAPE {
-                cancel_rename(hwnd, ref_data);
-                return LRESULT(0);
-            }
-        }
-        WM_KILLFOCUS => {
-            commit_rename(hwnd, ref_data);
-            return LRESULT(0);
-        }
-        _ => {}
+    let toolbar = HWND(ref_data as *mut _);
+    let event = match msg {
+        WM_GETDLGCODE => return LRESULT(DLGC_WANTALLKEYS as isize),
+        WM_KEYDOWN if wparam.0 == VK_RETURN => RenameEvent::CommitRequested {
+            text: read_edit_text(hwnd),
+        },
+        WM_KEYDOWN if wparam.0 == VK_ESCAPE => RenameEvent::Cancelled,
+        WM_KILLFOCUS => RenameEvent::CommitRequested {
+            text: read_edit_text(hwnd),
+        },
+        _ => return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) },
+    };
+
+    // SAFETY: Subclass proc runs on the toolbar's message-pump thread —
+    // same single-threaded invariant `toolbar_state` relies on elsewhere.
+    if let Some(state) = unsafe { toolbar_state(toolbar) } {
+        state.execute_rename_event(toolbar, event);
     }
-    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+    LRESULT(0)
 }
 
 fn read_edit_text(edit: HWND) -> String {
@@ -1705,51 +1726,6 @@ fn read_edit_text(edit: HWND) -> String {
     let mut buf = vec![0u16; len + 1];
     let got = unsafe { GetWindowTextW(edit, &mut buf) } as usize;
     String::from_utf16_lossy(&buf[..got])
-}
-
-fn commit_rename(edit: HWND, ref_data: usize) {
-    // SAFETY: ref_data is the pointer produced by Box::into_raw in start_inline_rename;
-    // the subclass proc is invoked on the toolbar message-pump thread, and this is
-    // the single reclaim point for the Enter / WM_KILLFOCUS paths.
-    let data = unsafe { Box::from_raw(ref_data as *mut RenameSubclassData) };
-    let toolbar = HWND(data.toolbar_hwnd as *mut _);
-    let text = read_edit_text(edit);
-
-    if let Some(state) = unsafe { toolbar_state(toolbar) }
-        && let Some(mut cfg) = state.config_store.load()
-    {
-        cfg.rename_folder(data.folder_index, text);
-        if let Err(e) = state.config_store.save(&cfg) {
-            log::error!("commit_rename: save failed: {e}");
-        } else {
-            state.config = Some(cfg);
-        }
-    }
-
-    destroy_rename_edit(edit);
-    // Clear rename_state from ToolbarState.
-    // SAFETY: commit_rename is called from the EDIT subclass wndproc (same message-pump
-    // thread as the toolbar); toolbar_state's single-thread invariant is satisfied.
-    if let Some(state) = unsafe { toolbar_state(toolbar) } {
-        state.rename_state = None;
-    }
-    unsafe {
-        let _ = PostMessageW(Some(toolbar), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
-    }
-}
-
-fn cancel_rename(edit: HWND, ref_data: usize) {
-    // SAFETY: Same provenance as commit_rename; this is the Esc path reclaim point.
-    let data = unsafe { Box::from_raw(ref_data as *mut RenameSubclassData) };
-    let toolbar = HWND(data.toolbar_hwnd as *mut _);
-    let _ = data;
-    destroy_rename_edit(edit);
-    // Clear rename_state from ToolbarState.
-    // SAFETY: cancel_rename is called from the EDIT subclass wndproc on the toolbar's
-    // message-pump thread; toolbar_state's single-thread invariant is satisfied.
-    if let Some(state) = unsafe { toolbar_state(toolbar) } {
-        state.rename_state = None;
-    }
 }
 
 fn destroy_rename_edit(edit: HWND) {
@@ -1760,21 +1736,13 @@ fn destroy_rename_edit(edit: HWND) {
     }
 }
 
-fn cancel_inline_rename(state: &mut ToolbarState) {
-    if let Some(s) = state.rename_state.take() {
-        let edit = HWND(s.edit_hwnd as *mut _);
-        destroy_rename_edit(edit);
-        // Reclaim the Box leaked into SetWindowSubclass; RemoveWindowSubclass
-        // inside destroy_rename_edit ran before this, so no callback can race.
-        if s.subclass_data != 0 {
-            // SAFETY: subclass_data holds the Box::into_raw pointer from start_inline_rename.
-            // RemoveWindowSubclass (inside destroy_rename_edit above) has already run,
-            // so the subclass proc cannot fire again and race this reclaim.
-            unsafe {
-                drop(Box::from_raw(s.subclass_data as *mut RenameSubclassData));
-            }
-        }
-    }
+/// Emit a Cancelled event so the controller cleans up any in-flight
+/// rename. Called from WM_DESTROY (parent teardown) and from the pointer
+/// state machine's `CancelInlineRename` command (e.g., right-click on
+/// another button while editing). The transition table guarantees this
+/// is a noop when no rename is active.
+fn cancel_inline_rename(state: &mut ToolbarState, toolbar: HWND) {
+    state.execute_rename_event(toolbar, RenameEvent::Cancelled);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1866,14 +1834,20 @@ mod tests {
     #[derive(Default)]
     struct MockConfigStore {
         load_value: Mutex<Option<Config>>,
+        load_calls: Mutex<usize>,
         save_calls: Mutex<Vec<Config>>,
+        save_should_err: Mutex<bool>,
     }
     impl ConfigStore for MockConfigStore {
         fn load(&self) -> Option<Config> {
+            *self.load_calls.lock().unwrap() += 1;
             self.load_value.lock().unwrap().clone()
         }
         fn save(&self, config: &Config) -> ExbarResult<()> {
             self.save_calls.lock().unwrap().push(config.clone());
+            if *self.save_should_err.lock().unwrap() {
+                return Err(crate::error::ExbarError::Config("mock save error".into()));
+            }
             Ok(())
         }
     }
@@ -2133,5 +2107,152 @@ mod tests {
 
         let calls = deps.clipboard.set_text_calls.lock().unwrap();
         assert_eq!(*calls, vec!["C:\\Target".to_string()]);
+    }
+
+    // ── Rename adapter tests (SP6) ───────────────────────────────────────
+
+    fn mk_active_rename_state(folder_index: usize) -> rename::RenameState {
+        rename::RenameState {
+            folder_index,
+            edit_hwnd: 0xDEAD_BEEF,
+        }
+    }
+
+    #[test]
+    fn rename_apply_loads_mutates_saves() {
+        let deps = mk_deps();
+        *deps.cfg_store.load_value.lock().unwrap() =
+            Some(mk_config_with_folders(&[("Old", "C:\\Old")]));
+        let mut state = make_test_state(&deps, None);
+        state.rename_state = Some(mk_active_rename_state(0));
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::CommitRequested {
+                text: "Renamed".into(),
+            },
+        );
+
+        let saves = deps.cfg_store.save_calls.lock().unwrap();
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0].folders[0].name, "Renamed");
+        assert!(
+            state.rename_state.is_none(),
+            "state should clear after commit"
+        );
+        assert_eq!(state.config.as_ref().unwrap().folders[0].name, "Renamed");
+    }
+
+    #[test]
+    fn rename_apply_with_empty_text_keeps_old_name() {
+        // End-to-end check that Config::rename_folder's trim-empty guard works
+        // through the adapter — empty text must not change the saved name.
+        let deps = mk_deps();
+        *deps.cfg_store.load_value.lock().unwrap() =
+            Some(mk_config_with_folders(&[("KeepMe", "C:\\K")]));
+        let mut state = make_test_state(&deps, None);
+        state.rename_state = Some(mk_active_rename_state(0));
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::CommitRequested { text: "   ".into() },
+        );
+
+        let saves = deps.cfg_store.save_calls.lock().unwrap();
+        assert_eq!(
+            saves.len(),
+            1,
+            "save still runs even when name was unchanged"
+        );
+        assert_eq!(
+            saves[0].folders[0].name, "KeepMe",
+            "trim-empty kept old name"
+        );
+    }
+
+    #[test]
+    fn rename_apply_save_error_skips_state_update() {
+        let deps = mk_deps();
+        *deps.cfg_store.load_value.lock().unwrap() =
+            Some(mk_config_with_folders(&[("Old", "C:\\Old")]));
+        *deps.cfg_store.save_should_err.lock().unwrap() = true;
+        let mut state = make_test_state(&deps, None);
+        state.rename_state = Some(mk_active_rename_state(0));
+        // Pre-populate state.config with the old config so we can detect non-update.
+        state.config = Some(mk_config_with_folders(&[("Old", "C:\\Old")]));
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::CommitRequested {
+                text: "Renamed".into(),
+            },
+        );
+
+        // save was attempted (and failed)
+        assert_eq!(deps.cfg_store.save_calls.lock().unwrap().len(), 1);
+        // state.config was NOT updated to the new name
+        assert_eq!(state.config.as_ref().unwrap().folders[0].name, "Old");
+    }
+
+    #[test]
+    fn rename_cancel_does_not_call_load_or_save() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+        state.rename_state = Some(mk_active_rename_state(2));
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::Cancelled,
+        );
+
+        assert_eq!(*deps.cfg_store.load_calls.lock().unwrap(), 0);
+        assert_eq!(deps.cfg_store.save_calls.lock().unwrap().len(), 0);
+        assert!(
+            state.rename_state.is_none(),
+            "state should clear after cancel"
+        );
+    }
+
+    #[test]
+    fn rename_started_when_already_active_replaces_state() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::Started {
+                folder_index: 1,
+                edit_hwnd: 0x111,
+            },
+        );
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::Started {
+                folder_index: 5,
+                edit_hwnd: 0x555,
+            },
+        );
+
+        let active = state.rename_state.as_ref().unwrap();
+        assert_eq!(active.folder_index, 5);
+        assert_eq!(active.edit_hwnd, 0x555);
+    }
+
+    #[test]
+    fn rename_commit_when_idle_does_nothing() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+        // rename_state intentionally None.
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::CommitRequested {
+                text: "ignored".into(),
+            },
+        );
+
+        assert_eq!(*deps.cfg_store.load_calls.lock().unwrap(), 0);
+        assert_eq!(deps.cfg_store.save_calls.lock().unwrap().len(), 0);
+        assert!(state.rename_state.is_none());
     }
 }
