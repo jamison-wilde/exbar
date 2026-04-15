@@ -945,8 +945,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // Register drop target
             register_drop_targets(hwnd, state);
 
-            // The foreground WinEvent fires reliably; GetForegroundWindow() does not.
-            // Use state.active_explorer (set by foreground_event_proc before toolbar creation).
+            // active_explorer is seeded in create_toolbar before Box::into_raw,
+            // so it's always Some here. Fall back to GetForegroundWindow() only
+            // as defence-in-depth in case that invariant is ever broken.
             let explorer_hwnd = state
                 .active_explorer
                 .unwrap_or_else(|| unsafe { GetForegroundWindow() });
@@ -1367,7 +1368,11 @@ pub fn create_toolbar(
     let is_dark = theme::is_dark_mode();
     log::info!("create_toolbar: dark_mode={is_dark}");
 
-    let state = Box::new(ToolbarState::new(dpi, config));
+    let mut state = Box::new(ToolbarState::new(dpi, config));
+    // Seed active_explorer with the triggering cabinet HWND. WM_CREATE runs
+    // synchronously inside CreateWindowExW, so we can't set this after creation;
+    // seeding the Box before into_raw guarantees WM_CREATE observes it.
+    state.active_explorer = Some(owner);
     // SAFETY: Box::into_raw transfers ownership to the CreateWindowExW lpCreateParams
     // slot, which Win32 delivers to WM_CREATE as cs.lpCreateParams. If window
     // creation fails, the Err branch below reclaims the box via Box::from_raw.
