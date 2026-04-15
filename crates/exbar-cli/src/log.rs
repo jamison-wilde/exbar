@@ -1,22 +1,72 @@
-//! Shared logging — writes to %TEMP%\exbar.log
+//! File-backed logger driven by the `log` crate.
+//!
+//! Users configure verbosity via `Config::log_level` (defaults to Info).
+//! Messages below the configured filter are not formatted, keeping
+//! hot-path cost minimal when verbose logging is off.
 
+use crate::config::LogLevel;
 use std::io::Write as _;
+use std::path::PathBuf;
 
-fn log_path() -> std::path::PathBuf {
+fn log_path() -> PathBuf {
     let mut p = std::env::temp_dir();
     p.push("exbar.log");
     p
 }
 
-pub fn log(level: &str, msg: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path())
-    {
-        let pid = std::process::id();
-        let ts = timestamp();
-        let _ = writeln!(f, "{ts} [{level}] pid={pid} {msg}");
+struct FileLogger;
+
+impl log::Log for FileLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::max_level()
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path())
+        {
+            let pid = std::process::id();
+            let ts = timestamp();
+            let level = format_level(record.level());
+            // Intentionally ignored: logging-inside-logger must not recurse.
+            let _ = writeln!(f, "{ts} [{level}] pid={pid} {}", record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static FILE_LOGGER: FileLogger = FileLogger;
+
+/// Install the file logger and set the max level from config.
+///
+/// Idempotent: a second call is a silent no-op (log::set_logger errors
+/// are ignored because it fails only if a logger is already set).
+pub fn init(level: LogLevel) {
+    let filter = match level {
+        LogLevel::Error => log::LevelFilter::Error,
+        LogLevel::Warn => log::LevelFilter::Warn,
+        LogLevel::Info => log::LevelFilter::Info,
+        LogLevel::Debug => log::LevelFilter::Debug,
+        LogLevel::Trace => log::LevelFilter::Trace,
+    };
+    let _ = log::set_logger(&FILE_LOGGER);
+    log::set_max_level(filter);
+}
+
+fn format_level(level: log::Level) -> &'static str {
+    // 5-char padded to align with the existing "INFO "/"ERROR" format.
+    match level {
+        log::Level::Error => "ERROR",
+        log::Level::Warn => "WARN ",
+        log::Level::Info => "INFO ",
+        log::Level::Debug => "DEBUG",
+        log::Level::Trace => "TRACE",
     }
 }
 
@@ -35,10 +85,24 @@ fn timestamp() -> String {
     format!("{h:02}:{m:02}:{s:02}.{millis:03}")
 }
 
-pub fn info(msg: &str) {
-    log("INFO ", msg);
-}
-
-pub fn error(msg: &str) {
-    log("ERROR", msg);
+/// Log a warning (at debug level) if the expression is Err; discard
+/// the value either way. `stringify!($e)` captures the call text for
+/// log context.
+///
+/// Usage:
+/// ```ignore
+/// warn_on_err!(InvalidateRect(Some(hwnd), None, false));
+/// ```
+#[macro_export]
+macro_rules! warn_on_err {
+    ($e:expr) => {
+        match ($e) {
+            Ok(v) => {
+                let _ = v;
+            }
+            Err(err) => {
+                log::debug!("{}: {}", stringify!($e), err);
+            }
+        }
+    };
 }
