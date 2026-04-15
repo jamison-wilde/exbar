@@ -10,6 +10,19 @@ pub enum Orientation {
     Vertical,
 }
 
+/// Filter for the file logger (see `log.rs`). Values serialize as
+/// lowercase ("error", "warn", "info", "debug", "trace").
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+    Trace,
+}
+
 fn default_opacity() -> f32 {
     0.8
 }
@@ -38,6 +51,8 @@ pub struct Config {
         deserialize_with = "deserialize_clamped_timeout"
     )]
     pub new_tab_timeout_ms_zero_disables: u32,
+    #[serde(default)]
+    pub log_level: LogLevel,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -345,5 +360,42 @@ mod tests {
         cfg.move_folder(5, 0);
         cfg.move_folder(0, 99);
         assert_eq!(cfg.folders[0].name, "A");
+    }
+
+    #[test]
+    fn log_level_defaults_to_info_when_missing() {
+        let json = r#"{"folders": []}"#;
+        let cfg = Config::from_str(json).unwrap();
+        assert_eq!(cfg.log_level, LogLevel::Info);
+    }
+
+    #[test]
+    fn log_level_deserializes_debug() {
+        let json = r#"{"folders": [], "log_level": "debug"}"#;
+        let cfg = Config::from_str(json).unwrap();
+        assert_eq!(cfg.log_level, LogLevel::Debug);
+    }
+
+    #[test]
+    fn log_level_deserializes_all_variants() {
+        for (s, expected) in [
+            ("error", LogLevel::Error),
+            ("warn", LogLevel::Warn),
+            ("info", LogLevel::Info),
+            ("debug", LogLevel::Debug),
+            ("trace", LogLevel::Trace),
+        ] {
+            let json = format!(r#"{{"folders": [], "log_level": "{s}"}}"#);
+            let cfg = Config::from_str(&json).unwrap();
+            assert_eq!(cfg.log_level, expected, "failed for {s}");
+        }
+    }
+
+    #[test]
+    fn log_level_round_trips_through_serde() {
+        let cfg = Config::from_str(r#"{"folders": [], "log_level": "trace"}"#).unwrap();
+        let serialized = serde_json::to_string(&cfg).unwrap();
+        let cfg2 = Config::from_str(&serialized).unwrap();
+        assert_eq!(cfg2.log_level, LogLevel::Trace);
     }
 }
