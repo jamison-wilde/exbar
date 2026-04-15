@@ -396,8 +396,8 @@ struct ToolbarState {
     // SP3 trait seams (#[allow(dead_code)] until Tasks 7-9 migrate callers):
     #[allow(dead_code)] shell_browser: Box<dyn ShellBrowser>,
     #[allow(dead_code)] folder_picker: Box<dyn FolderPicker>,
-    #[allow(dead_code)] file_operator: Arc<dyn FileOperator>,
-    #[allow(dead_code)] clipboard: Box<dyn Clipboard>,
+    file_operator: Arc<dyn FileOperator>,
+    clipboard: Box<dyn Clipboard>,
     #[allow(dead_code)] config_store: Box<dyn ConfigStore>,
 }
 
@@ -1189,7 +1189,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 }
                             }
                             MENU_ID_COPY_PATH => {
-                                copy_to_clipboard(path.to_str().unwrap_or_default());
+                                let folder_button = idx - 1; // + button at index 0
+                                copy_folder_path_to_clipboard(state, folder_button);
                             }
                             MENU_ID_RENAME => {
                                 let rect = rect_to_win32(state.buttons[idx].rect);
@@ -1316,7 +1317,7 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
         })
     };
 
-    if crate::dragdrop::register_drop_target(hwnd, Box::new(resolver)).is_ok() {
+    if crate::dragdrop::register_drop_target(hwnd, Box::new(resolver), std::sync::Arc::clone(&state.file_operator)).is_ok() {
         state.drop_registered = true;
         log::info!("Registered OLE drop target on toolbar");
     }
@@ -1508,43 +1509,11 @@ fn open_config_in_editor() {
     }
 }
 
-fn copy_to_clipboard(text: &str) {
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::System::DataExchange::{
-        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-    };
-    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-    use windows::Win32::System::Ole::CF_UNICODETEXT;
-
-    let wide: Vec<u16> = wide_null(text);
-    let byte_size = wide.len() * std::mem::size_of::<u16>();
-
-    unsafe {
-        if OpenClipboard(None).is_err() {
-            return;
-        }
-        let _ = EmptyClipboard();
-
-        let hmem = match GlobalAlloc(GMEM_MOVEABLE, byte_size) {
-            Ok(h) if !h.is_invalid() => h,
-            _ => {
-                let _ = CloseClipboard();
-                return;
-            }
-        };
-        let dest = GlobalLock(hmem);
-        if dest.is_null() {
-            let _ = CloseClipboard();
-            return;
-        }
-        // SAFETY: dest is a GlobalLock'd buffer of exactly byte_size bytes allocated above;
-        // wide is a Vec<u16> of the same byte count; the regions cannot overlap.
-        std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, dest as *mut u8, byte_size);
-        let _ = GlobalUnlock(hmem);
-
-        // SetClipboardData takes ownership of the HGLOBAL on success.
-        let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(hmem.0)));
-        let _ = CloseClipboard();
+fn copy_folder_path_to_clipboard(state: &mut ToolbarState, folder_button: usize) {
+    let btn_slot = folder_button + 1;
+    if btn_slot < state.buttons.len() {
+        let path = state.buttons[btn_slot].folder.path.clone();
+        crate::warn_on_err!(state.clipboard.set_text(&path));
     }
 }
 

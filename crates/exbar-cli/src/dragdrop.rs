@@ -3,7 +3,7 @@
 
 #![allow(non_snake_case)]
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
@@ -17,9 +17,7 @@ use windows::Win32::System::Ole::{
 use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    DragQueryFileW, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR, FileOperation, HDROP, IFileOperation,
-    IShellItemArray, SHCreateItemFromParsingName, SHCreateShellItemArrayFromDataObject,
-    SHGetPathFromIDListW, SHParseDisplayName,
+    DragQueryFileW, HDROP, SHGetPathFromIDListW, SHParseDisplayName,
 };
 use windows_core::{PCWSTR, Result, implement};
 
@@ -37,15 +35,17 @@ pub struct FolderDropTarget {
     resolver: DropResolver,
     current_action: Mutex<Option<DropAction>>,
     session: Mutex<Option<DragSession>>,
+    file_operator: Arc<dyn FileOperator>,
 }
 
 impl FolderDropTarget {
-    pub fn new(hwnd: HWND, resolver: DropResolver) -> Self {
+    pub fn new(hwnd: HWND, resolver: DropResolver, file_operator: Arc<dyn FileOperator>) -> Self {
         FolderDropTarget {
             hwnd,
             resolver,
             current_action: Mutex::new(None),
             session: Mutex::new(None),
+            file_operator,
         }
     }
 }
@@ -251,52 +251,6 @@ fn build_session(data_object: &IDataObject) -> DragSession {
     }
 }
 
-// ── Execute drop ──────────────────────────────────────────────────────────────
-
-/// Execute a file-operation drop (move or copy) onto `target_path`
-/// using the shell's IFileOperation.
-///
-/// # Safety
-///
-/// Must be called on an STA thread with COM initialized. `data_object`
-/// must be live and must have provided the `target_path` via a valid
-/// IShellItemArray — typically obtained inside the same Drop handler
-/// callback chain.
-unsafe fn execute_drop(
-    data_object: &IDataObject,
-    effect: DROPEFFECT,
-    target_path: &str,
-) -> Result<()> {
-    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
-
-    let file_op: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
-
-    unsafe {
-        file_op.SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR)?;
-    }
-
-    let target_wide: Vec<u16> = target_path.encode_utf16().chain(Some(0)).collect();
-    let target_item = unsafe {
-        SHCreateItemFromParsingName::<_, _, windows::Win32::UI::Shell::IShellItem>(
-            PCWSTR(target_wide.as_ptr()),
-            None,
-        )?
-    };
-
-    let source_items: IShellItemArray =
-        unsafe { SHCreateShellItemArrayFromDataObject(data_object)? };
-
-    if effect == DROPEFFECT_MOVE {
-        unsafe { file_op.MoveItems(&source_items, &target_item)? };
-    } else {
-        unsafe { file_op.CopyItems(&source_items, &target_item)? };
-    }
-
-    unsafe { file_op.PerformOperations()? };
-
-    Ok(())
-}
-
 // ── IDropTarget impl ──────────────────────────────────────────────────────────
 
 impl FolderDropTarget_Impl {
@@ -399,9 +353,18 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
                 if !pdweffect.is_null() {
                     unsafe { *pdweffect = dropeffect };
                 }
-                let target_str = target_path.to_string_lossy();
-                log::info!("drop: target={target_str:?} effect={effect:?}");
-                unsafe { execute_drop(data_obj, dropeffect, &target_str) }
+                log::info!("drop: target={target_path:?} effect={effect:?}");
+                // SAFETY: data_obj is live for the Drop callback duration.
+                let sources = unsafe { extract_paths_from_data_object(data_obj) };
+                let op_result = if dropeffect == DROPEFFECT_MOVE {
+                    self.file_operator.move_items(&sources, target_path)
+                } else {
+                    self.file_operator.copy_items(&sources, target_path)
+                };
+                op_result.map_err(|e| {
+                    log::error!("Drop: file operation failed: {e}");
+                    windows_core::Error::from_win32()
+                })
             }
             Some(DropAction::AddFolder) => {
                 // Guard against multi-selection/file drops that slipped past DragOver.
@@ -440,8 +403,12 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
 
 /// Register a drop target for `hwnd`. The `resolver` closure maps
 /// client-coordinate (x, y) to the drop action for that location.
-pub fn register_drop_target(hwnd: HWND, resolver: DropResolver) -> Result<()> {
-    let target = FolderDropTarget::new(hwnd, resolver);
+pub fn register_drop_target(
+    hwnd: HWND,
+    resolver: DropResolver,
+    file_operator: Arc<dyn FileOperator>,
+) -> Result<()> {
+    let target = FolderDropTarget::new(hwnd, resolver, file_operator);
     let drop_target: IDropTarget = target.into();
     unsafe { RegisterDragDrop(hwnd, &drop_target) }
 }
@@ -547,7 +514,6 @@ fn file_op_execute(
 /// Must be called on an STA thread with COM initialized. `data_object` must
 /// be live for the duration of the call (typically received in an
 /// IDropTarget callback).
-#[allow(dead_code)]
 pub unsafe fn extract_paths_from_data_object(
     data_object: &windows::Win32::System::Com::IDataObject,
 ) -> Vec<PathBuf> {
