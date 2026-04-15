@@ -414,7 +414,7 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
                 if let Some(folder) = unsafe { first_path_from_data_object(data_obj) } {
                     let pb = std::path::PathBuf::from(&folder);
                     log::info!("drop: add-folder {folder:?}");
-                    crate::toolbar::append_folder_and_reload(&pb);
+                    crate::toolbar::append_folder_and_reload_global(&pb);
                 }
                 if !pdweffect.is_null() {
                     unsafe { *pdweffect = DROPEFFECT_COPY };

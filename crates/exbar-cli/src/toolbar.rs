@@ -504,8 +504,8 @@ impl ToolbarState {
             }
             CancelInlineRename => cancel_inline_rename(),
             FireAddClick => {
-                if let Some(path) = crate::picker::pick_folder() {
-                    append_folder_and_reload(&path);
+                if let Some(path) = self.folder_picker.pick_folder() {
+                    append_folder_and_reload(self, &path);
                 }
             }
             FireFolderClick {
@@ -538,7 +538,7 @@ impl ToolbarState {
                 from_folder,
                 to_folder,
             } => {
-                commit_reorder(hwnd, from_folder, to_folder);
+                commit_reorder(self, hwnd, from_folder, to_folder);
             }
         }
     }
@@ -1198,7 +1198,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 start_inline_rename(hwnd, rect, folder_index, &name);
                             }
                             MENU_ID_REMOVE => {
-                                remove_folder_at(hwnd, idx);
+                                remove_folder_at(state, hwnd, idx);
                             }
                             _ => {}
                         }
@@ -1415,7 +1415,7 @@ pub fn refresh_toolbar(hwnd: HWND) {
     let Some(state) = (unsafe { toolbar_state(hwnd) }) else {
         return;
     };
-    state.config = Config::load();
+    state.config = state.config_store.load();
     state.layout = state
         .config
         .as_ref()
@@ -1448,7 +1448,7 @@ pub fn refresh_toolbar(hwnd: HWND) {
 
 /// Append a folder to `~/.exbar.json` using its basename as the label, then reload.
 /// No-op on empty / invalid paths.
-pub(crate) fn append_folder_and_reload(path: &std::path::Path) {
+fn append_folder_and_reload(state: &mut ToolbarState, path: &std::path::Path) {
     let name = match path.file_name().and_then(|s| s.to_str()) {
         Some(n) if !n.is_empty() => n.to_owned(),
         _ => return,
@@ -1459,19 +1459,32 @@ pub(crate) fn append_folder_and_reload(path: &std::path::Path) {
     };
 
     // Load → mutate → save. If load fails (no file yet), start from a minimal config.
-    let mut cfg = crate::config::Config::load().unwrap_or_else(|| {
+    let mut cfg = state.config_store.load().unwrap_or_else(|| {
         crate::config::Config::from_str(r#"{"folders":[]}"#).expect("default config parses")
     });
     cfg.add_folder(name, path_str);
-    if let Err(e) = cfg.save() {
+    if let Err(e) = state.config_store.save(&cfg) {
         log::error!("append_folder_and_reload: save failed: {e}");
         return;
     }
+    state.config = Some(cfg);
 
     if let Some(hwnd) = get_global_toolbar_hwnd() {
         unsafe {
             let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
         }
+    }
+}
+
+/// Drop-target entry point: looks up the global toolbar state and delegates to
+/// `append_folder_and_reload`. Called from `dragdrop.rs` which has no direct access to state.
+pub(crate) fn append_folder_and_reload_global(path: &std::path::Path) {
+    let hwnd = match get_global_toolbar_hwnd() {
+        Some(h) => h,
+        None => return,
+    };
+    if let Some(state) = unsafe { toolbar_state(hwnd) } {
+        append_folder_and_reload(state, path);
     }
 }
 
@@ -1535,23 +1548,27 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
-fn commit_reorder(hwnd: HWND, from: usize, to: usize) {
-    let mut cfg = match crate::config::Config::load() {
+fn commit_reorder(state: &mut ToolbarState, hwnd: HWND, from: usize, to: usize) {
+    let mut cfg = match state.config_store.load() {
         Some(c) => c,
-        None => return,
+        None => {
+            log::error!("commit_reorder: config load failed");
+            return;
+        }
     };
     cfg.move_folder(from, to);
-    if let Err(e) = cfg.save() {
+    if let Err(e) = state.config_store.save(&cfg) {
         log::error!("commit_reorder: save failed: {e}");
         return;
     }
+    state.config = Some(cfg);
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
     }
 }
 
-fn remove_folder_at(hwnd: HWND, index: usize) {
-    let mut cfg = match crate::config::Config::load() {
+fn remove_folder_at(state: &mut ToolbarState, hwnd: HWND, index: usize) {
+    let mut cfg = match state.config_store.load() {
         Some(c) => c,
         None => return,
     };
@@ -1561,10 +1578,11 @@ fn remove_folder_at(hwnd: HWND, index: usize) {
     } // safety: + button never reaches here (is_add branch)
     let folder_index = index - 1;
     cfg.remove_folder(folder_index);
-    if let Err(e) = cfg.save() {
+    if let Err(e) = state.config_store.save(&cfg) {
         log::error!("remove_folder_at: save failed: {e}");
         return;
     }
+    state.config = Some(cfg);
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
     }
@@ -1699,10 +1717,14 @@ fn commit_rename(edit: HWND, ref_data: usize) {
     let toolbar = HWND(data.toolbar_hwnd as *mut _);
     let text = read_edit_text(edit);
 
-    if let Some(mut cfg) = crate::config::Config::load() {
+    if let Some(state) = unsafe { toolbar_state(toolbar) }
+        && let Some(mut cfg) = state.config_store.load()
+    {
         cfg.rename_folder(data.folder_index, text);
-        if let Err(e) = cfg.save() {
+        if let Err(e) = state.config_store.save(&cfg) {
             log::error!("commit_rename: save failed: {e}");
+        } else {
+            state.config = Some(cfg);
         }
     }
 
