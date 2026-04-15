@@ -23,6 +23,36 @@ pub enum PointerState {
     DraggingReorder { source_button: usize, insertion: usize },
 }
 
+impl PointerState {
+    /// Button index currently showing the hover highlight, if any.
+    pub fn hover_button(&self) -> Option<usize> {
+        match self {
+            PointerState::Hovering { button } => Some(*button),
+            _ => None,
+        }
+    }
+
+    /// Button index currently showing the pressed highlight, if any.
+    /// Returns `Some` for both `PressedNonFolder` and `PressedFolder` states.
+    pub fn pressed_button(&self) -> Option<usize> {
+        match self {
+            PointerState::PressedNonFolder { button }
+            | PointerState::PressedFolder { button, .. } => Some(*button),
+            _ => None,
+        }
+    }
+
+    /// `(source_button, insertion)` while a reorder drag is active, else None.
+    pub fn dragging_reorder(&self) -> Option<(usize, usize)> {
+        match self {
+            PointerState::DraggingReorder { source_button, insertion } => {
+                Some((*source_button, *insertion))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Result of hit-testing a cursor position. `None` means cursor is over
 /// the grip or whitespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -683,6 +713,53 @@ mod tests {
         assert_eq!(cmds, vec![PointerCommand::Redraw]);
         assert!(!cmds.iter().any(|c| matches!(c, PointerCommand::CommitReorder { .. })));
         assert!(!cmds.iter().any(|c| matches!(c, PointerCommand::ReleaseMouse)));
+    }
+
+    // ── Accessor methods ─────────────────────────────────────────────────
+
+    #[test]
+    fn hover_button_returns_some_only_for_hovering() {
+        assert_eq!(PointerState::Idle.hover_button(), None);
+        assert_eq!(PointerState::Hovering { button: 2 }.hover_button(), Some(2));
+        assert_eq!(
+            PointerState::PressedFolder { button: 1, press_x: 0, press_y: 0 }.hover_button(),
+            None,
+        );
+        assert_eq!(
+            PointerState::DraggingReorder { source_button: 1, insertion: 0 }.hover_button(),
+            None,
+        );
+    }
+
+    #[test]
+    fn pressed_button_returns_some_for_both_pressed_variants() {
+        assert_eq!(
+            PointerState::PressedNonFolder { button: 0 }.pressed_button(),
+            Some(0),
+        );
+        assert_eq!(
+            PointerState::PressedFolder { button: 3, press_x: 0, press_y: 0 }.pressed_button(),
+            Some(3),
+        );
+        assert_eq!(PointerState::Idle.pressed_button(), None);
+        assert_eq!(PointerState::Hovering { button: 1 }.pressed_button(), None);
+        assert_eq!(
+            PointerState::DraggingReorder { source_button: 1, insertion: 0 }.pressed_button(),
+            None,
+        );
+    }
+
+    #[test]
+    fn dragging_reorder_returns_source_and_insertion() {
+        assert_eq!(
+            PointerState::DraggingReorder { source_button: 2, insertion: 3 }.dragging_reorder(),
+            Some((2, 3)),
+        );
+        assert_eq!(PointerState::Idle.dragging_reorder(), None);
+        assert_eq!(
+            PointerState::PressedFolder { button: 2, press_x: 0, press_y: 0 }.dragging_reorder(),
+            None,
+        );
     }
 
     use proptest::prelude::*;
