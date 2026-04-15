@@ -338,33 +338,15 @@ fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, ref_hwnd: Option<HWND>) ->
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy)]
-struct ReorderState {
-    /// Source button index (NOT folder index). Always >= 1 since + is at 0.
-    source_button: usize,
-    #[allow(dead_code)] // Zeroed by sync_legacy_fields; Task 8 deletes this struct.
-    press_x: i32,
-    #[allow(dead_code)] // Zeroed by sync_legacy_fields; Task 8 deletes this struct.
-    press_y: i32,
-    /// False until mouse has moved REORDER_THRESHOLD logical pixels.
-    active: bool,
-    /// Insertion point in folder-index space: 0..=folders.len().
-    insertion: usize,
-}
 
 struct ToolbarState {
     buttons: Vec<ButtonLayout>,
-    hover_index: Option<usize>,
-    pressed_index: Option<usize>,
     dpi: u32,
     config: Option<Config>,
-    tracking_mouse: bool,
     layout: Orientation,
     drop_registered: bool,
     /// Logical pixel size of the grip (already includes DPI scale factor).
     grip_size: i32,
-    reorder: Option<ReorderState>,
-    // SP2b additions (Task 6) — wired up by Task 7:
     pointer: pointer::PointerState,
     mouse_tracking_started: bool,
     self_release_pending: bool,
@@ -377,16 +359,11 @@ impl ToolbarState {
             .map_or(Orientation::Horizontal, |c| c.layout);
         ToolbarState {
             buttons: Vec::new(),
-            hover_index: None,
-            pressed_index: None,
             dpi,
             config,
-            tracking_mouse: false,
             layout,
             drop_registered: false,
             grip_size: theme::scale(GRIP_SIZE, dpi),
-            reorder: None,
-            // SP2b:
             pointer: pointer::PointerState::default(),
             mouse_tracking_started: false,
             self_release_pending: false,
@@ -404,23 +381,6 @@ impl ToolbarState {
         for cmd in commands {
             self.execute_pointer_command(hwnd, cmd);
         }
-        self.sync_legacy_fields();
-    }
-
-    /// Temporary scaffolding (Task 7 → Task 8): mirrors `self.pointer` into the
-    /// legacy fields so paint code (still reading `hover_index`, `pressed_index`,
-    /// `reorder`) continues to work. Task 8 updates paint and deletes this.
-    fn sync_legacy_fields(&mut self) {
-        self.hover_index = self.pointer.hover_button();
-        self.pressed_index = self.pointer.pressed_button();
-        self.reorder = self.pointer.dragging_reorder().map(|(src, ins)| ReorderState {
-            source_button: src,
-            press_x: 0,
-            press_y: 0,
-            active: true,
-            insertion: ins,
-        });
-        self.tracking_mouse = self.mouse_tracking_started;
     }
 
     fn execute_pointer_command(
@@ -714,14 +674,14 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     let default_font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
     let old_font = unsafe { SelectObject(hdc, default_font) };
 
+    let hover_button = state.pointer.hover_button();
+    let pressed_button = state.pointer.pressed_button();
+    let drag_source = state.pointer.dragging_reorder().map(|(src, _ins)| src);
+
     for (i, btn) in state.buttons.iter().enumerate() {
-        let is_hover = state.hover_index == Some(i);
-        let is_pressed = state.pressed_index == Some(i);
-        let is_dragging_source = state
-            .reorder
-            .as_ref()
-            .map(|r| r.active && r.source_button == i)
-            .unwrap_or(false);
+        let is_hover = hover_button == Some(i);
+        let is_pressed = pressed_button == Some(i);
+        let is_dragging_source = drag_source == Some(i);
 
         if is_dragging_source {
             // Don't draw hover/pressed highlight for the dragged button.
@@ -795,18 +755,17 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     }
 
     // Reorder insertion caret (horizontal layout only).
-    if let Some(r) = state.reorder
-        && r.active
+    if let Some((_src, insertion)) = state.pointer.dragging_reorder()
         && state.layout == Orientation::Horizontal
     {
         let folder_buttons: Vec<&ButtonLayout> =
             state.buttons.iter().filter(|b| !b.is_add).collect();
         if !folder_buttons.is_empty() {
             // X coordinate of the caret.
-            let caret_x = if r.insertion >= folder_buttons.len() {
+            let caret_x = if insertion >= folder_buttons.len() {
                 folder_buttons.last().unwrap().rect.right + 1
             } else {
-                folder_buttons[r.insertion].rect.left - 1
+                folder_buttons[insertion].rect.left - 1
             };
             let caret_w = theme::scale(2, state.dpi);
             let caret_color = if is_dark {
