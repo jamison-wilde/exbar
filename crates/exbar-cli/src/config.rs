@@ -62,7 +62,6 @@ impl Config {
         Self::from_str(&contents)
     }
 
-    #[cfg_attr(test, allow(dead_code))]
     pub fn load() -> Option<Config> {
         let path = default_config_path();
         Self::load_from_path(&path)
@@ -118,7 +117,6 @@ impl Config {
         fs::write(path, json)
     }
 
-    #[cfg_attr(test, allow(dead_code))]
     pub fn save(&self) -> std::io::Result<()> {
         self.save_to_path(&default_config_path())
     }

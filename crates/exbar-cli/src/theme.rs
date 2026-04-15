@@ -43,7 +43,6 @@ pub fn is_dark_mode() -> bool {
 }
 
 /// Get the DPI for a specific window. Returns 96 if the call fails.
-#[cfg_attr(test, allow(dead_code))]
 pub fn get_dpi(hwnd: HWND) -> u32 {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     if dpi == 0 { 96 } else { dpi }
