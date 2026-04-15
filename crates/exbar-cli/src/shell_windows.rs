@@ -290,7 +290,6 @@ impl ShellBrowser for Win32Shell {
             }
         }
     }
-
 }
 
 fn open_in_new_window(path: &str) {

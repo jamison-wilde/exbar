@@ -121,7 +121,6 @@ fn get_global_toolbar_hwnd() -> Option<HWND> {
 
 // ── Foreground window tracking ───────────────────────────────────────────────
 
-
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
 const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
@@ -948,8 +947,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
             // The foreground WinEvent fires reliably; GetForegroundWindow() does not.
             // Use state.active_explorer (set by foreground_event_proc before toolbar creation).
-            let explorer_hwnd =
-                state.active_explorer.unwrap_or_else(|| unsafe { GetForegroundWindow() });
+            let explorer_hwnd = state
+                .active_explorer
+                .unwrap_or_else(|| unsafe { GetForegroundWindow() });
             let class = crate::explorer::get_class_name(explorer_hwnd);
             if class == "CabinetWClass" {
                 log::info!("toolbar create: showing above explorer={explorer_hwnd:?}");
@@ -1588,7 +1588,9 @@ struct RenameState {
 fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, initial_name: &str) {
     // Cancel any existing rename first.
     // SAFETY: toolbar is the toolbar HWND; we are on the message-pump thread.
-    let Some(state) = (unsafe { toolbar_state(toolbar) }) else { return; };
+    let Some(state) = (unsafe { toolbar_state(toolbar) }) else {
+        return;
+    };
     cancel_inline_rename(state);
 
     let hinstance = exe_hinstance();
@@ -2040,13 +2042,20 @@ mod tests {
 
         state.execute_pointer_command(
             HWND(std::ptr::dangling_mut()),
-            pointer::PointerCommand::FireFolderClick { folder_button: 0, ctrl: false },
+            pointer::PointerCommand::FireFolderClick {
+                folder_button: 0,
+                ctrl: false,
+            },
         );
 
-        assert!(deps.navigate_calls.lock().unwrap().is_empty(),
-            "navigate should not be called when no active explorer");
-        assert!(deps.new_tab_calls.lock().unwrap().is_empty(),
-            "open_in_new_tab should not be called when no active explorer");
+        assert!(
+            deps.navigate_calls.lock().unwrap().is_empty(),
+            "navigate should not be called when no active explorer"
+        );
+        assert!(
+            deps.new_tab_calls.lock().unwrap().is_empty(),
+            "open_in_new_tab should not be called when no active explorer"
+        );
     }
 
     #[test]
