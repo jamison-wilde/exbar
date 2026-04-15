@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows_core::PCWSTR;
 
-use crate::config::{Config, FolderEntry, Layout};
+use crate::config::{Config, FolderEntry, Orientation};
 use crate::theme;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -362,7 +362,7 @@ struct ToolbarState {
     dpi: u32,
     config: Option<Config>,
     tracking_mouse: bool,
-    layout: Layout,
+    layout: Orientation,
     drop_registered: bool,
     /// Logical pixel size of the grip (already includes DPI scale factor).
     grip_size: i32,
@@ -371,7 +371,9 @@ struct ToolbarState {
 
 impl ToolbarState {
     fn new(dpi: u32, config: Option<Config>) -> Self {
-        let layout = config.as_ref().map_or(Layout::Horizontal, |c| c.layout);
+        let layout = config
+            .as_ref()
+            .map_or(Orientation::Horizontal, |c| c.layout);
         ToolbarState {
             buttons: Vec::new(),
             hover_index: None,
@@ -400,7 +402,7 @@ fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
     let gap = s(BTN_GAP);
     let grip = state.grip_size;
 
-    let is_vertical = state.layout == Layout::Vertical;
+    let is_vertical = state.layout == Orientation::Vertical;
 
     let folder_names: Vec<String> = state.config.as_ref().map_or(Vec::new(), |c| {
         c.folders.iter().map(|f| f.name.clone()).collect()
@@ -519,7 +521,7 @@ fn compute_insertion_index(state: &ToolbarState, cursor_x: i32) -> usize {
         return 0;
     }
     // For vertical layout, fall back to "end" — visual isn't supported.
-    if state.layout == Layout::Vertical {
+    if state.layout == Orientation::Vertical {
         return folder_buttons.len();
     }
 
@@ -535,8 +537,8 @@ fn compute_insertion_index(state: &ToolbarState, cursor_x: i32) -> usize {
 /// Returns true if (x, y) is in the grip area.
 fn in_grip(state: &ToolbarState, x: i32, y: i32) -> bool {
     match state.layout {
-        Layout::Horizontal => x < state.grip_size,
-        Layout::Vertical => y < state.grip_size,
+        Orientation::Horizontal => x < state.grip_size,
+        Orientation::Vertical => y < state.grip_size,
     }
 }
 
@@ -582,7 +584,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     let dot_gap = theme::scale(4, state.dpi);
 
     match state.layout {
-        Layout::Horizontal => {
+        Orientation::Horizontal => {
             // Three vertical dots centered in the grip column
             let cx = grip / 2;
             let total_h = dot_size * 3 + dot_gap * 2;
@@ -600,7 +602,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
                 }
             }
         }
-        Layout::Vertical => {
+        Orientation::Vertical => {
             // Three horizontal dots centered in the grip row
             let cy = grip / 2;
             let total_w = dot_size * 3 + dot_gap * 2;
@@ -769,7 +771,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     // Reorder insertion caret (horizontal layout only).
     if let Some(r) = state.reorder
         && r.active
-        && state.layout == Layout::Horizontal
+        && state.layout == Orientation::Horizontal
     {
         let folder_buttons: Vec<&ButtonLayout> =
             state.buttons.iter().filter(|b| !b.is_add).collect();
@@ -1417,7 +1419,7 @@ pub fn refresh_toolbar(hwnd: HWND) {
     state.layout = state
         .config
         .as_ref()
-        .map_or(Layout::Horizontal, |c| c.layout);
+        .map_or(Orientation::Horizontal, |c| c.layout);
 
     // Re-apply opacity in case config changed.
     apply_opacity(hwnd, state);

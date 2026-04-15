@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum Layout {
+pub enum Orientation {
     #[default]
     Horizontal,
     Vertical,
@@ -29,7 +29,7 @@ where
 pub struct Config {
     pub folders: Vec<FolderEntry>,
     #[serde(default)]
-    pub layout: Layout,
+    pub layout: Orientation,
     #[serde(default = "default_opacity")]
     pub background_opacity: f32,
     #[serde(
