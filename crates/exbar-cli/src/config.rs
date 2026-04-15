@@ -1,3 +1,16 @@
+//! Configuration: schema, persistence, and mutation API for `~/.exbar.json`.
+//!
+//! The on-disk JSON shape is owned by [`Config`] and its nested types
+//! ([`FolderEntry`], [`Orientation`], [`LogLevel`]). Mutation helpers
+//! enforce small invariants in one place — e.g. [`Config::rename_folder`]
+//! refuses to overwrite a folder with empty / whitespace-only text.
+//!
+//! The [`ConfigStore`] trait abstracts the file-IO boundary. Production
+//! wires [`JsonFileStore`] (which reads/writes `~/.exbar.json`); tests
+//! inject a `MockConfigStore` that holds a `Config` in a `Mutex`. See
+//! `docs/adrs/ADR-0004-trait-seams-via-box-dyn.md` for why this seam
+//! exists.
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;

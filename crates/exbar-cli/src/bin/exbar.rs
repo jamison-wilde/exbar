@@ -1,3 +1,23 @@
+//! Binary entry point for the exbar CLI.
+//!
+//! Three subcommands:
+//!
+//! - `exbar hook` — production. Installs the foreground WinEvent hook
+//!   and runs the message pump. Started by the MSI's `HKCU\…\Run\Exbar`
+//!   entry at login. Calls `FreeConsole()` immediately so post-install
+//!   actions don't flash a console window.
+//! - `exbar status` — diagnostic. Prints whether Explorer is reachable,
+//!   the loaded `~/.exbar.json` (if any), and exits.
+//! - `exbar install` / `exbar uninstall` — dev-only fallbacks. End
+//!   users use the MSI; these subcommands wire/unwire the Run key
+//!   manually for development iteration.
+//!
+//! See `docs/adrs/ADR-0001-out-of-process-winevent-hook.md` for why
+//! exbar runs as its own process.
+//!
+//! The runtime modules live in the `exbar_cli` library crate; this
+//! binary only orchestrates them.
+
 // In release builds, mark this binary as Windows-subsystem so no console
 // is allocated at launch. A console-subsystem binary, when launched via
 // the MSI post-install action, the Run key, or a Start Menu shortcut,
