@@ -107,17 +107,6 @@ const MENU_ID_REMOVE: u32 = 205;
 /// The single global toolbar HWND (None if not yet created or destroyed).
 static GLOBAL_TOOLBAR: Mutex<Option<isize>> = Mutex::new(None);
 
-/// The most recently activated Explorer (CabinetWClass) HWND.
-static ACTIVE_EXPLORER: Mutex<Option<isize>> = Mutex::new(None);
-
-pub fn set_active_explorer(hwnd: HWND) {
-    *ACTIVE_EXPLORER.lock().unwrap() = Some(hwnd.0 as isize);
-}
-
-pub fn get_active_explorer() -> Option<HWND> {
-    ACTIVE_EXPLORER.lock().unwrap().map(|h| HWND(h as *mut _))
-}
-
 fn set_global_toolbar(hwnd: HWND) {
     *GLOBAL_TOOLBAR.lock().unwrap() = Some(hwnd.0 as isize);
 }
@@ -237,7 +226,14 @@ unsafe extern "system" fn foreground_event_proc(
     //   - OUR process (rename edit, folder picker, popup menu — all transient)
     // Hide only when a window in a DIFFERENT unrelated process takes foreground.
     if is_explorer {
-        set_active_explorer(hwnd);
+        if let Some(toolbar_hwnd) = get_global_toolbar_hwnd() {
+            // SAFETY: Win32 dispatches WinEvent callbacks on the thread that
+            // installed SetWinEventHook — our message-pump thread. Same
+            // single-threaded invariant `toolbar_state` relies on.
+            if let Some(state) = unsafe { toolbar_state(toolbar_hwnd) } {
+                state.active_explorer = Some(hwnd);
+            }
+        }
         // First time we see an Explorer foreground, create the toolbar.
         // If not ready, retry logic is deferred to Task 8.
         if tb_opt.is_none()
@@ -400,7 +396,7 @@ struct ToolbarState {
     clipboard: Box<dyn Clipboard>,
     config_store: Box<dyn ConfigStore>,
     // SP4 consolidation — populated in Tasks 2-3:
-    #[allow(dead_code)] active_explorer: Option<HWND>,
+    active_explorer: Option<HWND>,
     #[allow(dead_code)] rename_state: Option<RenameState>,
 }
 
@@ -527,12 +523,12 @@ impl ToolbarState {
                             .as_ref()
                             .map(|c| c.new_tab_timeout_ms_zero_disables)
                             .unwrap_or(500);
-                        if let Some(explorer) = self.shell_browser.active_explorer() {
+                        if let Some(explorer) = self.active_explorer {
                             self.shell_browser.open_in_new_tab(explorer, &path, timeout);
                         } else {
                             log::debug!("FireFolderClick(ctrl): no active explorer");
                         }
-                    } else if let Some(explorer) = self.shell_browser.active_explorer() {
+                    } else if let Some(explorer) = self.active_explorer {
                         crate::warn_on_err!(self.shell_browser.navigate(explorer, &path));
                     } else {
                         log::debug!("FireFolderClick: no active explorer");
@@ -955,9 +951,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             register_drop_targets(hwnd, state);
 
             // The foreground WinEvent fires reliably; GetForegroundWindow() does not.
-            // Track ACTIVE_EXPLORER to reliably find the window that triggered creation.
+            // Use state.active_explorer (set by foreground_event_proc before toolbar creation).
             let explorer_hwnd =
-                get_active_explorer().unwrap_or_else(|| unsafe { GetForegroundWindow() });
+                state.active_explorer.unwrap_or_else(|| unsafe { GetForegroundWindow() });
             let class = crate::explorer::get_class_name(explorer_hwnd);
             if class == "CabinetWClass" {
                 log::info!("toolbar create: showing above explorer={explorer_hwnd:?}");
@@ -1177,7 +1173,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         let path = std::path::PathBuf::from(&state.buttons[idx].folder.path);
                         match chosen {
                             MENU_ID_OPEN => {
-                                if let Some(explorer) = state.shell_browser.active_explorer() {
+                                if let Some(explorer) = state.active_explorer {
                                     crate::warn_on_err!(
                                         state.shell_browser.navigate(explorer, &path)
                                     );
@@ -1189,7 +1185,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                     .as_ref()
                                     .map(|c| c.new_tab_timeout_ms_zero_disables)
                                     .unwrap_or(500);
-                                if let Some(explorer) = state.shell_browser.active_explorer() {
+                                if let Some(explorer) = state.active_explorer {
                                     state
                                         .shell_browser
                                         .open_in_new_tab(explorer, &path, timeout);
@@ -1788,6 +1784,8 @@ mod tests {
         navigate_calls: Mutex<Vec<(isize, PathBuf)>>,
         new_tab_calls: Mutex<Vec<(isize, PathBuf, u32)>>,
         /// Active explorer stored as isize so the struct is Send + Sync.
+        /// Field retained for Task 5 cleanup; no longer used by trait methods.
+        #[allow(dead_code)]
         active: Mutex<Option<isize>>,
     }
     // SAFETY: tests run single-threaded; the isize values are never
@@ -1809,12 +1807,6 @@ mod tests {
                 path.to_path_buf(),
                 timeout_ms,
             ));
-        }
-        fn active_explorer(&self) -> Option<HWND> {
-            self.active.lock().unwrap().map(|v| HWND(v as *mut _))
-        }
-        fn set_active_explorer(&self, hwnd: HWND) {
-            *self.active.lock().unwrap() = Some(hwnd.0 as isize);
         }
     }
 
@@ -1889,12 +1881,6 @@ mod tests {
         }
         fn open_in_new_tab(&self, e: HWND, p: &Path, t: u32) {
             self.0.open_in_new_tab(e, p, t)
-        }
-        fn active_explorer(&self) -> Option<HWND> {
-            self.0.active_explorer()
-        }
-        fn set_active_explorer(&self, h: HWND) {
-            self.0.set_active_explorer(h)
         }
     }
     struct PickerArc(Arc<MockFolderPicker>);
@@ -2002,9 +1988,9 @@ mod tests {
     #[test]
     fn fire_folder_click_without_ctrl_calls_navigate_with_folder_path() {
         let deps = mk_deps();
-        *deps.shell.active.lock().unwrap() = Some(42);
         let cfg = mk_config_with_folders(&[("Downloads", "C:\\Downloads")]);
         let mut state = make_test_state(&deps, Some(cfg));
+        state.active_explorer = Some(HWND(42 as *mut _));
         state.buttons = vec![
             mk_add_button(),
             mk_folder_button("Downloads", "C:\\Downloads", 42),
@@ -2027,12 +2013,12 @@ mod tests {
     #[test]
     fn fire_folder_click_with_ctrl_calls_open_in_new_tab_with_configured_timeout() {
         let deps = mk_deps();
-        *deps.shell.active.lock().unwrap() = Some(42);
         let cfg = Config::from_str(
             r#"{"folders":[{"name":"D","path":"C:\\D"}],"newTabTimeoutMsZeroDisables":750}"#,
         )
         .unwrap();
         let mut state = make_test_state(&deps, Some(cfg));
+        state.active_explorer = Some(HWND(42 as *mut _));
         state.buttons = vec![mk_add_button(), mk_folder_button("D", "C:\\D", 42)];
 
         state.execute_pointer_command(
