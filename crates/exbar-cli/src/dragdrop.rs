@@ -337,6 +337,9 @@ fn effect_for(
     }
 }
 
+// IDropTarget trait methods take `*mut DROPEFFECT` / `*const _` as dictated by the
+// COM ABI; they cannot be declared `unsafe fn` without breaking the trait contract.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 impl IDropTarget_Impl for FolderDropTarget_Impl {
     fn DragEnter(
         &self,

@@ -35,6 +35,13 @@ unsafe fn variant_i4(n: i32) -> VARIANT {
 /// Try to get `IShellBrowser` for `cabinet_hwnd` by enumerating `IShellWindows`.
 ///
 /// Returns `None` on any failure; navigation buttons won't work.
+///
+/// # Safety
+///
+/// Must be called from an STA thread. Uses Win32 COM APIs
+/// (`CoCreateInstance`, `IShellWindows` enumeration) that assume the
+/// thread has already initialised COM via `CoInitializeEx`, which is
+/// idempotently ensured on entry.
 pub unsafe fn get_shell_browser_for(cabinet_hwnd: HWND) -> Option<IShellBrowser> {
     // Ensure COM is initialised on this thread (idempotent if already done).
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
@@ -77,6 +84,11 @@ pub unsafe fn get_shell_browser_for(cabinet_hwnd: HWND) -> Option<IShellBrowser>
 
 /// Return the list of all Explorer `IShellBrowser`s keyed by their HWND (as isize).
 /// Used by the new-tab flow to detect which tab/window is newly created.
+///
+/// # Safety
+///
+/// Same contract as `get_shell_browser_for`: must be called from an STA
+/// thread; the function idempotently ensures COM is initialised.
 pub unsafe fn enumerate_shell_browsers() -> Vec<(isize, IShellBrowser)> {
     let mut out = Vec::new();
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };

@@ -49,6 +49,10 @@ pub struct FolderEntry {
 }
 
 impl Config {
+    // Intentionally not implementing `std::str::FromStr` — that trait returns
+    // `Result<Self, E>`, but here we treat any parse failure as "use the
+    // default"/None at the callsite. Keep the `Option`-returning bespoke API.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(json: &str) -> Option<Config> {
         serde_json::from_str(json).ok()
     }
