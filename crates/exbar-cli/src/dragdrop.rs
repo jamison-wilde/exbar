@@ -16,9 +16,7 @@ use windows::Win32::System::Ole::{
 };
 use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
-use windows::Win32::UI::Shell::{
-    DragQueryFileW, HDROP, SHGetPathFromIDListW, SHParseDisplayName,
-};
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP, SHGetPathFromIDListW, SHParseDisplayName};
 use windows_core::{PCWSTR, Result, implement};
 
 pub use crate::drop_effect::DropAction;
@@ -356,12 +354,7 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
                 log::info!("drop: target={target_path:?} effect={effect:?}");
                 // SAFETY: data_obj is live for the Drop callback duration.
                 let sources = unsafe { extract_paths_from_data_object(data_obj) };
-                let op_result = if dropeffect == DROPEFFECT_MOVE {
-                    self.file_operator.move_items(&sources, target_path)
-                } else {
-                    self.file_operator.copy_items(&sources, target_path)
-                };
-                op_result.map_err(|e| {
+                execute_drop_via(&*self.file_operator, effect, &sources, target_path).map_err(|e| {
                     log::error!("Drop: file operation failed: {e}");
                     windows_core::Error::from_win32()
                 })
@@ -418,6 +411,21 @@ pub fn unregister_drop_target(hwnd: HWND) -> Result<()> {
     unsafe { RevokeDragDrop(hwnd) }
 }
 
+/// Dispatch a drop to `file_op` based on `effect`. Returns `Ok(())` for
+/// `Effect::None` / `Effect::Link` (no-op).
+pub(crate) fn execute_drop_via(
+    file_op: &dyn FileOperator,
+    effect: crate::drop_effect::Effect,
+    sources: &[std::path::PathBuf],
+    target: &std::path::Path,
+) -> crate::error::ExbarResult<()> {
+    match effect {
+        crate::drop_effect::Effect::Move => file_op.move_items(sources, target),
+        crate::drop_effect::Effect::Copy => file_op.copy_items(sources, target),
+        _ => Ok(()),
+    }
+}
+
 // ── SP3: FileOperator trait ───────────────────────────────────────────────────
 
 use crate::error::ExbarResult;
@@ -456,28 +464,26 @@ impl FileOperator for Win32FileOp {
     }
 }
 
-fn file_op_execute(
-    sources: &[PathBuf],
-    target_dir: &Path,
-    kind: FileOpKind,
-) -> ExbarResult<()> {
-    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+fn file_op_execute(sources: &[PathBuf], target_dir: &Path, kind: FileOpKind) -> ExbarResult<()> {
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
     use windows::Win32::UI::Shell::{
-        FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, FOF_ALLOWUNDO,
-        FOF_NOCONFIRMMKDIR,
+        FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR, FileOperation, IFileOperation, IShellItem,
+        SHCreateItemFromParsingName,
     };
     use windows_core::PCWSTR;
 
     // SAFETY: CoCreateInstance requires COM initialized on STA thread;
     // wndproc thread satisfies.
-    let file_op: IFileOperation =
-        unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
+    let file_op: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
 
     // SAFETY: SetOperationFlags accepts a bitflags value.
     unsafe { file_op.SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR)? };
 
     let target_str = target_dir.to_string_lossy();
-    let target_wide: Vec<u16> = target_str.encode_utf16().chain(std::iter::once(0)).collect();
+    let target_wide: Vec<u16> = target_str
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     // SAFETY: SHCreateItemFromParsingName returns a new IShellItem; wide is null-terminated.
     let target_item: IShellItem =
         unsafe { SHCreateItemFromParsingName(PCWSTR(target_wide.as_ptr()), None)? };
@@ -627,5 +633,56 @@ mod tests {
             _ => DROPEFFECT_COPY,
         };
         assert_eq!(effect, DROPEFFECT_MOVE);
+    }
+
+    // ── SP3: FileOperator dispatch tests ──────────────────────────────────
+
+    use crate::error::ExbarResult;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MockFileOp {
+        move_calls: Mutex<Vec<(Vec<PathBuf>, PathBuf)>>,
+        copy_calls: Mutex<Vec<(Vec<PathBuf>, PathBuf)>>,
+    }
+    impl super::FileOperator for MockFileOp {
+        fn move_items(&self, s: &[PathBuf], t: &Path) -> ExbarResult<()> {
+            self.move_calls
+                .lock()
+                .unwrap()
+                .push((s.to_vec(), t.to_path_buf()));
+            Ok(())
+        }
+        fn copy_items(&self, s: &[PathBuf], t: &Path) -> ExbarResult<()> {
+            self.copy_calls
+                .lock()
+                .unwrap()
+                .push((s.to_vec(), t.to_path_buf()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn execute_drop_via_move_effect_calls_move_items() {
+        let op = MockFileOp::default();
+        let srcs = vec![PathBuf::from("C:\\a.txt"), PathBuf::from("C:\\b.txt")];
+        let tgt = PathBuf::from("C:\\target");
+        super::execute_drop_via(&op, crate::drop_effect::Effect::Move, &srcs, &tgt).unwrap();
+        assert_eq!(op.move_calls.lock().unwrap().len(), 1);
+        assert_eq!(op.copy_calls.lock().unwrap().len(), 0);
+        let (got_srcs, got_tgt) = op.move_calls.lock().unwrap()[0].clone();
+        assert_eq!(got_srcs, srcs);
+        assert_eq!(got_tgt, tgt);
+    }
+
+    #[test]
+    fn execute_drop_via_copy_effect_calls_copy_items() {
+        let op = MockFileOp::default();
+        let srcs = vec![PathBuf::from("C:\\a.txt")];
+        let tgt = PathBuf::from("D:\\target");
+        super::execute_drop_via(&op, crate::drop_effect::Effect::Copy, &srcs, &tgt).unwrap();
+        assert_eq!(op.move_calls.lock().unwrap().len(), 0);
+        assert_eq!(op.copy_calls.lock().unwrap().len(), 1);
     }
 }
