@@ -1,4 +1,36 @@
 //! Floating draggable toolbar window for Explorer folder shortcuts.
+//!
+//! This module is the central state container and message-loop home
+//! for the toolbar UI. It owns:
+//!
+//! - **`ToolbarState`** — the per-toolbar-instance state struct
+//!   carrying configuration, layout, pointer state, rename state,
+//!   active Explorer HWND, and the trait-seam handles for navigation,
+//!   file ops, clipboard, picker, and config persistence. See
+//!   `docs/adrs/ADR-0005-toolbar-state-over-statics.md` for why
+//!   state lives here instead of in module-level statics.
+//! - **`toolbar_wndproc`** — the Win32 window procedure. Receives
+//!   pointer / paint / drag-drop / context-menu messages, translates
+//!   pointer messages into [`crate::pointer::PointerEvent`]s and
+//!   rename-edit messages into [`crate::rename::RenameEvent`]s, then
+//!   drives the pure controllers and executes their returned commands
+//!   against Win32. See
+//!   `docs/adrs/ADR-0003-pure-controller-adapter-pattern.md`.
+//! - **[`install_foreground_hook`]** — the cross-process WinEvent hook
+//!   that creates / shows / hides the toolbar based on Explorer
+//!   foreground events.
+//! - **`GLOBAL_TOOLBAR`** — the single surviving module-level static.
+//!   It exists because `WINEVENT_OUTOFCONTEXT` callbacks have no
+//!   `&self`; they need a thread-safe entry point to find the toolbar
+//!   HWND. From the HWND, `toolbar_state(hwnd)` recovers a pointer to
+//!   `ToolbarState`.
+//!
+//! ## Threading
+//!
+//! All state mutation happens on the message-pump thread (the one
+//! that called `SetWinEventHook` and runs `GetMessage`). The
+//! `unsafe { toolbar_state(hwnd) }` helper relies on this invariant
+//! for soundness — it does not lock.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::{Mutex, Once};
@@ -1379,6 +1411,11 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
+/// Create the top-level popup toolbar window above `owner`.
+///
+/// `owner` is the triggering Explorer (`CabinetWClass`) HWND — used for
+/// monitor / DPI detection. Returns the new toolbar HWND on success.
+/// See ADR-0002 for why this is a top-level popup, not a child window.
 pub fn create_toolbar(
     owner: HWND,
     screen_pos: &RECT,
@@ -1474,6 +1511,7 @@ pub fn create_toolbar(
     }
 }
 
+/// Reload `~/.exbar.json` from disk for `hwnd`'s `ToolbarState` and recompute the layout.
 pub fn refresh_toolbar(hwnd: HWND) {
     let Some(state) = (unsafe { toolbar_state(hwnd) }) else {
         return;

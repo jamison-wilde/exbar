@@ -1,7 +1,21 @@
+//! Configuration: schema, persistence, and mutation API for `~/.exbar.json`.
+//!
+//! The on-disk JSON shape is owned by [`Config`] and its nested types
+//! ([`FolderEntry`], [`Orientation`], [`LogLevel`]). Mutation helpers
+//! enforce small invariants in one place — e.g. [`Config::rename_folder`]
+//! refuses to overwrite a folder with empty / whitespace-only text.
+//!
+//! The [`ConfigStore`] trait abstracts the file-IO boundary. Production
+//! wires [`JsonFileStore`] (which reads/writes `~/.exbar.json`); tests
+//! inject a `MockConfigStore` that holds a `Config` in a `Mutex`. See
+//! `docs/adrs/ADR-0004-trait-seams-via-box-dyn.md` for why this seam
+//! exists.
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+/// Toolbar orientation — horizontal lays buttons left-to-right; vertical stacks top-to-bottom.
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Orientation {
@@ -38,6 +52,8 @@ where
     Ok(v.min(5000))
 }
 
+/// Top-level configuration loaded from `~/.exbar.json`. Mutations go through methods so
+/// JSON-round-trip invariants stay in one place.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     pub folders: Vec<FolderEntry>,
@@ -55,6 +71,7 @@ pub struct Config {
     pub log_level: LogLevel,
 }
 
+/// One folder shortcut. Persists to JSON as `{"name": "...", "path": "..."}` plus an optional cached icon.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct FolderEntry {
     pub name: String,
@@ -67,21 +84,25 @@ impl Config {
     // Intentionally not implementing `std::str::FromStr` — that trait returns
     // `Result<Self, E>`, but here we treat any parse failure as "use the
     // default"/None at the callsite. Keep the `Option`-returning bespoke API.
+    /// Parse `json` as a `Config`. Returns `None` on any deserialize error.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(json: &str) -> Option<Config> {
         serde_json::from_str(json).ok()
     }
 
+    /// Load and parse a config from an arbitrary file path. Returns `None` if the file is missing or malformed.
     pub fn load_from_path(path: &str) -> Option<Config> {
         let contents = fs::read_to_string(path).ok()?;
         Self::from_str(&contents)
     }
 
+    /// Load config from the default path (`~/.exbar.json`). Returns `None` if missing or malformed.
     pub fn load() -> Option<Config> {
         let path = default_config_path();
         Self::load_from_path(&path)
     }
 
+    /// Append a new folder shortcut with the given display `name` and filesystem `path`.
     pub fn add_folder(&mut self, name: String, path: String) {
         self.folders.push(FolderEntry {
             name,
@@ -90,6 +111,7 @@ impl Config {
         });
     }
 
+    /// Remove the folder at `index`. No-op if `index` is out of bounds.
     pub fn remove_folder(&mut self, index: usize) {
         if index < self.folders.len() {
             self.folders.remove(index);
@@ -116,6 +138,7 @@ impl Config {
             .insert(effective_to.min(self.folders.len()), entry);
     }
 
+    /// Rename the folder at `index` to `new_name`. Whitespace-only names are trimmed and treated as no-ops.
     pub fn rename_folder(&mut self, index: usize, new_name: String) {
         if index >= self.folders.len() {
             return;
@@ -127,16 +150,19 @@ impl Config {
         self.folders[index].name = trimmed.to_owned();
     }
 
+    /// Serialize the config to pretty JSON and write it to `path`.
     pub fn save_to_path(&self, path: &str) -> std::io::Result<()> {
         let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         fs::write(path, json)
     }
 
+    /// Serialize the config and write it to the default path (`~/.exbar.json`).
     pub fn save(&self) -> std::io::Result<()> {
         self.save_to_path(&default_config_path())
     }
 }
 
+/// Returns the default config file path (`~/.exbar.json` on Windows). Does not verify the file exists.
 pub fn default_config_path() -> String {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
@@ -146,6 +172,7 @@ pub fn default_config_path() -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Returns `true` if `path` looks like a shell alias such as `shell:downloads` or `shell:home`.
 pub fn is_shell_alias(path: &str) -> bool {
     path.starts_with("shell:")
 }
@@ -154,6 +181,7 @@ pub fn is_shell_alias(path: &str) -> bool {
 
 use crate::error::{ExbarError, ExbarResult};
 
+/// Pluggable persistence for [`Config`]. Production uses [`JsonFileStore`]; tests inject mocks. See ADR-0004.
 pub trait ConfigStore: Send + Sync {
     fn load(&self) -> Option<Config>;
     fn save(&self, config: &Config) -> ExbarResult<()>;

@@ -1,3 +1,14 @@
+//! Display theme helpers: DPI scaling and dark-mode detection.
+//!
+//! All UI pixel values must pass through [`scale`] so the toolbar
+//! renders correctly on high-DPI displays. All theme colors must
+//! branch on [`is_dark_mode`] — never assume dark.
+//!
+//! Dark-mode lookup is cached behind an [`std::sync::OnceLock`] because
+//! the registry read involves a Win32 round-trip. The cache lasts for
+//! the lifetime of the process; users who toggle dark mode mid-session
+//! must restart the hook (`taskkill /im exbar.exe` then relaunch).
+
 use std::sync::OnceLock;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
