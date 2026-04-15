@@ -19,16 +19,8 @@ use windows::Win32::System::Registry::{
 };
 use windows::core::PCWSTR;
 
-mod config;
-mod contextmenu;
-mod dragdrop;
-mod explorer;
-mod log;
-mod navigate;
-mod picker;
-mod shell_windows;
-mod theme;
-mod toolbar;
+use exbar_cli::log;
+use exbar_cli::toolbar;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
@@ -212,8 +204,8 @@ fn run_hook() -> WinResult<()> {
     //
     // The first CabinetWClass foreground event triggers toolbar creation
     // inside foreground_event_proc.
-    crate::toolbar::install_foreground_hook();
-    crate::log::info("run_hook: foreground hook installed; entering message pump");
+    toolbar::install_foreground_hook();
+    log::info("run_hook: foreground hook installed; entering message pump");
 
     // Message pump — runs indefinitely.
     let mut msg = MSG::default();
