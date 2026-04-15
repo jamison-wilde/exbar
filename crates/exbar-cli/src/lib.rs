@@ -8,6 +8,7 @@ pub mod config;
 pub mod contextmenu;
 pub mod dragdrop;
 pub mod drop_effect;
+pub mod error;
 pub mod explorer;
 pub mod hit_test;
 pub mod layout;
