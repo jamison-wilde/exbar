@@ -4,3 +4,6 @@ legacy_source/
 .aideck/
 .claude/
 *.local.md
+
+# proptest auto-generated regression seed cache (local shrink replay only)
+**/proptest-regressions/
