@@ -502,4 +502,142 @@ mod tests {
         };
         assert_eq!(compute_insertion_index(&input), 2);
     }
+
+    use proptest::prelude::*;
+
+    /// Generator for a LayoutInput scenario: (dpi, orientation, folder names, widths, grip).
+    fn arb_layout_scenario() -> impl Strategy<Value = (u32, Orientation, Vec<String>, Vec<i32>, i32)> {
+        (
+            prop_oneof![Just(96u32), Just(120), Just(144), Just(168), Just(192)],
+            prop_oneof![Just(Orientation::Horizontal), Just(Orientation::Vertical)],
+            prop::collection::vec("[A-Za-z0-9 ]{1,50}", 0..20),
+            Just(Vec::<i32>::new()),
+            8i32..=24,
+        )
+            .prop_flat_map(|(dpi, orient, names, _placeholder, grip)| {
+                let n = names.len();
+                (
+                    Just(dpi),
+                    Just(orient),
+                    Just(names),
+                    prop::collection::vec(10i32..=500, n..=n),
+                    Just(grip),
+                )
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn layout_rects_are_non_negative(
+            (dpi, orient, names, widths, grip) in arb_layout_scenario()
+        ) {
+            let folders: Vec<FolderEntry> = names.iter().map(|n| mk_folder(n)).collect();
+            let input = LayoutInput {
+                dpi,
+                orientation: orient,
+                folders: &folders,
+                folder_text_widths_physical_px: &widths,
+                grip_size_logical_px: grip,
+            };
+            let layout = compute_layout(&input);
+            for b in &layout.buttons {
+                prop_assert!(b.rect.width() >= 0, "button width negative: {:?}", b.rect);
+                prop_assert!(b.rect.height() >= 0, "button height negative: {:?}", b.rect);
+            }
+            prop_assert!(layout.total_width >= 0);
+            prop_assert!(layout.total_height >= 0);
+        }
+
+        #[test]
+        fn layout_first_button_is_add(
+            (dpi, orient, names, widths, grip) in arb_layout_scenario()
+        ) {
+            let folders: Vec<FolderEntry> = names.iter().map(|n| mk_folder(n)).collect();
+            let input = LayoutInput {
+                dpi,
+                orientation: orient,
+                folders: &folders,
+                folder_text_widths_physical_px: &widths,
+                grip_size_logical_px: grip,
+            };
+            let layout = compute_layout(&input);
+            prop_assert!(!layout.buttons.is_empty());
+            prop_assert!(layout.buttons[0].is_add);
+            for b in &layout.buttons[1..] {
+                prop_assert!(!b.is_add);
+            }
+        }
+
+        #[test]
+        fn layout_buttons_do_not_overlap(
+            (dpi, orient, names, widths, grip) in arb_layout_scenario()
+        ) {
+            let folders: Vec<FolderEntry> = names.iter().map(|n| mk_folder(n)).collect();
+            let input = LayoutInput {
+                dpi,
+                orientation: orient,
+                folders: &folders,
+                folder_text_widths_physical_px: &widths,
+                grip_size_logical_px: grip,
+            };
+            let layout = compute_layout(&input);
+            for pair in layout.buttons.windows(2) {
+                let (a, b) = (&pair[0], &pair[1]);
+                match orient {
+                    Orientation::Horizontal => {
+                        prop_assert!(a.rect.right <= b.rect.left, "overlap: {:?} then {:?}", a.rect, b.rect);
+                    }
+                    Orientation::Vertical => {
+                        prop_assert!(a.rect.bottom <= b.rect.top, "overlap: {:?} then {:?}", a.rect, b.rect);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn layout_total_bounds_contain_all_buttons(
+            (dpi, orient, names, widths, grip) in arb_layout_scenario()
+        ) {
+            let folders: Vec<FolderEntry> = names.iter().map(|n| mk_folder(n)).collect();
+            let input = LayoutInput {
+                dpi,
+                orientation: orient,
+                folders: &folders,
+                folder_text_widths_physical_px: &widths,
+                grip_size_logical_px: grip,
+            };
+            let layout = compute_layout(&input);
+            for b in &layout.buttons {
+                prop_assert!(b.rect.left >= 0);
+                prop_assert!(b.rect.top >= 0);
+                prop_assert!(b.rect.right <= layout.total_width);
+                prop_assert!(b.rect.bottom <= layout.total_height);
+            }
+        }
+
+        #[test]
+        fn insertion_index_is_in_range(
+            (dpi, orient, names, widths, grip) in arb_layout_scenario(),
+            cursor_x in -1000i32..=5000,
+            cursor_y in -1000i32..=5000,
+        ) {
+            let folders: Vec<FolderEntry> = names.iter().map(|n| mk_folder(n)).collect();
+            let layout_input = LayoutInput {
+                dpi,
+                orientation: orient,
+                folders: &folders,
+                folder_text_widths_physical_px: &widths,
+                grip_size_logical_px: grip,
+            };
+            let layout = compute_layout(&layout_input);
+            let insertion = InsertionInput {
+                buttons: &layout.buttons,
+                orientation: orient,
+                cursor_x,
+                cursor_y,
+            };
+            let idx = compute_insertion_index(&insertion);
+            prop_assert!(idx <= folders.len(), "index {} out of range 0..={}", idx, folders.len());
+        }
+    }
 }
