@@ -100,7 +100,9 @@ fn reg_create_key(subkey: &str) -> ExbarResult<HKEY> {
     if err.is_ok() {
         Ok(hkey)
     } else {
-        Err(ExbarError::Win32(windows::core::Error::from(err.to_hresult())))
+        Err(ExbarError::Win32(windows::core::Error::from(
+            err.to_hresult(),
+        )))
     }
 }
 
@@ -121,7 +123,9 @@ fn reg_set_string(hkey: HKEY, value_name: &str, data: &str) -> ExbarResult<()> {
     if err.is_ok() {
         Ok(())
     } else {
-        Err(ExbarError::Win32(windows::core::Error::from(err.to_hresult())))
+        Err(ExbarError::Win32(windows::core::Error::from(
+            err.to_hresult(),
+        )))
     }
 }
 
@@ -238,7 +242,8 @@ fn install() -> ExbarResult<()> {
                 { "name": "Desktop",   "path": "shell:Desktop" }
             ]
         });
-        std::fs::write(&cfg, serde_json::to_string_pretty(&stub).unwrap()).map_err(|e| ExbarError::io(&cfg, e))?;
+        std::fs::write(&cfg, serde_json::to_string_pretty(&stub).unwrap())
+            .map_err(|e| ExbarError::io(&cfg, e))?;
         println!("Created config at {}", cfg.display());
     } else {
         println!("Config already exists at {}", cfg.display());

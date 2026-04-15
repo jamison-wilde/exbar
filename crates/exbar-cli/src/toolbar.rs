@@ -1185,7 +1185,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                     .map(|c| c.new_tab_timeout_ms_zero_disables)
                                     .unwrap_or(500);
                                 if let Some(explorer) = state.shell_browser.active_explorer() {
-                                    state.shell_browser.open_in_new_tab(explorer, &path, timeout);
+                                    state
+                                        .shell_browser
+                                        .open_in_new_tab(explorer, &path, timeout);
                                 }
                             }
                             MENU_ID_COPY_PATH => {
@@ -1269,7 +1271,12 @@ fn apply_opacity(hwnd: HWND, state: &ToolbarState) {
     let opacity = state.config.as_ref().map_or(0.8, |c| c.background_opacity);
     let alpha = (opacity.clamp(0.0, 1.0) * 255.0) as u8;
     unsafe {
-        crate::warn_on_err!(SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA));
+        crate::warn_on_err!(SetLayeredWindowAttributes(
+            hwnd,
+            COLORREF(0),
+            alpha,
+            LWA_ALPHA
+        ));
     }
 }
 
@@ -1317,7 +1324,13 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
         })
     };
 
-    if crate::dragdrop::register_drop_target(hwnd, Box::new(resolver), std::sync::Arc::clone(&state.file_operator)).is_ok() {
+    if crate::dragdrop::register_drop_target(
+        hwnd,
+        Box::new(resolver),
+        std::sync::Arc::clone(&state.file_operator),
+    )
+    .is_ok()
+    {
         state.drop_registered = true;
         log::info!("Registered OLE drop target on toolbar");
     }
@@ -1346,6 +1359,10 @@ pub fn create_toolbar(
     });
 
     let dpi = theme::get_dpi(owner);
+    // Bootstrap: no ToolbarState exists yet, so the `config_store` trait seam
+    // is unavailable. This is the only direct Config::load() call in the
+    // runtime — ToolbarState::new() hands the loaded Config off and all
+    // subsequent mutations route through state.config_store.
     let config = Config::load();
     let is_dark = theme::is_dark_mode();
     log::info!("create_toolbar: dark_mode={is_dark}");
@@ -1620,7 +1637,9 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
     }));
     unsafe {
         use windows::Win32::UI::Shell::SetWindowSubclass;
-        crate::warn_on_err!(SetWindowSubclass(edit, Some(rename_subclass_proc), 1, data as usize).ok());
+        crate::warn_on_err!(
+            SetWindowSubclass(edit, Some(rename_subclass_proc), 1, data as usize).ok()
+        );
     }
 
     *RENAME_STATE.lock().unwrap() = Some(RenameState {
@@ -1780,16 +1799,14 @@ mod tests {
             Ok(())
         }
         fn open_in_new_tab(&self, explorer: HWND, path: &Path, timeout_ms: u32) {
-            self.new_tab_calls
-                .lock()
-                .unwrap()
-                .push((explorer.0 as isize, path.to_path_buf(), timeout_ms));
+            self.new_tab_calls.lock().unwrap().push((
+                explorer.0 as isize,
+                path.to_path_buf(),
+                timeout_ms,
+            ));
         }
         fn active_explorer(&self) -> Option<HWND> {
-            self.active
-                .lock()
-                .unwrap()
-                .map(|v| HWND(v as *mut _))
+            self.active.lock().unwrap().map(|v| HWND(v as *mut _))
         }
         fn set_active_explorer(&self, hwnd: HWND) {
             *self.active.lock().unwrap() = Some(hwnd.0 as isize);
@@ -1862,23 +1879,39 @@ mod tests {
     unsafe impl Send for ShellArc {}
     unsafe impl Sync for ShellArc {}
     impl ShellBrowser for ShellArc {
-        fn navigate(&self, e: HWND, p: &Path) -> ExbarResult<()> { self.0.navigate(e, p) }
-        fn open_in_new_tab(&self, e: HWND, p: &Path, t: u32) { self.0.open_in_new_tab(e, p, t) }
-        fn active_explorer(&self) -> Option<HWND> { self.0.active_explorer() }
-        fn set_active_explorer(&self, h: HWND) { self.0.set_active_explorer(h) }
+        fn navigate(&self, e: HWND, p: &Path) -> ExbarResult<()> {
+            self.0.navigate(e, p)
+        }
+        fn open_in_new_tab(&self, e: HWND, p: &Path, t: u32) {
+            self.0.open_in_new_tab(e, p, t)
+        }
+        fn active_explorer(&self) -> Option<HWND> {
+            self.0.active_explorer()
+        }
+        fn set_active_explorer(&self, h: HWND) {
+            self.0.set_active_explorer(h)
+        }
     }
     struct PickerArc(Arc<MockFolderPicker>);
     impl FolderPicker for PickerArc {
-        fn pick_folder(&self) -> Option<PathBuf> { self.0.pick_folder() }
+        fn pick_folder(&self) -> Option<PathBuf> {
+            self.0.pick_folder()
+        }
     }
     struct ClipArc(Arc<MockClipboard>);
     impl Clipboard for ClipArc {
-        fn set_text(&self, t: &str) -> ExbarResult<()> { self.0.set_text(t) }
+        fn set_text(&self, t: &str) -> ExbarResult<()> {
+            self.0.set_text(t)
+        }
     }
     struct CfgArc(Arc<MockConfigStore>);
     impl ConfigStore for CfgArc {
-        fn load(&self) -> Option<Config> { self.0.load() }
-        fn save(&self, c: &Config) -> ExbarResult<()> { self.0.save(c) }
+        fn load(&self) -> Option<Config> {
+            self.0.load()
+        }
+        fn save(&self, c: &Config) -> ExbarResult<()> {
+            self.0.save(c)
+        }
     }
 
     struct TestDeps {
@@ -1913,16 +1946,34 @@ mod tests {
 
     fn mk_add_button() -> ButtonLayout {
         ButtonLayout {
-            rect: Rect { left: 0, top: 0, right: 40, bottom: 28 },
-            folder: FolderEntry { name: "+".into(), path: String::new(), icon: None },
+            rect: Rect {
+                left: 0,
+                top: 0,
+                right: 40,
+                bottom: 28,
+            },
+            folder: FolderEntry {
+                name: "+".into(),
+                path: String::new(),
+                icon: None,
+            },
             is_add: true,
         }
     }
 
     fn mk_folder_button(name: &str, path: &str, left: i32) -> ButtonLayout {
         ButtonLayout {
-            rect: Rect { left, top: 0, right: left + 90, bottom: 28 },
-            folder: FolderEntry { name: name.into(), path: path.into(), icon: None },
+            rect: Rect {
+                left,
+                top: 0,
+                right: left + 90,
+                bottom: 28,
+            },
+            folder: FolderEntry {
+                name: name.into(),
+                path: path.into(),
+                icon: None,
+            },
             is_add: false,
         }
     }
@@ -1956,7 +2007,10 @@ mod tests {
 
         state.execute_pointer_command(
             HWND(std::ptr::dangling_mut()),
-            pointer::PointerCommand::FireFolderClick { folder_button: 0, ctrl: false },
+            pointer::PointerCommand::FireFolderClick {
+                folder_button: 0,
+                ctrl: false,
+            },
         );
 
         let calls = deps.shell.navigate_calls.lock().unwrap();
@@ -1971,16 +2025,17 @@ mod tests {
         *deps.shell.active.lock().unwrap() = Some(42);
         let cfg = Config::from_str(
             r#"{"folders":[{"name":"D","path":"C:\\D"}],"newTabTimeoutMsZeroDisables":750}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let mut state = make_test_state(&deps, Some(cfg));
-        state.buttons = vec![
-            mk_add_button(),
-            mk_folder_button("D", "C:\\D", 42),
-        ];
+        state.buttons = vec![mk_add_button(), mk_folder_button("D", "C:\\D", 42)];
 
         state.execute_pointer_command(
             HWND(std::ptr::dangling_mut()),
-            pointer::PointerCommand::FireFolderClick { folder_button: 0, ctrl: true },
+            pointer::PointerCommand::FireFolderClick {
+                folder_button: 0,
+                ctrl: true,
+            },
         );
 
         let calls = deps.shell.new_tab_calls.lock().unwrap();
@@ -1996,7 +2051,10 @@ mod tests {
         *deps.cfg_store.load_value.lock().unwrap() = Some(mk_config_with_folders(&[]));
 
         let mut state = make_test_state(&deps, None);
-        state.execute_pointer_command(HWND(std::ptr::dangling_mut()), pointer::PointerCommand::FireAddClick);
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireAddClick,
+        );
 
         assert_eq!(*deps.picker.calls.lock().unwrap(), 1);
         let saves = deps.cfg_store.save_calls.lock().unwrap();
@@ -2010,7 +2068,10 @@ mod tests {
         let deps = mk_deps();
         *deps.picker.next_result.lock().unwrap() = None;
         let mut state = make_test_state(&deps, None);
-        state.execute_pointer_command(HWND(std::ptr::dangling_mut()), pointer::PointerCommand::FireAddClick);
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireAddClick,
+        );
 
         assert_eq!(*deps.picker.calls.lock().unwrap(), 1);
         assert_eq!(deps.cfg_store.save_calls.lock().unwrap().len(), 0);
@@ -2020,13 +2081,18 @@ mod tests {
     fn commit_reorder_loads_modifies_saves_via_config_store() {
         let deps = mk_deps();
         *deps.cfg_store.load_value.lock().unwrap() = Some(mk_config_with_folders(&[
-            ("A", "C:\\a"), ("B", "C:\\b"), ("C", "C:\\c"),
+            ("A", "C:\\a"),
+            ("B", "C:\\b"),
+            ("C", "C:\\c"),
         ]));
 
         let mut state = make_test_state(&deps, None);
         state.execute_pointer_command(
             HWND(std::ptr::dangling_mut()),
-            pointer::PointerCommand::CommitReorder { from_folder: 0, to_folder: 3 },
+            pointer::PointerCommand::CommitReorder {
+                from_folder: 0,
+                to_folder: 3,
+            },
         );
 
         let saves = deps.cfg_store.save_calls.lock().unwrap();

@@ -141,9 +141,7 @@ use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{SBSP_SAMEBROWSER, SHParseDisplayName, ShellExecuteW};
-use windows::Win32::UI::WindowsAndMessaging::{
-    PostMessageW, SW_SHOWNORMAL, WM_KEYDOWN, WM_KEYUP,
-};
+use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL, WM_KEYDOWN, WM_KEYUP};
 use windows_core::PCWSTR;
 
 const VK_CONTROL: usize = 0x11;
@@ -158,6 +156,13 @@ pub trait ShellBrowser: Send + Sync {
     /// `timeout_ms == 0`, fall back to ShellExecuteW opening a fresh Explorer
     /// window.
     fn open_in_new_tab(&self, explorer: HWND, path: &Path, timeout_ms: u32);
+
+    // TODO(SP4): `active_explorer` / `set_active_explorer` don't semantically
+    // belong on a trait named `ShellBrowser` — the trait's job is navigation.
+    // Active-Explorer tracking is app-level state that `Win32Shell` today
+    // delegates to module-level statics in `toolbar.rs`. SP4 (state
+    // consolidation) should lift this pair off `ShellBrowser` and onto the
+    // forthcoming `App` struct.
 
     /// The most-recently-activated Explorer (CabinetWClass) HWND.
     fn active_explorer(&self) -> Option<HWND>;
@@ -200,8 +205,11 @@ impl ShellBrowser for Win32Shell {
         }
 
         // SAFETY: BrowseObject reads the PIDL as input; ownership retained here.
-        let browse_result =
-            unsafe { browser.BrowseObject(pidl, SBSP_SAMEBROWSER).map_err(ExbarError::from) };
+        let browse_result = unsafe {
+            browser
+                .BrowseObject(pidl, SBSP_SAMEBROWSER)
+                .map_err(ExbarError::from)
+        };
 
         // SAFETY: balance the SHParseDisplayName allocation.
         unsafe {
@@ -264,8 +272,10 @@ impl ShellBrowser for Win32Shell {
             let current = unsafe { enumerate_shell_browsers() };
             for (hwnd, browser) in current {
                 if !before.contains(&hwnd) {
-                    let wide: Vec<u16> =
-                        path_str_owned.encode_utf16().chain(std::iter::once(0)).collect();
+                    let wide: Vec<u16> = path_str_owned
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
                     let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
                     // SAFETY: SHParseDisplayName writes a PIDL we free below.
                     let parsed = unsafe {
@@ -309,7 +319,10 @@ fn open_in_new_window(path: &str) {
     let quoted = format!("\"{path}\"");
     let path_wide: Vec<u16> = quoted.encode_utf16().chain(std::iter::once(0)).collect();
     let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
-    let exe: Vec<u16> = "explorer.exe".encode_utf16().chain(std::iter::once(0)).collect();
+    let exe: Vec<u16> = "explorer.exe"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
     unsafe {
         let _ = ShellExecuteW(
