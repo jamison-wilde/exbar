@@ -6,8 +6,9 @@ use std::sync::{Mutex, Once};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, ClientToScreen, CreateSolidBrush, DEFAULT_GUI_FONT, DT_CENTER, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject, InvalidateRect,
-    PAINTSTRUCT, ScreenToClient, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetStockObject,
+    GetTextExtentPoint32W, InvalidateRect, PAINTSTRUCT, ReleaseDC, ScreenToClient, SelectObject,
+    SetBkMode, SetTextColor, TRANSPARENT, HDC,
 };
 use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
@@ -29,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_core::PCWSTR;
 
 use crate::config::{Config, FolderEntry, Orientation};
+use crate::layout::{self, ButtonLayout, LayoutInput};
 use crate::theme;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -40,8 +42,6 @@ const WM_DPICHANGED: u32 = 0x02E0;
 
 // Layout constants (logical pixels, scale by DPI)
 const BTN_PAD_H: i32 = 10;
-const BTN_GAP: i32 = 2;
-const ADD_SIZE: i32 = 28;
 /// Logical pixel width/height of the drag handle grip area.
 const GRIP_SIZE: i32 = 12;
 
@@ -348,13 +348,6 @@ struct ReorderState {
     insertion: usize,
 }
 
-struct ButtonLayout {
-    rect: RECT,
-    folder: FolderEntry,
-    /// The synthetic "add folder" button (formerly the refresh glyph).
-    is_add: bool,
-}
-
 struct ToolbarState {
     buttons: Vec<ButtonLayout>,
     hover_index: Option<usize>,
@@ -391,113 +384,64 @@ impl ToolbarState {
 
 // ── Layout computation ───────────────────────────────────────────────────────
 
-/// Compute button positions. Returns the required (width, height) for the window.
-fn compute_layout(state: &mut ToolbarState) -> (i32, i32) {
-    state.buttons.clear();
-    let dpi = state.dpi;
-    let s = |px: i32| theme::scale(px, dpi);
+/// Measure the rendered-pixel width of each folder's label ("📁 Name" — the
+/// same format used in paint) using the currently-selected font in `hdc`.
+///
+/// Caller must `SelectObject(hdc, font)` first. Returns a Vec the same
+/// length as `folders`.
+fn measure_folder_text_widths(hdc: HDC, folders: &[FolderEntry]) -> Vec<i32> {
+    use windows::Win32::Foundation::SIZE;
 
-    let btn_h = s(ADD_SIZE);
-    let pad_h = s(BTN_PAD_H);
-    let gap = s(BTN_GAP);
-    let grip = state.grip_size;
-
-    let is_vertical = state.layout == Orientation::Vertical;
-
-    let folder_names: Vec<String> = state.config.as_ref().map_or(Vec::new(), |c| {
-        c.folders.iter().map(|f| f.name.clone()).collect()
-    });
-
-    let char_w = s(8);
-
-    let mut max_btn_w = s(ADD_SIZE);
-    for name in &folder_names {
-        let w = pad_h + s(14) + s(4) + (name.chars().count() as i32 * char_w) + pad_h;
-        if w > max_btn_w {
-            max_btn_w = w;
-        }
-    }
-
-    if is_vertical {
-        // Grip at top, then add-button, then folder buttons
-        let mut y = grip; // skip grip row
-
-        state.buttons.push(ButtonLayout {
-            rect: RECT {
-                left: 0,
-                top: y,
-                right: max_btn_w,
-                bottom: y + btn_h,
-            },
-            folder: FolderEntry {
-                name: "+".into(),
-                path: String::new(),
-                icon: None,
-            },
-            is_add: true,
-        });
-        y += btn_h + gap;
-
-        if let Some(ref config) = state.config.clone() {
-            for entry in &config.folders {
-                state.buttons.push(ButtonLayout {
-                    rect: RECT {
-                        left: 0,
-                        top: y,
-                        right: max_btn_w,
-                        bottom: y + btn_h,
-                    },
-                    folder: entry.clone(),
-                    is_add: false,
-                });
-                y += btn_h + gap;
+    folders
+        .iter()
+        .map(|f| {
+            // Match the label format used in paint: "📁 Name".
+            let label = format!("\u{1F4C1} {}", f.name);
+            let wide: Vec<u16> = label.encode_utf16().collect();
+            let mut size = SIZE::default();
+            let ok = unsafe { GetTextExtentPoint32W(hdc, &wide, &mut size) };
+            if ok.as_bool() {
+                size.cx
+            } else {
+                // Fallback: approximate — same as prior code.
+                (label.chars().count() as i32) * 8
             }
-        }
+        })
+        .collect()
+}
 
-        (max_btn_w, y - gap)
-    } else {
-        // Grip on left, then add-button, then folder buttons
-        let mut x = grip; // skip grip column
-
-        let refresh_w = s(ADD_SIZE);
-        state.buttons.push(ButtonLayout {
-            rect: RECT {
-                left: x,
-                top: 0,
-                right: x + refresh_w,
-                bottom: btn_h,
-            },
-            folder: FolderEntry {
-                name: "+".into(),
-                path: String::new(),
-                icon: None,
-            },
-            is_add: true,
-        });
-        x += refresh_w + gap;
-
-        if let Some(ref config) = state.config.clone() {
-            for entry in &config.folders {
-                // Match the vertical formula: padding + icon + gap + text + padding.
-                // The drawn label is "📁 Name"; omitting the icon width cuts
-                // off short names like "3D".
-                let w = pad_h + s(14) + s(4) + (entry.name.chars().count() as i32 * char_w) + pad_h;
-                state.buttons.push(ButtonLayout {
-                    rect: RECT {
-                        left: x,
-                        top: 0,
-                        right: x + w,
-                        bottom: btn_h,
-                    },
-                    folder: entry.clone(),
-                    is_add: false,
-                });
-                x += w + gap;
-            }
-        }
-
-        (x - gap, btn_h)
+/// Convert a `layout::Rect` to a Win32 `RECT` for use with GDI APIs.
+fn rect_to_win32(r: layout::Rect) -> RECT {
+    RECT {
+        left: r.left,
+        top: r.top,
+        right: r.right,
+        bottom: r.bottom,
     }
+}
+
+/// Adapter: measures text widths via the given `hdc`, calls
+/// `layout::compute_layout`, writes the resulting buttons into `state.buttons`,
+/// and returns `(total_width, total_height)`.
+fn compute_layout(hdc: HDC, state: &mut ToolbarState) -> (i32, i32) {
+    let folders: Vec<FolderEntry> = state
+        .config
+        .as_ref()
+        .map(|c| c.folders.clone())
+        .unwrap_or_default();
+    let widths = measure_folder_text_widths(hdc, &folders);
+
+    let input = LayoutInput {
+        dpi: state.dpi,
+        orientation: state.layout,
+        folders: &folders,
+        folder_text_widths_physical_px: &widths,
+        grip_size_logical_px: GRIP_SIZE,
+    };
+
+    let computed = layout::compute_layout(&input);
+    state.buttons = computed.buttons;
+    (computed.total_width, computed.total_height)
 }
 
 // ── Hit test ─────────────────────────────────────────────────────────────────
@@ -707,7 +651,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
             };
             let hbr = unsafe { CreateSolidBrush(hl) };
             unsafe {
-                FillRect(hdc, &btn.rect, hbr);
+                FillRect(hdc, &rect_to_win32(btn.rect), hbr);
             }
             unsafe {
                 let _ = DeleteObject(hbr.into());
@@ -720,7 +664,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
             };
             let hbr = unsafe { CreateSolidBrush(hl) };
             unsafe {
-                FillRect(hdc, &btn.rect, hbr);
+                FillRect(hdc, &rect_to_win32(btn.rect), hbr);
             }
             unsafe {
                 let _ = DeleteObject(hbr.into());
@@ -748,7 +692,7 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
         }
 
         let mut label_wide: Vec<u16> = label.encode_utf16().collect();
-        let mut draw_rect = btn.rect;
+        let mut draw_rect = rect_to_win32(btn.rect);
         let flags = if btn.is_add {
             DT_SINGLELINE | DT_VCENTER | DT_CENTER
         } else {
@@ -819,7 +763,14 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize) };
 
             let state = unsafe { &mut *state_ptr };
-            let (w, h) = compute_layout(state);
+            let hdc = unsafe { GetDC(Some(hwnd)) };
+            let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+            let old_font = unsafe { SelectObject(hdc, font) };
+            let (w, h) = compute_layout(hdc, state);
+            unsafe {
+                SelectObject(hdc, old_font);
+                let _ = ReleaseDC(Some(hwnd), hdc);
+            }
 
             // Now that we know the real size, re-clamp position to fit entirely
             // within the current monitor's work area (the Explorer's monitor).
@@ -1197,7 +1148,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 copy_to_clipboard(&path);
                             }
                             MENU_ID_RENAME => {
-                                let rect = state.buttons[idx].rect;
+                                let rect = rect_to_win32(state.buttons[idx].rect);
                                 let name = state.buttons[idx].folder.name.clone();
                                 let folder_index = idx - 1; // + button at index 0
                                 start_inline_rename(hwnd, rect, folder_index, &name);
@@ -1225,7 +1176,14 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let state = unsafe { &mut *ptr };
                 state.dpi = new_dpi;
                 state.grip_size = theme::scale(GRIP_SIZE, new_dpi);
-                let (w, h) = compute_layout(state);
+                let hdc = unsafe { GetDC(Some(hwnd)) };
+                let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+                let old_font = unsafe { SelectObject(hdc, font) };
+                let (w, h) = compute_layout(hdc, state);
+                unsafe {
+                    SelectObject(hdc, old_font);
+                    let _ = ReleaseDC(Some(hwnd), hdc);
+                }
                 unsafe {
                     let _ = SetWindowPos(
                         hwnd,
@@ -1295,7 +1253,7 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
         .buttons
         .iter()
         .map(|b| Info {
-            rect: b.rect,
+            rect: rect_to_win32(b.rect),
             action: if b.is_add {
                 ActionSource::Add
             } else {
@@ -1424,7 +1382,14 @@ pub fn refresh_toolbar(hwnd: HWND) {
     // Re-apply opacity in case config changed.
     apply_opacity(hwnd, state);
 
-    let (w, h) = compute_layout(state);
+    let hdc = unsafe { GetDC(Some(hwnd)) };
+    let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+    let old_font = unsafe { SelectObject(hdc, font) };
+    let (w, h) = compute_layout(hdc, state);
+    unsafe {
+        SelectObject(hdc, old_font);
+        let _ = ReleaseDC(Some(hwnd), hdc);
+    }
     unsafe {
         let _ = SetWindowPos(
             hwnd,
