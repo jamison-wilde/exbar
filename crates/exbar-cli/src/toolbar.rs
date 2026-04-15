@@ -30,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_core::PCWSTR;
 
 use crate::config::{Config, FolderEntry, Orientation};
+use crate::hit_test;
 use crate::layout::{self, ButtonLayout, LayoutInput};
 use crate::theme;
 
@@ -444,40 +445,6 @@ fn compute_layout(hdc: HDC, state: &mut ToolbarState) -> (i32, i32) {
     (computed.total_width, computed.total_height)
 }
 
-// ── Hit test ─────────────────────────────────────────────────────────────────
-
-fn hit_test(state: &ToolbarState, x: i32, y: i32) -> Option<usize> {
-    state
-        .buttons
-        .iter()
-        .position(|b| x >= b.rect.left && x < b.rect.right && y >= b.rect.top && y < b.rect.bottom)
-}
-
-/// Given a horizontal cursor position, compute the folder-index insertion
-/// point in `0..=folders.len()`. Uses each folder button's midpoint.
-///
-/// Caller guarantees the reorder gesture started on a folder button; this
-/// function always returns a valid folder-index insertion (never index 0
-/// for the + button slot — the + stays pinned at button[0]).
-fn compute_insertion_index(state: &ToolbarState, cursor_x: i32) -> usize {
-    let folder_buttons: Vec<&ButtonLayout> = state.buttons.iter().filter(|b| !b.is_add).collect();
-    if folder_buttons.is_empty() {
-        return 0;
-    }
-    // For vertical layout, fall back to "end" — visual isn't supported.
-    if state.layout == Orientation::Vertical {
-        return folder_buttons.len();
-    }
-
-    for (i, b) in folder_buttons.iter().enumerate() {
-        let mid = (b.rect.left + b.rect.right) / 2;
-        if cursor_x < mid {
-            return i;
-        }
-    }
-    folder_buttons.len()
-}
-
 /// Returns true if (x, y) is in the grip area.
 fn in_grip(state: &ToolbarState, x: i32, y: i32) -> bool {
     match state.layout {
@@ -861,7 +828,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 if in_grip(state, pt.x, pt.y) {
                     return LRESULT(HTCAPTION as isize);
                 }
-                if hit_test(state, pt.x, pt.y).is_some() {
+                if hit_test::hit_test(&state.buttons, pt.x, pt.y).is_some() {
                     return LRESULT(1); // HTCLIENT
                 }
             }
@@ -908,7 +875,12 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         // Capture was already taken on WM_LBUTTONDOWN.
                     }
                     if r.active {
-                        r.insertion = compute_insertion_index(state, x);
+                        r.insertion = layout::compute_insertion_index(&layout::InsertionInput {
+                            buttons: &state.buttons,
+                            orientation: state.layout,
+                            cursor_x: x,
+                            cursor_y: 0,
+                        });
                         state.reorder = Some(r);
                         state.hover_index = None;
                         unsafe {
@@ -920,7 +892,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 }
 
                 // Hover tracking (existing behavior)
-                let new_hover = hit_test(state, x, y);
+                let new_hover = hit_test::hit_test(&state.buttons, x, y);
                 if new_hover != state.hover_index {
                     state.hover_index = new_hover;
                     unsafe {
@@ -980,7 +952,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let state = unsafe { &mut *ptr };
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                state.pressed_index = hit_test(state, x, y);
+                state.pressed_index = hit_test::hit_test(&state.buttons, x, y);
                 // Only start a potential reorder on a folder button (not + and not grip).
                 if let Some(idx) = state.pressed_index
                     && !state.buttons[idx].is_add
@@ -1031,7 +1003,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     // Not active = plain click; fall through to existing click logic.
                 }
 
-                if let Some(idx) = hit_test(state, x, y)
+                if let Some(idx) = hit_test::hit_test(&state.buttons, x, y)
                     && Some(idx) == state.pressed_index
                 {
                     if state.buttons[idx].is_add {
@@ -1071,7 +1043,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let state = unsafe { &mut *ptr };
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                if let Some(idx) = hit_test(state, x, y) {
+                if let Some(idx) = hit_test::hit_test(&state.buttons, x, y) {
                     let mut pt = POINT { x, y };
                     unsafe {
                         let _ = ClientToScreen(hwnd, &mut pt);
