@@ -458,7 +458,6 @@ use std::path::{Path, PathBuf};
 
 /// Abstraction over shell file move/copy operations.
 /// Allows tests to inject a fake implementation.
-#[allow(dead_code)]
 pub trait FileOperator: Send + Sync {
     /// Move `sources` into `target_dir`. Conflict handling follows Shell defaults.
     fn move_items(&self, sources: &[PathBuf], target_dir: &Path) -> ExbarResult<()>;
@@ -467,11 +466,9 @@ pub trait FileOperator: Send + Sync {
 }
 
 /// Production implementation backed by `IFileOperation`.
-#[allow(dead_code)]
 #[derive(Default)]
 pub struct Win32FileOp;
 
-#[allow(dead_code)]
 impl Win32FileOp {
     pub fn new() -> Self {
         Self

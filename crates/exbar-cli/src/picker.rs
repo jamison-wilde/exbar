@@ -63,7 +63,6 @@ pub trait FolderPicker: Send + Sync {
 }
 
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct Win32Picker;
 
 impl Win32Picker {

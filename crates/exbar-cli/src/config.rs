@@ -161,11 +161,9 @@ pub trait ConfigStore: Send + Sync {
 
 /// Production `ConfigStore` that reads/writes `~/.exbar.json`.
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct JsonFileStore;
 
 impl JsonFileStore {
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self
     }

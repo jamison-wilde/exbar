@@ -29,10 +29,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows_core::PCWSTR;
 
-use crate::config::{Config, FolderEntry, Orientation};
+use std::sync::Arc;
+
+use crate::clipboard::{Clipboard, Win32Clipboard};
+use crate::config::{Config, ConfigStore, FolderEntry, JsonFileStore, Orientation};
+use crate::dragdrop::{FileOperator, Win32FileOp};
 use crate::hit_test;
 use crate::layout::{self, ButtonLayout, LayoutInput};
+use crate::picker::{FolderPicker, Win32Picker};
 use crate::pointer;
+use crate::shell_windows::{ShellBrowser, Win32Shell};
 use crate::theme;
 
 // ── Safe wrappers for repetitive patterns ───────────────────────────────────
@@ -387,10 +393,36 @@ struct ToolbarState {
     pointer: pointer::PointerState,
     mouse_tracking_started: bool,
     self_release_pending: bool,
+    // SP3 trait seams (#[allow(dead_code)] until Tasks 7-9 migrate callers):
+    #[allow(dead_code)] shell_browser: Box<dyn ShellBrowser>,
+    #[allow(dead_code)] folder_picker: Box<dyn FolderPicker>,
+    #[allow(dead_code)] file_operator: Arc<dyn FileOperator>,
+    #[allow(dead_code)] clipboard: Box<dyn Clipboard>,
+    #[allow(dead_code)] config_store: Box<dyn ConfigStore>,
 }
 
 impl ToolbarState {
     fn new(dpi: u32, config: Option<Config>) -> Self {
+        Self::with_deps(
+            dpi,
+            config,
+            Box::new(Win32Shell::new()),
+            Box::new(Win32Picker::new()),
+            Arc::new(Win32FileOp::new()),
+            Box::new(Win32Clipboard::new()),
+            Box::new(JsonFileStore::new()),
+        )
+    }
+
+    pub(crate) fn with_deps(
+        dpi: u32,
+        config: Option<Config>,
+        shell_browser: Box<dyn ShellBrowser>,
+        folder_picker: Box<dyn FolderPicker>,
+        file_operator: Arc<dyn FileOperator>,
+        clipboard: Box<dyn Clipboard>,
+        config_store: Box<dyn ConfigStore>,
+    ) -> Self {
         let layout = config
             .as_ref()
             .map_or(Orientation::Horizontal, |c| c.layout);
@@ -404,6 +436,11 @@ impl ToolbarState {
             pointer: pointer::PointerState::default(),
             mouse_tracking_started: false,
             self_release_pending: false,
+            shell_browser,
+            folder_picker,
+            file_operator,
+            clipboard,
+            config_store,
         }
     }
 }
