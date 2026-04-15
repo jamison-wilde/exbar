@@ -392,7 +392,7 @@ struct ToolbarState {
     config_store: Box<dyn ConfigStore>,
     // SP4 consolidation — populated in Tasks 2-3:
     active_explorer: Option<HWND>,
-    rename_state: Option<RenameState>,
+    rename_state: Option<rename::RenameState>,
 }
 
 impl ToolbarState {
@@ -535,6 +535,49 @@ impl ToolbarState {
                 to_folder,
             } => {
                 commit_reorder(self, hwnd, from_folder, to_folder);
+            }
+        }
+    }
+
+    /// Drive the rename state machine with a single event, then execute the
+    /// resulting actions against Win32 + the `config_store` trait seam.
+    ///
+    /// Mirrors `execute_pointer_command`'s shape (SP2b). Single-threaded by
+    /// the message-pump invariant — no synchronisation needed.
+    // Task 3 routes the subclass-proc callbacks through this method; until then
+    // the only callers are tests, so suppress the dead_code lint for non-test builds.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn execute_rename_event(&mut self, toolbar: HWND, event: RenameEvent) {
+        let prior = self.rename_state.clone();
+        let (next, actions) = rename::transition(prior, event);
+        self.rename_state = next;
+
+        for action in actions {
+            match action {
+                RenameAction::ApplyRename {
+                    folder_index,
+                    new_name,
+                } => {
+                    if let Some(mut cfg) = self.config_store.load() {
+                        cfg.rename_folder(folder_index, new_name);
+                        if let Err(e) = self.config_store.save(&cfg) {
+                            log::error!("rename: save failed: {e}");
+                        } else {
+                            self.config = Some(cfg);
+                        }
+                    }
+                }
+                RenameAction::DestroyEdit { edit_hwnd } => {
+                    destroy_rename_edit(HWND(edit_hwnd as *mut _));
+                }
+                RenameAction::ReloadToolbar => unsafe {
+                    crate::warn_on_err!(PostMessageW(
+                        Some(toolbar),
+                        WM_USER_RELOAD,
+                        WPARAM(0),
+                        LPARAM(0)
+                    ));
+                },
             }
         }
     }
@@ -1581,14 +1624,7 @@ fn remove_folder_at(state: &mut ToolbarState, hwnd: HWND, index: usize) {
 
 // ── Inline rename ───────────────────────────────────────────────────────────
 
-struct RenameState {
-    edit_hwnd: isize,
-    /// Raw `Box<RenameSubclassData>` pointer handed to `SetWindowSubclass`.
-    /// Stored so `cancel_inline_rename` can reclaim the Box on parent teardown.
-    /// `folder_index` and `toolbar_hwnd` live in the Box; the subclass proc
-    /// reads them from `ref_data`.
-    subclass_data: usize,
-}
+use crate::rename::{self, RenameAction, RenameEvent};
 
 fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, initial_name: &str) {
     // Cancel any existing rename first.
@@ -1651,11 +1687,14 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
     // SAFETY: toolbar_state called at the top of this function; we are still on the
     // message-pump thread and no other code mutated GWLP_USERDATA since that call.
     if let Some(state) = unsafe { toolbar_state(toolbar) } {
-        state.rename_state = Some(RenameState {
+        state.rename_state = Some(rename::RenameState {
+            folder_index,
             edit_hwnd: edit.0 as isize,
-            subclass_data: data as usize,
         });
     }
+    // The leaked `data` Box and SetWindowSubclass ref_data still drive the
+    // existing subclass proc; Task 3 replaces both.
+    let _ = data;
 }
 
 struct RenameSubclassData {
@@ -1764,16 +1803,6 @@ fn cancel_inline_rename(state: &mut ToolbarState) {
     if let Some(s) = state.rename_state.take() {
         let edit = HWND(s.edit_hwnd as *mut _);
         destroy_rename_edit(edit);
-        // Reclaim the Box leaked into SetWindowSubclass; RemoveWindowSubclass
-        // inside destroy_rename_edit ran before this, so no callback can race.
-        if s.subclass_data != 0 {
-            // SAFETY: subclass_data holds the Box::into_raw pointer from start_inline_rename.
-            // RemoveWindowSubclass (inside destroy_rename_edit above) has already run,
-            // so the subclass proc cannot fire again and race this reclaim.
-            unsafe {
-                drop(Box::from_raw(s.subclass_data as *mut RenameSubclassData));
-            }
-        }
     }
 }
 
@@ -1866,14 +1895,20 @@ mod tests {
     #[derive(Default)]
     struct MockConfigStore {
         load_value: Mutex<Option<Config>>,
+        load_calls: Mutex<usize>,
         save_calls: Mutex<Vec<Config>>,
+        save_should_err: Mutex<bool>,
     }
     impl ConfigStore for MockConfigStore {
         fn load(&self) -> Option<Config> {
+            *self.load_calls.lock().unwrap() += 1;
             self.load_value.lock().unwrap().clone()
         }
         fn save(&self, config: &Config) -> ExbarResult<()> {
             self.save_calls.lock().unwrap().push(config.clone());
+            if *self.save_should_err.lock().unwrap() {
+                return Err(crate::error::ExbarError::Config("mock save error".into()));
+            }
             Ok(())
         }
     }
@@ -2133,5 +2168,152 @@ mod tests {
 
         let calls = deps.clipboard.set_text_calls.lock().unwrap();
         assert_eq!(*calls, vec!["C:\\Target".to_string()]);
+    }
+
+    // ── Rename adapter tests (SP6) ───────────────────────────────────────
+
+    fn mk_active_rename_state(folder_index: usize) -> rename::RenameState {
+        rename::RenameState {
+            folder_index,
+            edit_hwnd: 0xDEAD_BEEF,
+        }
+    }
+
+    #[test]
+    fn rename_apply_loads_mutates_saves() {
+        let deps = mk_deps();
+        *deps.cfg_store.load_value.lock().unwrap() =
+            Some(mk_config_with_folders(&[("Old", "C:\\Old")]));
+        let mut state = make_test_state(&deps, None);
+        state.rename_state = Some(mk_active_rename_state(0));
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::CommitRequested {
+                text: "Renamed".into(),
+            },
+        );
+
+        let saves = deps.cfg_store.save_calls.lock().unwrap();
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0].folders[0].name, "Renamed");
+        assert!(
+            state.rename_state.is_none(),
+            "state should clear after commit"
+        );
+        assert_eq!(state.config.as_ref().unwrap().folders[0].name, "Renamed");
+    }
+
+    #[test]
+    fn rename_apply_with_empty_text_keeps_old_name() {
+        // End-to-end check that Config::rename_folder's trim-empty guard works
+        // through the adapter — empty text must not change the saved name.
+        let deps = mk_deps();
+        *deps.cfg_store.load_value.lock().unwrap() =
+            Some(mk_config_with_folders(&[("KeepMe", "C:\\K")]));
+        let mut state = make_test_state(&deps, None);
+        state.rename_state = Some(mk_active_rename_state(0));
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::CommitRequested { text: "   ".into() },
+        );
+
+        let saves = deps.cfg_store.save_calls.lock().unwrap();
+        assert_eq!(
+            saves.len(),
+            1,
+            "save still runs even when name was unchanged"
+        );
+        assert_eq!(
+            saves[0].folders[0].name, "KeepMe",
+            "trim-empty kept old name"
+        );
+    }
+
+    #[test]
+    fn rename_apply_save_error_skips_state_update() {
+        let deps = mk_deps();
+        *deps.cfg_store.load_value.lock().unwrap() =
+            Some(mk_config_with_folders(&[("Old", "C:\\Old")]));
+        *deps.cfg_store.save_should_err.lock().unwrap() = true;
+        let mut state = make_test_state(&deps, None);
+        state.rename_state = Some(mk_active_rename_state(0));
+        // Pre-populate state.config with the old config so we can detect non-update.
+        state.config = Some(mk_config_with_folders(&[("Old", "C:\\Old")]));
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::CommitRequested {
+                text: "Renamed".into(),
+            },
+        );
+
+        // save was attempted (and failed)
+        assert_eq!(deps.cfg_store.save_calls.lock().unwrap().len(), 1);
+        // state.config was NOT updated to the new name
+        assert_eq!(state.config.as_ref().unwrap().folders[0].name, "Old");
+    }
+
+    #[test]
+    fn rename_cancel_does_not_call_load_or_save() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+        state.rename_state = Some(mk_active_rename_state(2));
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::Cancelled,
+        );
+
+        assert_eq!(*deps.cfg_store.load_calls.lock().unwrap(), 0);
+        assert_eq!(deps.cfg_store.save_calls.lock().unwrap().len(), 0);
+        assert!(
+            state.rename_state.is_none(),
+            "state should clear after cancel"
+        );
+    }
+
+    #[test]
+    fn rename_started_when_already_active_replaces_state() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::Started {
+                folder_index: 1,
+                edit_hwnd: 0x111,
+            },
+        );
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::Started {
+                folder_index: 5,
+                edit_hwnd: 0x555,
+            },
+        );
+
+        let active = state.rename_state.as_ref().unwrap();
+        assert_eq!(active.folder_index, 5);
+        assert_eq!(active.edit_hwnd, 0x555);
+    }
+
+    #[test]
+    fn rename_commit_when_idle_does_nothing() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+        // rename_state intentionally None.
+
+        state.execute_rename_event(
+            HWND(std::ptr::dangling_mut()),
+            rename::RenameEvent::CommitRequested {
+                text: "ignored".into(),
+            },
+        );
+
+        assert_eq!(*deps.cfg_store.load_calls.lock().unwrap(), 0);
+        assert_eq!(deps.cfg_store.save_calls.lock().unwrap().len(), 0);
+        assert!(state.rename_state.is_none());
     }
 }
