@@ -121,11 +121,6 @@ fn get_global_toolbar_hwnd() -> Option<HWND> {
 
 // ── Foreground window tracking ───────────────────────────────────────────────
 
-static FOREGROUND_HOOK_INSTALLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Stored HWINEVENTHOOK so we can UnhookWinEvent at process exit.
-static FOREGROUND_HOOK: Mutex<Option<isize>> = Mutex::new(None);
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
@@ -285,11 +280,12 @@ fn update_toolbar_visibility(toolbar: HWND) {
     }
 }
 
-pub fn install_foreground_hook() {
-    use std::sync::atomic::Ordering;
-    if FOREGROUND_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
-        return;
-    }
+/// Install the foreground WinEvent hook. Callers must invoke exactly once
+/// (from `run_hook`). Returns the hook handle so the caller can
+/// `UnhookWinEvent` it at process exit.
+pub fn install_foreground_hook() -> HWINEVENTHOOK {
+    // SAFETY: SetWinEventHook registers our extern "system" callback and
+    // returns a handle we own; single call from run_hook is the sole user.
     let hook = unsafe {
         SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
@@ -301,8 +297,8 @@ pub fn install_foreground_hook() {
             WINEVENT_OUTOFCONTEXT,
         )
     };
-    *FOREGROUND_HOOK.lock().unwrap() = Some(hook.0 as isize);
     log::info!("Installed foreground event hook");
+    hook
 }
 
 // ── Position persistence ──────────────────────────────────────────────────────
