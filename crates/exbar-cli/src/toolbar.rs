@@ -399,6 +399,9 @@ struct ToolbarState {
     file_operator: Arc<dyn FileOperator>,
     clipboard: Box<dyn Clipboard>,
     config_store: Box<dyn ConfigStore>,
+    // SP4 consolidation — populated in Tasks 2-3:
+    #[allow(dead_code)] active_explorer: Option<HWND>,
+    #[allow(dead_code)] rename_state: Option<RenameState>,
 }
 
 impl ToolbarState {
@@ -441,6 +444,8 @@ impl ToolbarState {
             file_operator,
             clipboard,
             config_store,
+            active_explorer: None,
+            rename_state: None,
         }
     }
 }
