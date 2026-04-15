@@ -72,9 +72,99 @@ pub struct InsertionInput<'a> {
     pub cursor_y: i32,
 }
 
+/// Layout constants (logical pixels — scaled internally by `theme::scale`).
+const BTN_HEIGHT_LOGICAL_PX: i32 = 28;
+const BTN_PAD_H_LOGICAL_PX: i32 = 10;
+const BTN_GAP_LOGICAL_PX: i32 = 2;
+const ICON_WIDTH_LOGICAL_PX: i32 = 14;
+const ICON_TEXT_GAP_LOGICAL_PX: i32 = 4;
+const ADD_BUTTON_SIZE_LOGICAL_PX: i32 = 28;
+
 /// Compute button positions and total toolbar dimensions.
-pub fn compute_layout(_input: &LayoutInput) -> Layout {
-    unimplemented!("Task 6 implements compute_layout")
+pub fn compute_layout(input: &LayoutInput) -> Layout {
+    assert_eq!(
+        input.folders.len(),
+        input.folder_text_widths_physical_px.len(),
+        "folders and text widths slices must have the same length",
+    );
+
+    let dpi = input.dpi;
+    let s = |px: i32| crate::theme::scale(px, dpi);
+
+    let btn_h = s(BTN_HEIGHT_LOGICAL_PX);
+    let pad_h = s(BTN_PAD_H_LOGICAL_PX);
+    let gap = s(BTN_GAP_LOGICAL_PX);
+    let icon_w = s(ICON_WIDTH_LOGICAL_PX);
+    let icon_gap = s(ICON_TEXT_GAP_LOGICAL_PX);
+    let add_size = s(ADD_BUTTON_SIZE_LOGICAL_PX);
+    let grip = s(input.grip_size_logical_px);
+
+    // Compute each folder button's width: padding + icon + gap + text + padding.
+    let folder_widths: Vec<i32> = input
+        .folder_text_widths_physical_px
+        .iter()
+        .map(|&tw| pad_h + icon_w + icon_gap + tw + pad_h)
+        .collect();
+
+    let mut buttons = Vec::with_capacity(input.folders.len() + 1);
+
+    match input.orientation {
+        Orientation::Horizontal => {
+            let mut x = grip;
+            buttons.push(ButtonLayout {
+                rect: Rect { left: x, top: 0, right: x + add_size, bottom: btn_h },
+                folder: synthesized_add_button(),
+                is_add: true,
+            });
+            x += add_size + gap;
+
+            for (entry, &w) in input.folders.iter().zip(folder_widths.iter()) {
+                buttons.push(ButtonLayout {
+                    rect: Rect { left: x, top: 0, right: x + w, bottom: btn_h },
+                    folder: entry.clone(),
+                    is_add: false,
+                });
+                x += w + gap;
+            }
+
+            let total_width = x - gap;
+            let total_height = btn_h;
+            Layout { buttons, total_width, total_height }
+        }
+        Orientation::Vertical => {
+            // Width of the toolbar = widest of add-button and all folder buttons.
+            let max_width = folder_widths.iter().copied().max().unwrap_or(0).max(add_size);
+
+            let mut y = grip;
+            buttons.push(ButtonLayout {
+                rect: Rect { left: 0, top: y, right: max_width, bottom: y + btn_h },
+                folder: synthesized_add_button(),
+                is_add: true,
+            });
+            y += btn_h + gap;
+
+            for entry in input.folders.iter() {
+                buttons.push(ButtonLayout {
+                    rect: Rect { left: 0, top: y, right: max_width, bottom: y + btn_h },
+                    folder: entry.clone(),
+                    is_add: false,
+                });
+                y += btn_h + gap;
+            }
+
+            let total_width = max_width;
+            let total_height = y - gap;
+            Layout { buttons, total_width, total_height }
+        }
+    }
+}
+
+fn synthesized_add_button() -> FolderEntry {
+    FolderEntry {
+        name: "+".into(),
+        path: String::new(),
+        icon: None,
+    }
 }
 
 /// Given a cursor position, compute the folder-index insertion point in
@@ -110,5 +200,178 @@ mod tests {
         let r = Rect { left: 10, top: 10, right: 10, bottom: 10 };
         assert!(!r.contains(10, 10));
         assert!(!r.contains(0, 0));
+    }
+
+    fn mk_folder(name: &str) -> FolderEntry {
+        FolderEntry { name: name.into(), path: "C:\\test".into(), icon: None }
+    }
+
+    #[test]
+    fn empty_horizontal_only_has_add_button() {
+        let input = LayoutInput {
+            dpi: 96,
+            orientation: Orientation::Horizontal,
+            folders: &[],
+            folder_text_widths_physical_px: &[],
+            grip_size_logical_px: 12,
+        };
+        let layout = compute_layout(&input);
+        assert_eq!(layout.buttons.len(), 1);
+        assert!(layout.buttons[0].is_add);
+        assert_eq!(layout.buttons[0].rect, Rect { left: 12, top: 0, right: 40, bottom: 28 });
+        assert_eq!(layout.total_height, 28);
+    }
+
+    #[test]
+    fn empty_vertical_only_has_add_button() {
+        let input = LayoutInput {
+            dpi: 96,
+            orientation: Orientation::Vertical,
+            folders: &[],
+            folder_text_widths_physical_px: &[],
+            grip_size_logical_px: 12,
+        };
+        let layout = compute_layout(&input);
+        assert_eq!(layout.buttons.len(), 1);
+        assert!(layout.buttons[0].is_add);
+        assert_eq!(layout.buttons[0].rect, Rect { left: 0, top: 12, right: 28, bottom: 40 });
+        assert_eq!(layout.total_width, 28);
+    }
+
+    #[test]
+    fn one_folder_horizontal_at_96_dpi() {
+        let folders = [mk_folder("Downloads")];
+        let widths = [50];
+        let input = LayoutInput {
+            dpi: 96,
+            orientation: Orientation::Horizontal,
+            folders: &folders,
+            folder_text_widths_physical_px: &widths,
+            grip_size_logical_px: 12,
+        };
+        let layout = compute_layout(&input);
+        assert_eq!(layout.buttons.len(), 2);
+        // buttons[0] = +, buttons[1] = Downloads.
+        assert!(layout.buttons[0].is_add);
+        assert!(!layout.buttons[1].is_add);
+        // Downloads x: left edge = grip(12) + add(28) + gap(2) = 42
+        // Downloads width: pad(10) + icon(14) + icon_gap(4) + text(50) + pad(10) = 88
+        assert_eq!(layout.buttons[1].rect, Rect { left: 42, top: 0, right: 42 + 88, bottom: 28 });
+    }
+
+    #[test]
+    fn one_folder_horizontal_at_150_percent_dpi() {
+        let folders = [mk_folder("Downloads")];
+        let widths = [75]; // caller's pre-scaled measurement at 144 DPI
+        let input = LayoutInput {
+            dpi: 144,
+            orientation: Orientation::Horizontal,
+            folders: &folders,
+            folder_text_widths_physical_px: &widths,
+            grip_size_logical_px: 12,
+        };
+        let layout = compute_layout(&input);
+        // Every non-text constant scales by 144/96 = 1.5.
+        // grip: 12*1.5 = 18
+        // add_size: 28*1.5 = 42
+        // gap: 2*1.5 = 3
+        // pad: 10*1.5 = 15
+        // icon: 14*1.5 = 21
+        // icon_gap: 4*1.5 = 6
+        // Downloads width = 15+21+6+75+15 = 132
+        assert_eq!(layout.buttons[0].rect, Rect { left: 18, top: 0, right: 60, bottom: 42 });
+        assert_eq!(layout.buttons[1].rect, Rect { left: 63, top: 0, right: 63 + 132, bottom: 42 });
+    }
+
+    #[test]
+    fn three_folders_horizontal_pack_left_to_right() {
+        let folders = [mk_folder("A"), mk_folder("B"), mk_folder("C")];
+        let widths = [20, 40, 60];
+        let input = LayoutInput {
+            dpi: 96,
+            orientation: Orientation::Horizontal,
+            folders: &folders,
+            folder_text_widths_physical_px: &widths,
+            grip_size_logical_px: 12,
+        };
+        let layout = compute_layout(&input);
+        assert_eq!(layout.buttons.len(), 4);
+        for pair in layout.buttons.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            assert!(a.rect.right <= b.rect.left, "buttons must not overlap: {:?} then {:?}", a.rect, b.rect);
+        }
+    }
+
+    #[test]
+    fn three_folders_vertical_pack_top_to_bottom() {
+        let folders = [mk_folder("A"), mk_folder("BB"), mk_folder("CCC")];
+        let widths = [20, 40, 60];
+        let input = LayoutInput {
+            dpi: 96,
+            orientation: Orientation::Vertical,
+            folders: &folders,
+            folder_text_widths_physical_px: &widths,
+            grip_size_logical_px: 12,
+        };
+        let layout = compute_layout(&input);
+        assert_eq!(layout.buttons.len(), 4);
+        for pair in layout.buttons.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            assert!(a.rect.bottom <= b.rect.top);
+        }
+        // All buttons share the same width in vertical orientation.
+        let w = layout.buttons[0].rect.width();
+        for b in &layout.buttons {
+            assert_eq!(b.rect.width(), w);
+        }
+        assert_eq!(layout.total_width, w);
+    }
+
+    #[test]
+    fn vertical_total_width_matches_widest_folder() {
+        let folders = [mk_folder("short"), mk_folder("a very long folder name")];
+        let widths = [30, 200]; // pre-measured widths
+        let input = LayoutInput {
+            dpi: 96,
+            orientation: Orientation::Vertical,
+            folders: &folders,
+            folder_text_widths_physical_px: &widths,
+            grip_size_logical_px: 12,
+        };
+        let layout = compute_layout(&input);
+        // Widest folder width: pad + icon + gap + 200 + pad = 10 + 14 + 4 + 200 + 10 = 238
+        assert_eq!(layout.total_width, 238);
+        assert_eq!(layout.buttons[0].rect.width(), 238); // + button also uses max width
+    }
+
+    #[test]
+    fn zero_text_width_does_not_panic() {
+        let folders = [mk_folder("")];
+        let widths = [0];
+        let input = LayoutInput {
+            dpi: 96,
+            orientation: Orientation::Horizontal,
+            folders: &folders,
+            folder_text_widths_physical_px: &widths,
+            grip_size_logical_px: 12,
+        };
+        let layout = compute_layout(&input);
+        // Even with zero text width, button still has padding + icon width.
+        assert!(layout.buttons[1].rect.width() > 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "folders and text widths slices must have the same length")]
+    fn mismatched_slice_lengths_panic() {
+        let folders = [mk_folder("A"), mk_folder("B")];
+        let widths = [50]; // only one width for two folders
+        let input = LayoutInput {
+            dpi: 96,
+            orientation: Orientation::Horizontal,
+            folders: &folders,
+            folder_text_widths_physical_px: &widths,
+            grip_size_logical_px: 12,
+        };
+        compute_layout(&input);
     }
 }
