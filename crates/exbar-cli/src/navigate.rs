@@ -70,10 +70,11 @@ pub fn open_in_new_tab(target_explorer: Option<HWND>, path: &str, timeout_ms: u3
             .collect();
 
     unsafe {
-        let _ = PostMessageW(Some(target), WM_KEYDOWN, WPARAM(VK_CONTROL), LPARAM(0));
-        let _ = PostMessageW(Some(target), WM_KEYDOWN, WPARAM(VK_T_KEY), LPARAM(0));
-        let _ = PostMessageW(Some(target), WM_KEYUP, WPARAM(VK_T_KEY), LPARAM(0));
-        let _ = PostMessageW(Some(target), WM_KEYUP, WPARAM(VK_CONTROL), LPARAM(0));
+        // Failure here means the tab won't open; log so it's diagnosable.
+        crate::warn_on_err!(PostMessageW(Some(target), WM_KEYDOWN, WPARAM(VK_CONTROL), LPARAM(0)));
+        crate::warn_on_err!(PostMessageW(Some(target), WM_KEYDOWN, WPARAM(VK_T_KEY), LPARAM(0)));
+        crate::warn_on_err!(PostMessageW(Some(target), WM_KEYUP, WPARAM(VK_T_KEY), LPARAM(0)));
+        crate::warn_on_err!(PostMessageW(Some(target), WM_KEYUP, WPARAM(VK_CONTROL), LPARAM(0)));
     }
 
     let start = std::time::Instant::now();

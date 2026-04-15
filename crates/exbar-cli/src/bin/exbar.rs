@@ -253,7 +253,7 @@ fn install() -> ExbarResult<()> {
     let hkey = reg_create_key(RUN_KEY)?;
     reg_set_string(hkey, RUN_VALUE, &run_value)?;
     unsafe {
-        let _ = RegCloseKey(hkey);
+        exbar_cli::warn_on_err!(RegCloseKey(hkey).ok());
     }
     println!("Registered Run key: {run_value}");
 
@@ -283,10 +283,10 @@ fn uninstall(clean: bool) -> ExbarResult<()> {
         if err.is_ok() {
             let val_w = to_wide_null(RUN_VALUE);
             unsafe {
-                let _ = RegDeleteValueW(hkey, PCWSTR(val_w.as_ptr()));
+                exbar_cli::warn_on_err!(RegDeleteValueW(hkey, PCWSTR(val_w.as_ptr())).ok());
             }
             unsafe {
-                let _ = RegCloseKey(hkey);
+                exbar_cli::warn_on_err!(RegCloseKey(hkey).ok());
             }
             println!("Removed Run key.");
         }
