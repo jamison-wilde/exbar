@@ -338,7 +338,6 @@ fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, ref_hwnd: Option<HWND>) ->
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
-
 struct ToolbarState {
     buttons: Vec<ButtonLayout>,
     dpi: u32,
@@ -374,20 +373,25 @@ impl ToolbarState {
 // ── SP2b pointer adapter methods ─────────────────────────────────────────────
 
 impl ToolbarState {
+    /// Drive the pointer state machine with a single event, then execute the
+    /// resulting commands against Win32.
+    ///
+    /// Safety note on `mem::take`: between `take` and the reassignment, `self.pointer`
+    /// transiently reads `Idle`. Reentrancy into this wndproc during the gap would
+    /// observe the wrong state. Today the only command that can pump Win32 state
+    /// synchronously is `CancelInlineRename`, which calls `DestroyWindow` on the
+    /// subclassed EDIT control — `WM_DESTROY` is dispatched to the EDIT's wndproc
+    /// (not ours), so `toolbar_wndproc` is not re-entered. Any future command that
+    /// might trigger a toolbar-directed WM must preserve this invariant.
     fn apply_pointer_event(&mut self, hwnd: HWND, event: pointer::PointerEvent) {
-        let (new_state, commands) =
-            pointer::transition(std::mem::take(&mut self.pointer), event);
+        let (new_state, commands) = pointer::transition(std::mem::take(&mut self.pointer), event);
         self.pointer = new_state;
         for cmd in commands {
             self.execute_pointer_command(hwnd, cmd);
         }
     }
 
-    fn execute_pointer_command(
-        &mut self,
-        hwnd: HWND,
-        cmd: pointer::PointerCommand,
-    ) {
+    fn execute_pointer_command(&mut self, hwnd: HWND, cmd: pointer::PointerCommand) {
         use pointer::PointerCommand::*;
         match cmd {
             Redraw => unsafe {
@@ -411,7 +415,10 @@ impl ToolbarState {
             ReleaseMouse => {
                 // Only set the pending flag if we actually hold capture —
                 // else ReleaseCapture won't fire WM_CAPTURECHANGED and the
-                // flag would strand.
+                // flag would strand. Calling ReleaseCapture unconditionally
+                // on the `else` branch is safe: per MSDN, ReleaseCapture is
+                // a no-op when the calling thread doesn't own capture (no
+                // WM_CAPTURECHANGED is dispatched).
                 let we_have_capture = unsafe { GetCapture() } == hwnd;
                 if we_have_capture {
                     self.self_release_pending = true;
@@ -426,7 +433,10 @@ impl ToolbarState {
                     append_folder_and_reload(&path);
                 }
             }
-            FireFolderClick { folder_button, ctrl } => {
+            FireFolderClick {
+                folder_button,
+                ctrl,
+            } => {
                 // folder_button is in folder-index space; buttons[0] is the + button.
                 let btn_slot = folder_button + 1;
                 if btn_slot < self.buttons.len() {
@@ -437,21 +447,19 @@ impl ToolbarState {
                             .as_ref()
                             .map(|c| c.new_tab_timeout_ms_zero_disables)
                             .unwrap_or(500);
-                        crate::navigate::open_in_new_tab(
-                            get_active_explorer(),
-                            &path,
-                            timeout,
-                        );
+                        crate::navigate::open_in_new_tab(get_active_explorer(), &path, timeout);
                     } else if let Some(explorer_hwnd) = get_active_explorer()
-                        && let Some(sb) = unsafe {
-                            crate::shell_windows::get_shell_browser_for(explorer_hwnd)
-                        }
+                        && let Some(sb) =
+                            unsafe { crate::shell_windows::get_shell_browser_for(explorer_hwnd) }
                     {
                         let _ = crate::navigate::navigate_to(&sb, &path);
                     }
                 }
             }
-            CommitReorder { from_folder, to_folder } => {
+            CommitReorder {
+                from_folder,
+                to_folder,
+            } => {
                 commit_reorder(hwnd, from_folder, to_folder);
             }
         }
@@ -941,29 +949,29 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
-                let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| {
-                    pointer::HitResult {
-                        button: idx,
-                        is_folder: !state.buttons[idx].is_add,
-                    }
+                let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| pointer::HitResult {
+                    button: idx,
+                    is_folder: !state.buttons[idx].is_add,
                 });
                 let reorder_threshold_px = theme::scale(REORDER_THRESHOLD, state.dpi);
-                let insertion_if_reordering = layout::compute_insertion_index(
-                    &layout::InsertionInput {
+                let insertion_if_reordering =
+                    layout::compute_insertion_index(&layout::InsertionInput {
                         buttons: &state.buttons,
                         orientation: state.layout,
                         cursor_x: x,
                         cursor_y: y,
+                    });
+
+                state.apply_pointer_event(
+                    hwnd,
+                    pointer::PointerEvent::Move {
+                        x,
+                        y,
+                        hit,
+                        reorder_threshold_px,
+                        insertion_if_reordering,
                     },
                 );
-
-                state.apply_pointer_event(hwnd, pointer::PointerEvent::Move {
-                    x,
-                    y,
-                    hit,
-                    reorder_threshold_px,
-                    insertion_if_reordering,
-                });
             }
             LRESULT(0)
         }
@@ -999,11 +1007,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let state = unsafe { &mut *ptr };
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| {
-                    pointer::HitResult {
-                        button: idx,
-                        is_folder: !state.buttons[idx].is_add,
-                    }
+                let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| pointer::HitResult {
+                    button: idx,
+                    is_folder: !state.buttons[idx].is_add,
                 });
                 state.apply_pointer_event(hwnd, pointer::PointerEvent::Press { x, y, hit });
             }
@@ -1016,11 +1022,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let state = unsafe { &mut *ptr };
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| {
-                    pointer::HitResult {
-                        button: idx,
-                        is_folder: !state.buttons[idx].is_add,
-                    }
+                let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| pointer::HitResult {
+                    button: idx,
+                    is_folder: !state.buttons[idx].is_add,
                 });
                 let ctrl = (wparam.0 & MK_CONTROL.0 as usize) != 0;
                 state.apply_pointer_event(hwnd, pointer::PointerEvent::Release { x, y, hit, ctrl });
