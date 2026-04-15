@@ -107,17 +107,6 @@ const MENU_ID_REMOVE: u32 = 205;
 /// The single global toolbar HWND (None if not yet created or destroyed).
 static GLOBAL_TOOLBAR: Mutex<Option<isize>> = Mutex::new(None);
 
-/// The most recently activated Explorer (CabinetWClass) HWND.
-static ACTIVE_EXPLORER: Mutex<Option<isize>> = Mutex::new(None);
-
-pub fn set_active_explorer(hwnd: HWND) {
-    *ACTIVE_EXPLORER.lock().unwrap() = Some(hwnd.0 as isize);
-}
-
-pub fn get_active_explorer() -> Option<HWND> {
-    ACTIVE_EXPLORER.lock().unwrap().map(|h| HWND(h as *mut _))
-}
-
 fn set_global_toolbar(hwnd: HWND) {
     *GLOBAL_TOOLBAR.lock().unwrap() = Some(hwnd.0 as isize);
 }
@@ -131,12 +120,6 @@ fn get_global_toolbar_hwnd() -> Option<HWND> {
 }
 
 // ── Foreground window tracking ───────────────────────────────────────────────
-
-static FOREGROUND_HOOK_INSTALLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Stored HWINEVENTHOOK so we can UnhookWinEvent at process exit.
-static FOREGROUND_HOOK: Mutex<Option<isize>> = Mutex::new(None);
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
@@ -237,7 +220,14 @@ unsafe extern "system" fn foreground_event_proc(
     //   - OUR process (rename edit, folder picker, popup menu — all transient)
     // Hide only when a window in a DIFFERENT unrelated process takes foreground.
     if is_explorer {
-        set_active_explorer(hwnd);
+        if let Some(toolbar_hwnd) = get_global_toolbar_hwnd() {
+            // SAFETY: Win32 dispatches WinEvent callbacks on the thread that
+            // installed SetWinEventHook — our message-pump thread. Same
+            // single-threaded invariant `toolbar_state` relies on.
+            if let Some(state) = unsafe { toolbar_state(toolbar_hwnd) } {
+                state.active_explorer = Some(hwnd);
+            }
+        }
         // First time we see an Explorer foreground, create the toolbar.
         // If not ready, retry logic is deferred to Task 8.
         if tb_opt.is_none()
@@ -289,11 +279,12 @@ fn update_toolbar_visibility(toolbar: HWND) {
     }
 }
 
-pub fn install_foreground_hook() {
-    use std::sync::atomic::Ordering;
-    if FOREGROUND_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
-        return;
-    }
+/// Install the foreground WinEvent hook. Callers must invoke exactly once
+/// (from `run_hook`). Returns the hook handle so the caller can
+/// `UnhookWinEvent` it at process exit.
+pub fn install_foreground_hook() -> HWINEVENTHOOK {
+    // SAFETY: SetWinEventHook registers our extern "system" callback and
+    // returns a handle we own; single call from run_hook is the sole user.
     let hook = unsafe {
         SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
@@ -305,8 +296,8 @@ pub fn install_foreground_hook() {
             WINEVENT_OUTOFCONTEXT,
         )
     };
-    *FOREGROUND_HOOK.lock().unwrap() = Some(hook.0 as isize);
     log::info!("Installed foreground event hook");
+    hook
 }
 
 // ── Position persistence ──────────────────────────────────────────────────────
@@ -399,6 +390,9 @@ struct ToolbarState {
     file_operator: Arc<dyn FileOperator>,
     clipboard: Box<dyn Clipboard>,
     config_store: Box<dyn ConfigStore>,
+    // SP4 consolidation — populated in Tasks 2-3:
+    active_explorer: Option<HWND>,
+    rename_state: Option<RenameState>,
 }
 
 impl ToolbarState {
@@ -441,6 +435,8 @@ impl ToolbarState {
             file_operator,
             clipboard,
             config_store,
+            active_explorer: None,
+            rename_state: None,
         }
     }
 }
@@ -502,7 +498,7 @@ impl ToolbarState {
                     crate::warn_on_err!(ReleaseCapture());
                 }
             }
-            CancelInlineRename => cancel_inline_rename(),
+            CancelInlineRename => cancel_inline_rename(self),
             FireAddClick => {
                 if let Some(path) = self.folder_picker.pick_folder() {
                     append_folder_and_reload(self, &path);
@@ -522,12 +518,12 @@ impl ToolbarState {
                             .as_ref()
                             .map(|c| c.new_tab_timeout_ms_zero_disables)
                             .unwrap_or(500);
-                        if let Some(explorer) = self.shell_browser.active_explorer() {
+                        if let Some(explorer) = self.active_explorer {
                             self.shell_browser.open_in_new_tab(explorer, &path, timeout);
                         } else {
                             log::debug!("FireFolderClick(ctrl): no active explorer");
                         }
-                    } else if let Some(explorer) = self.shell_browser.active_explorer() {
+                    } else if let Some(explorer) = self.active_explorer {
                         crate::warn_on_err!(self.shell_browser.navigate(explorer, &path));
                     } else {
                         log::debug!("FireFolderClick: no active explorer");
@@ -949,10 +945,12 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // Register drop target
             register_drop_targets(hwnd, state);
 
-            // The foreground WinEvent fires reliably; GetForegroundWindow() does not.
-            // Track ACTIVE_EXPLORER to reliably find the window that triggered creation.
-            let explorer_hwnd =
-                get_active_explorer().unwrap_or_else(|| unsafe { GetForegroundWindow() });
+            // active_explorer is seeded in create_toolbar before Box::into_raw,
+            // so it's always Some here. Fall back to GetForegroundWindow() only
+            // as defence-in-depth in case that invariant is ever broken.
+            let explorer_hwnd = state
+                .active_explorer
+                .unwrap_or_else(|| unsafe { GetForegroundWindow() });
             let class = crate::explorer::get_class_name(explorer_hwnd);
             if class == "CabinetWClass" {
                 log::info!("toolbar create: showing above explorer={explorer_hwnd:?}");
@@ -970,10 +968,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         WM_DESTROY => {
             log::info!("toolbar: WM_DESTROY — exiting process");
             clear_global_toolbar();
-            cancel_inline_rename();
             let _ = crate::dragdrop::unregister_drop_target(hwnd);
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
+                // Cancel any active inline rename before freeing state.
+                // SAFETY: ptr is non-null and state is still live at this point;
+                // we zero the USERDATA slot and drop state below.
+                cancel_inline_rename(unsafe { &mut *ptr });
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
                 // SAFETY: The pointer was produced by Box::into_raw in WM_CREATE;
                 // Box::from_raw reclaims it so the Drop runs and state is freed.
@@ -1172,7 +1173,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         let path = std::path::PathBuf::from(&state.buttons[idx].folder.path);
                         match chosen {
                             MENU_ID_OPEN => {
-                                if let Some(explorer) = state.shell_browser.active_explorer() {
+                                if let Some(explorer) = state.active_explorer {
                                     crate::warn_on_err!(
                                         state.shell_browser.navigate(explorer, &path)
                                     );
@@ -1184,7 +1185,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                     .as_ref()
                                     .map(|c| c.new_tab_timeout_ms_zero_disables)
                                     .unwrap_or(500);
-                                if let Some(explorer) = state.shell_browser.active_explorer() {
+                                if let Some(explorer) = state.active_explorer {
                                     state
                                         .shell_browser
                                         .open_in_new_tab(explorer, &path, timeout);
@@ -1367,7 +1368,11 @@ pub fn create_toolbar(
     let is_dark = theme::is_dark_mode();
     log::info!("create_toolbar: dark_mode={is_dark}");
 
-    let state = Box::new(ToolbarState::new(dpi, config));
+    let mut state = Box::new(ToolbarState::new(dpi, config));
+    // Seed active_explorer with the triggering cabinet HWND. WM_CREATE runs
+    // synchronously inside CreateWindowExW, so we can't set this after creation;
+    // seeding the Box before into_raw guarantees WM_CREATE observes it.
+    state.active_explorer = Some(owner);
     // SAFETY: Box::into_raw transfers ownership to the CreateWindowExW lpCreateParams
     // slot, which Win32 delivers to WM_CREATE as cs.lpCreateParams. If window
     // creation fails, the Err branch below reclaims the box via Box::from_raw.
@@ -1576,9 +1581,6 @@ fn remove_folder_at(state: &mut ToolbarState, hwnd: HWND, index: usize) {
 
 // ── Inline rename ───────────────────────────────────────────────────────────
 
-/// Global: HWND of the active rename edit control, and the folder index it is editing.
-static RENAME_STATE: std::sync::Mutex<Option<RenameState>> = std::sync::Mutex::new(None);
-
 struct RenameState {
     edit_hwnd: isize,
     /// Raw `Box<RenameSubclassData>` pointer handed to `SetWindowSubclass`.
@@ -1590,7 +1592,11 @@ struct RenameState {
 
 fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, initial_name: &str) {
     // Cancel any existing rename first.
-    cancel_inline_rename();
+    // SAFETY: toolbar is the toolbar HWND; we are on the message-pump thread.
+    let Some(state) = (unsafe { toolbar_state(toolbar) }) else {
+        return;
+    };
+    cancel_inline_rename(state);
 
     let hinstance = exe_hinstance();
 
@@ -1642,10 +1648,14 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
         );
     }
 
-    *RENAME_STATE.lock().unwrap() = Some(RenameState {
-        edit_hwnd: edit.0 as isize,
-        subclass_data: data as usize,
-    });
+    // SAFETY: toolbar_state called at the top of this function; we are still on the
+    // message-pump thread and no other code mutated GWLP_USERDATA since that call.
+    if let Some(state) = unsafe { toolbar_state(toolbar) } {
+        state.rename_state = Some(RenameState {
+            edit_hwnd: edit.0 as isize,
+            subclass_data: data as usize,
+        });
+    }
 }
 
 struct RenameSubclassData {
@@ -1717,7 +1727,12 @@ fn commit_rename(edit: HWND, ref_data: usize) {
     }
 
     destroy_rename_edit(edit);
-    *RENAME_STATE.lock().unwrap() = None;
+    // Clear rename_state from ToolbarState.
+    // SAFETY: commit_rename is called from the EDIT subclass wndproc (same message-pump
+    // thread as the toolbar); toolbar_state's single-thread invariant is satisfied.
+    if let Some(state) = unsafe { toolbar_state(toolbar) } {
+        state.rename_state = None;
+    }
     unsafe {
         let _ = PostMessageW(Some(toolbar), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
     }
@@ -1726,9 +1741,15 @@ fn commit_rename(edit: HWND, ref_data: usize) {
 fn cancel_rename(edit: HWND, ref_data: usize) {
     // SAFETY: Same provenance as commit_rename; this is the Esc path reclaim point.
     let data = unsafe { Box::from_raw(ref_data as *mut RenameSubclassData) };
+    let toolbar = HWND(data.toolbar_hwnd as *mut _);
     let _ = data;
     destroy_rename_edit(edit);
-    *RENAME_STATE.lock().unwrap() = None;
+    // Clear rename_state from ToolbarState.
+    // SAFETY: cancel_rename is called from the EDIT subclass wndproc on the toolbar's
+    // message-pump thread; toolbar_state's single-thread invariant is satisfied.
+    if let Some(state) = unsafe { toolbar_state(toolbar) } {
+        state.rename_state = None;
+    }
 }
 
 fn destroy_rename_edit(edit: HWND) {
@@ -1739,9 +1760,8 @@ fn destroy_rename_edit(edit: HWND) {
     }
 }
 
-fn cancel_inline_rename() {
-    let state = RENAME_STATE.lock().unwrap().take();
-    if let Some(s) = state {
+fn cancel_inline_rename(state: &mut ToolbarState) {
+    if let Some(s) = state.rename_state.take() {
         let edit = HWND(s.edit_hwnd as *mut _);
         destroy_rename_edit(edit);
         // Reclaim the Box leaked into SetWindowSubclass; RemoveWindowSubclass
@@ -1776,19 +1796,10 @@ mod tests {
 
     // ── Mocks ────────────────────────────────────────────────────────────
 
-    // HWND contains *mut c_void which is !Send + !Sync, so we store the raw
-    // value as isize (which is Send + Sync) and re-wrap on the way out.
-    #[derive(Default)]
     struct MockShellBrowser {
-        navigate_calls: Mutex<Vec<(isize, PathBuf)>>,
-        new_tab_calls: Mutex<Vec<(isize, PathBuf, u32)>>,
-        /// Active explorer stored as isize so the struct is Send + Sync.
-        active: Mutex<Option<isize>>,
+        navigate_calls: Arc<Mutex<Vec<(isize, PathBuf)>>>,
+        new_tab_calls: Arc<Mutex<Vec<(isize, PathBuf, u32)>>>,
     }
-    // SAFETY: tests run single-threaded; the isize values are never
-    // dereferenced as pointers — they are opaque identifiers only.
-    unsafe impl Send for MockShellBrowser {}
-    unsafe impl Sync for MockShellBrowser {}
 
     impl ShellBrowser for MockShellBrowser {
         fn navigate(&self, explorer: HWND, path: &Path) -> ExbarResult<()> {
@@ -1804,12 +1815,6 @@ mod tests {
                 path.to_path_buf(),
                 timeout_ms,
             ));
-        }
-        fn active_explorer(&self) -> Option<HWND> {
-            self.active.lock().unwrap().map(|v| HWND(v as *mut _))
-        }
-        fn set_active_explorer(&self, hwnd: HWND) {
-            *self.active.lock().unwrap() = Some(hwnd.0 as isize);
         }
     }
 
@@ -1874,24 +1879,6 @@ mod tests {
     }
 
     // Newtypes to bridge Arc<Concrete> → Box<dyn Trait>.
-    struct ShellArc(Arc<MockShellBrowser>);
-    // SAFETY: see MockShellBrowser's unsafe impl above.
-    unsafe impl Send for ShellArc {}
-    unsafe impl Sync for ShellArc {}
-    impl ShellBrowser for ShellArc {
-        fn navigate(&self, e: HWND, p: &Path) -> ExbarResult<()> {
-            self.0.navigate(e, p)
-        }
-        fn open_in_new_tab(&self, e: HWND, p: &Path, t: u32) {
-            self.0.open_in_new_tab(e, p, t)
-        }
-        fn active_explorer(&self) -> Option<HWND> {
-            self.0.active_explorer()
-        }
-        fn set_active_explorer(&self, h: HWND) {
-            self.0.set_active_explorer(h)
-        }
-    }
     struct PickerArc(Arc<MockFolderPicker>);
     impl FolderPicker for PickerArc {
         fn pick_folder(&self) -> Option<PathBuf> {
@@ -1915,7 +1902,8 @@ mod tests {
     }
 
     struct TestDeps {
-        shell: Arc<MockShellBrowser>,
+        navigate_calls: Arc<Mutex<Vec<(isize, PathBuf)>>>,
+        new_tab_calls: Arc<Mutex<Vec<(isize, PathBuf, u32)>>>,
         picker: Arc<MockFolderPicker>,
         file_op: Arc<MockFileOp>,
         clipboard: Arc<MockClipboard>,
@@ -1924,7 +1912,8 @@ mod tests {
 
     fn mk_deps() -> TestDeps {
         TestDeps {
-            shell: Arc::new(MockShellBrowser::default()),
+            navigate_calls: Arc::default(),
+            new_tab_calls: Arc::default(),
             picker: Arc::new(MockFolderPicker::default()),
             file_op: Arc::new(MockFileOp::default()),
             clipboard: Arc::new(MockClipboard::default()),
@@ -1933,10 +1922,14 @@ mod tests {
     }
 
     fn make_test_state(deps: &TestDeps, config: Option<Config>) -> ToolbarState {
+        let shell = MockShellBrowser {
+            navigate_calls: Arc::clone(&deps.navigate_calls),
+            new_tab_calls: Arc::clone(&deps.new_tab_calls),
+        };
         ToolbarState::with_deps(
             96,
             config,
-            Box::new(ShellArc(deps.shell.clone())),
+            Box::new(shell),
             Box::new(PickerArc(deps.picker.clone())),
             deps.file_op.clone() as Arc<dyn FileOperator>,
             Box::new(ClipArc(deps.clipboard.clone())),
@@ -1997,9 +1990,9 @@ mod tests {
     #[test]
     fn fire_folder_click_without_ctrl_calls_navigate_with_folder_path() {
         let deps = mk_deps();
-        *deps.shell.active.lock().unwrap() = Some(42);
         let cfg = mk_config_with_folders(&[("Downloads", "C:\\Downloads")]);
         let mut state = make_test_state(&deps, Some(cfg));
+        state.active_explorer = Some(HWND(42 as *mut _));
         state.buttons = vec![
             mk_add_button(),
             mk_folder_button("Downloads", "C:\\Downloads", 42),
@@ -2013,21 +2006,21 @@ mod tests {
             },
         );
 
-        let calls = deps.shell.navigate_calls.lock().unwrap();
+        let calls = deps.navigate_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, PathBuf::from("C:\\Downloads"));
-        assert_eq!(deps.shell.new_tab_calls.lock().unwrap().len(), 0);
+        assert_eq!(deps.new_tab_calls.lock().unwrap().len(), 0);
     }
 
     #[test]
     fn fire_folder_click_with_ctrl_calls_open_in_new_tab_with_configured_timeout() {
         let deps = mk_deps();
-        *deps.shell.active.lock().unwrap() = Some(42);
         let cfg = Config::from_str(
             r#"{"folders":[{"name":"D","path":"C:\\D"}],"newTabTimeoutMsZeroDisables":750}"#,
         )
         .unwrap();
         let mut state = make_test_state(&deps, Some(cfg));
+        state.active_explorer = Some(HWND(42 as *mut _));
         state.buttons = vec![mk_add_button(), mk_folder_button("D", "C:\\D", 42)];
 
         state.execute_pointer_command(
@@ -2038,10 +2031,36 @@ mod tests {
             },
         );
 
-        let calls = deps.shell.new_tab_calls.lock().unwrap();
+        let calls = deps.new_tab_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].2, 750);
-        assert_eq!(deps.shell.navigate_calls.lock().unwrap().len(), 0);
+        assert_eq!(deps.navigate_calls.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn fire_folder_click_when_no_active_explorer_is_noop() {
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("D", "C:\\D")]);
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.buttons = vec![mk_add_button(), mk_folder_button("D", "C:\\D", 42)];
+        // active_explorer intentionally left None.
+
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireFolderClick {
+                folder_button: 0,
+                ctrl: false,
+            },
+        );
+
+        assert!(
+            deps.navigate_calls.lock().unwrap().is_empty(),
+            "navigate should not be called when no active explorer"
+        );
+        assert!(
+            deps.new_tab_calls.lock().unwrap().is_empty(),
+            "open_in_new_tab should not be called when no active explorer"
+        );
     }
 
     #[test]

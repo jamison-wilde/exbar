@@ -201,7 +201,7 @@ fn run_hook() -> ExbarResult<()> {
     //
     // The first CabinetWClass foreground event triggers toolbar creation
     // inside foreground_event_proc.
-    toolbar::install_foreground_hook();
+    let foreground_hook = toolbar::install_foreground_hook();
     log::info!("run_hook: foreground hook installed; entering message pump");
 
     // Message pump — runs indefinitely.
@@ -218,6 +218,12 @@ fn run_hook() -> ExbarResult<()> {
     }
 
     // Cleanup — unreachable in normal operation.
+    // SAFETY: foreground_hook is the handle returned by the matching
+    // install_foreground_hook call on this thread.
+    unsafe {
+        use windows::Win32::UI::Accessibility::UnhookWinEvent;
+        let _ = UnhookWinEvent(foreground_hook);
+    }
     unsafe {
         CoUninitialize();
     }

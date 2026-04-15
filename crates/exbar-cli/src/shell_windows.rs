@@ -156,19 +156,6 @@ pub trait ShellBrowser: Send + Sync {
     /// `timeout_ms == 0`, fall back to ShellExecuteW opening a fresh Explorer
     /// window.
     fn open_in_new_tab(&self, explorer: HWND, path: &Path, timeout_ms: u32);
-
-    // TODO(SP4): `active_explorer` / `set_active_explorer` don't semantically
-    // belong on a trait named `ShellBrowser` — the trait's job is navigation.
-    // Active-Explorer tracking is app-level state that `Win32Shell` today
-    // delegates to module-level statics in `toolbar.rs`. SP4 (state
-    // consolidation) should lift this pair off `ShellBrowser` and onto the
-    // forthcoming `App` struct.
-
-    /// The most-recently-activated Explorer (CabinetWClass) HWND.
-    fn active_explorer(&self) -> Option<HWND>;
-
-    /// Record the active Explorer HWND. Called by the foreground WinEvent hook.
-    fn set_active_explorer(&self, hwnd: HWND);
 }
 
 #[derive(Default)]
@@ -302,16 +289,6 @@ impl ShellBrowser for Win32Shell {
                 }
             }
         }
-    }
-
-    fn active_explorer(&self) -> Option<HWND> {
-        // Delegate to the module-level static in toolbar.rs (the foreground
-        // WinEvent hook writes to it; SP4 will consolidate fully).
-        crate::toolbar::get_active_explorer()
-    }
-
-    fn set_active_explorer(&self, hwnd: HWND) {
-        crate::toolbar::set_active_explorer(hwnd);
     }
 }
 
