@@ -14,7 +14,8 @@ use windows::Win32::System::Variant::{
 use windows::Win32::UI::Shell::{
     IShellBrowser, IShellWindows, IWebBrowserApp, SID_STopLevelBrowser, ShellWindows,
 };
-use windows_core::Interface;
+use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GA_PARENT, GetAncestor};
+use windows_core::{BOOL, Interface};
 
 /// Construct a VT_I4 VARIANT wrapping an i32. Used for
 /// IShellWindows::Item(vIndex) calls.
@@ -58,6 +59,15 @@ pub unsafe fn get_shell_browser_for(cabinet_hwnd: HWND) -> Option<IShellBrowser>
 
     let count = unsafe { shell_windows.Count().ok()? };
 
+    // Win11 tabbed Explorer: multiple IShellBrowser entries can share one
+    // CabinetWClass HWND (one per tab). Find the active tab by locating
+    // the topmost ShellTabWindowClass descendant of the cabinet (z-order
+    // top = foreground tab), then match each browser's view-window
+    // ancestor chain against it. Falls back to the first HWND match for
+    // pre-tab Win10 / when the heuristic fails.
+    let active_tab = unsafe { find_active_tab_window(cabinet_hwnd) };
+    let mut first_match: Option<IShellBrowser> = None;
+
     for i in 0..count {
         let index = unsafe { variant_i4(i) };
 
@@ -80,14 +90,98 @@ pub unsafe fn get_shell_browser_for(cabinet_hwnd: HWND) -> Option<IShellBrowser>
             continue;
         }
 
-        let sp = wba.cast::<IServiceProvider>().ok()?;
+        let Some(sp) = wba.cast::<IServiceProvider>().ok() else {
+            continue;
+        };
 
-        let browser: IShellBrowser = unsafe { sp.QueryService(&SID_STopLevelBrowser).ok()? };
-        return Some(browser);
+        let Some(browser) =
+            (unsafe { sp.QueryService::<IShellBrowser>(&SID_STopLevelBrowser).ok() })
+        else {
+            continue;
+        };
+
+        if let Some(tab) = active_tab
+            && unsafe { browser_view_is_under(&browser, tab) }
+        {
+            return Some(browser);
+        }
+        if first_match.is_none() {
+            first_match = Some(browser);
+        }
     }
 
-    None
+    first_match
 }
+
+/// Find the topmost (foreground) per-tab container window inside the
+/// given cabinet. In Win11's tabbed File Explorer each tab has its own
+/// `ShellTabWindowClass` descendant; `EnumChildWindows` enumerates in
+/// z-order top-first so the first hit corresponds to the active tab.
+///
+/// Returns `None` on legacy / single-tab Explorer where the class
+/// doesn't exist.
+///
+/// # Safety
+///
+/// Calls Win32 window enumeration APIs; safe to invoke from the
+/// message-pump thread under the same conditions as
+/// `get_shell_browser_for`.
+unsafe fn find_active_tab_window(cabinet_hwnd: HWND) -> Option<HWND> {
+    struct Search {
+        found: Option<HWND>,
+    }
+    let mut search = Search { found: None };
+
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: windows::Win32::Foundation::LPARAM) -> BOOL {
+        // SAFETY: lparam is a `&mut Search` passed below.
+        let search = unsafe { &mut *(lparam.0 as *mut Search) };
+        let class = crate::explorer::get_class_name(hwnd);
+        if class == "ShellTabWindowClass" {
+            search.found = Some(hwnd);
+            return BOOL(0); // stop enumeration
+        }
+        BOOL(1)
+    }
+
+    let lparam = windows::Win32::Foundation::LPARAM(&mut search as *mut Search as isize);
+    unsafe {
+        let _ = EnumChildWindows(Some(cabinet_hwnd), Some(cb), lparam);
+    }
+    search.found
+}
+
+/// True if `target` is an ancestor of `browser`'s active shell view HWND.
+/// Used to match each `IShellBrowser` to its tab container.
+///
+/// # Safety
+///
+/// Calls into the cross-process `IShellBrowser`/`IShellView` interfaces
+/// and `GetAncestor`; same thread/COM contract as
+/// `get_shell_browser_for`.
+unsafe fn browser_view_is_under(browser: &IShellBrowser, target: HWND) -> bool {
+    let Ok(view) = (unsafe { browser.QueryActiveShellView() }) else {
+        return false;
+    };
+    let Ok(view_hwnd) = (unsafe { view.GetWindow() }) else {
+        return false;
+    };
+
+    let mut cur = view_hwnd;
+    // Walk up at most ~16 levels — Explorer's hierarchy is shallow; this
+    // bounds the loop in case GetAncestor ever returns a self-cycle.
+    for _ in 0..16 {
+        if cur.0 == target.0 {
+            return true;
+        }
+        let parent = unsafe { GetAncestor(cur, GA_PARENT) };
+        if parent.0.is_null() || parent.0 == cur.0 {
+            return false;
+        }
+        cur = parent;
+    }
+    false
+}
+
 
 /// Return the list of all Explorer `IShellBrowser`s keyed by their HWND (as isize).
 /// Used by the new-tab flow to detect which tab/window is newly created.

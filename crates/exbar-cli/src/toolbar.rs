@@ -56,8 +56,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetLayeredWindowAttributes,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, WM_CAPTURECHANGED,
     WM_CREATE, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WNDCLASSEXW, WS_BORDER, WS_CHILD,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+    WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WNDCLASSEXW,
+    WS_BORDER, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows_core::PCWSTR;
 
@@ -1695,14 +1695,28 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
         return;
     };
 
-    // 3. Select-all + focus.
+    // 3. Match the EDIT control's font to the toolbar button text
+    //    (DEFAULT_GUI_FONT, same as draw_buttons). Without this the
+    //    control falls back to the ancient SYSTEM_FONT which renders
+    //    ~8px on modern DPI — unreadable next to the button labels.
+    let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+    unsafe {
+        SendMessageW(
+            edit,
+            WM_SETFONT,
+            Some(WPARAM(font.0 as usize)),
+            Some(LPARAM(1)),
+        );
+    }
+
+    // 4. Select-all + focus.
     const EM_SETSEL: u32 = 0x00B1;
     unsafe {
         SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
         let _ = SetFocus(Some(edit));
     }
 
-    // 4. Subclass with the toolbar HWND as ref_data — no Box::into_raw.
+    // 5. Subclass with the toolbar HWND as ref_data — no Box::into_raw.
     // The subclass proc reads context (folder_index) from state.rename_state
     // via `toolbar_state(toolbar)`.
     unsafe {
@@ -1712,7 +1726,7 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
         );
     }
 
-    // 5. Notify the controller — Started transition records the active rename.
+    // 6. Notify the controller — Started transition records the active rename.
     // SAFETY: same single-thread invariant as the cancel call at the top.
     if let Some(state) = unsafe { toolbar_state(toolbar) } {
         state.execute_rename_event(
