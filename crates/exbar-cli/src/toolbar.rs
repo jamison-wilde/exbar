@@ -498,7 +498,7 @@ impl ToolbarState {
                     crate::warn_on_err!(ReleaseCapture());
                 }
             }
-            CancelInlineRename => cancel_inline_rename(self),
+            CancelInlineRename => cancel_inline_rename(self, hwnd),
             FireAddClick => {
                 if let Some(path) = self.folder_picker.pick_folder() {
                     append_folder_and_reload(self, &path);
@@ -1014,7 +1014,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 // Cancel any active inline rename before freeing state.
                 // SAFETY: ptr is non-null and state is still live at this point;
                 // we zero the USERDATA slot and drop state below.
-                cancel_inline_rename(unsafe { &mut *ptr });
+                cancel_inline_rename(unsafe { &mut *ptr }, hwnd);
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
                 // SAFETY: The pointer was produced by Box::into_raw in WM_CREATE;
                 // Box::from_raw reclaims it so the Drop runs and state is freed.
@@ -1736,11 +1736,11 @@ fn destroy_rename_edit(edit: HWND) {
     }
 }
 
-fn cancel_inline_rename(state: &mut ToolbarState) {
-    if let Some(s) = state.rename_state.take() {
-        let edit = HWND(s.edit_hwnd as *mut _);
-        destroy_rename_edit(edit);
-    }
+/// WM_DESTROY hook — emit a Cancelled event so the controller cleans up
+/// any in-flight rename. The transition table guarantees this is a noop
+/// when no rename is active.
+fn cancel_inline_rename(state: &mut ToolbarState, toolbar: HWND) {
+    state.execute_rename_event(toolbar, RenameEvent::Cancelled);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
