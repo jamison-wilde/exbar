@@ -60,6 +60,7 @@ pub enum RenameAction {
 /// | `Some({i, e})`        | `CommitRequested{t}` | `None`    | `ApplyRename{i,t}`, `DestroyEdit{e}`, `ReloadToolbar` |
 /// | `Some({_, e})`        | `Cancelled`          | `None`    | `DestroyEdit{e}`                              |
 /// | `None`                | `CommitRequested` / `Cancelled` | `None` | _(none — stale event after teardown)_ |
+#[must_use]
 pub fn transition(
     state: Option<RenameState>,
     event: RenameEvent,
