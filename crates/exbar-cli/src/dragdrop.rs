@@ -451,6 +451,158 @@ pub fn unregister_drop_target(hwnd: HWND) -> Result<()> {
     unsafe { RevokeDragDrop(hwnd) }
 }
 
+// ── SP3: FileOperator trait ───────────────────────────────────────────────────
+
+use crate::error::ExbarResult;
+use std::path::{Path, PathBuf};
+
+/// Abstraction over shell file move/copy operations.
+/// Allows tests to inject a fake implementation.
+#[allow(dead_code)]
+pub trait FileOperator: Send + Sync {
+    /// Move `sources` into `target_dir`. Conflict handling follows Shell defaults.
+    fn move_items(&self, sources: &[PathBuf], target_dir: &Path) -> ExbarResult<()>;
+    /// Copy `sources` into `target_dir`. Conflict handling follows Shell defaults.
+    fn copy_items(&self, sources: &[PathBuf], target_dir: &Path) -> ExbarResult<()>;
+}
+
+/// Production implementation backed by `IFileOperation`.
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct Win32FileOp;
+
+#[allow(dead_code)]
+impl Win32FileOp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+enum FileOpKind {
+    Move,
+    Copy,
+}
+
+impl FileOperator for Win32FileOp {
+    fn move_items(&self, sources: &[PathBuf], target_dir: &Path) -> ExbarResult<()> {
+        file_op_execute(sources, target_dir, FileOpKind::Move)
+    }
+    fn copy_items(&self, sources: &[PathBuf], target_dir: &Path) -> ExbarResult<()> {
+        file_op_execute(sources, target_dir, FileOpKind::Copy)
+    }
+}
+
+fn file_op_execute(
+    sources: &[PathBuf],
+    target_dir: &Path,
+    kind: FileOpKind,
+) -> ExbarResult<()> {
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+    use windows::Win32::UI::Shell::{
+        FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, FOF_ALLOWUNDO,
+        FOF_NOCONFIRMMKDIR,
+    };
+    use windows_core::PCWSTR;
+
+    // SAFETY: CoCreateInstance requires COM initialized on STA thread;
+    // wndproc thread satisfies.
+    let file_op: IFileOperation =
+        unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
+
+    // SAFETY: SetOperationFlags accepts a bitflags value.
+    unsafe { file_op.SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR)? };
+
+    let target_str = target_dir.to_string_lossy();
+    let target_wide: Vec<u16> = target_str.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: SHCreateItemFromParsingName returns a new IShellItem; wide is null-terminated.
+    let target_item: IShellItem =
+        unsafe { SHCreateItemFromParsingName(PCWSTR(target_wide.as_ptr()), None)? };
+
+    for src in sources {
+        let src_str = src.to_string_lossy();
+        let src_wide: Vec<u16> = src_str.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: same as target creation above.
+        let src_item: IShellItem =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(src_wide.as_ptr()), None)? };
+
+        // MoveItem/CopyItem take: src_item, dest_folder, new_name (null = keep), sink (null = none).
+        // SAFETY: items are valid COM objects; null PCWSTR and null sink are explicitly allowed.
+        match kind {
+            FileOpKind::Move => unsafe {
+                file_op.MoveItem(&src_item, &target_item, PCWSTR::null(), None)?;
+            },
+            FileOpKind::Copy => unsafe {
+                file_op.CopyItem(&src_item, &target_item, PCWSTR::null(), None)?;
+            },
+        }
+    }
+
+    // SAFETY: PerformOperations executes all queued MoveItem/CopyItem calls.
+    unsafe { file_op.PerformOperations()? };
+
+    Ok(())
+}
+
+/// Extract all file/folder paths from a CF_HDROP payload in an IDataObject.
+///
+/// # Safety
+///
+/// Must be called on an STA thread with COM initialized. `data_object` must
+/// be live for the duration of the call (typically received in an
+/// IDropTarget callback).
+#[allow(dead_code)]
+pub unsafe fn extract_paths_from_data_object(
+    data_object: &windows::Win32::System::Com::IDataObject,
+) -> Vec<PathBuf> {
+    use windows::Win32::System::Com::{FORMATETC, TYMED_HGLOBAL};
+    use windows::Win32::System::Ole::CF_HDROP;
+    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    let fmt = FORMATETC {
+        cfFormat: CF_HDROP.0,
+        ptd: std::ptr::null_mut(),
+        dwAspect: 1, // DVASPECT_CONTENT
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    };
+
+    let medium = match unsafe { data_object.GetData(&fmt) } {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+
+    // SAFETY: STGMEDIUM's u union field is valid when tymed == TYMED_HGLOBAL.
+    let hglobal = unsafe { medium.u.hGlobal };
+    if hglobal.is_invalid() {
+        return Vec::new();
+    }
+
+    let hdrop = HDROP(hglobal.0);
+    // 0xFFFFFFFF asks DragQueryFileW for the count.
+    // SAFETY: hdrop is a valid CF_HDROP data handle obtained from the data object.
+    let count = unsafe { DragQueryFileW(hdrop, 0xFFFF_FFFF, None) };
+    let mut paths = Vec::with_capacity(count as usize);
+
+    for i in 0..count {
+        // First call with None buffer returns the length (chars, excluding null).
+        // SAFETY: hdrop valid; None buffer is documented to return the required length.
+        let len = unsafe { DragQueryFileW(hdrop, i, None) };
+        if len == 0 {
+            continue;
+        }
+        let mut buf = vec![0u16; (len as usize) + 1];
+        // SAFETY: buf has capacity len+1; DragQueryFileW writes at most len+1 chars.
+        let got = unsafe { DragQueryFileW(hdrop, i, Some(&mut buf)) };
+        if got == 0 {
+            continue;
+        }
+        let s = String::from_utf16_lossy(&buf[..got as usize]);
+        paths.push(PathBuf::from(s));
+    }
+
+    paths
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
