@@ -20,7 +20,11 @@ mod tests {
     fn mk_button(rect: Rect) -> ButtonLayout {
         ButtonLayout {
             rect,
-            folder: FolderEntry { name: "x".into(), path: "p".into(), icon: None },
+            folder: FolderEntry {
+                name: "x".into(),
+                path: "p".into(),
+                icon: None,
+            },
             is_add: false,
         }
     }
@@ -33,8 +37,18 @@ mod tests {
     #[test]
     fn point_inside_button_returns_index() {
         let buttons = [
-            mk_button(Rect { left: 0,  top: 0, right: 50,  bottom: 28 }),
-            mk_button(Rect { left: 60, top: 0, right: 110, bottom: 28 }),
+            mk_button(Rect {
+                left: 0,
+                top: 0,
+                right: 50,
+                bottom: 28,
+            }),
+            mk_button(Rect {
+                left: 60,
+                top: 0,
+                right: 110,
+                bottom: 28,
+            }),
         ];
         assert_eq!(hit_test(&buttons, 25, 14), Some(0));
         assert_eq!(hit_test(&buttons, 80, 14), Some(1));
@@ -42,35 +56,63 @@ mod tests {
 
     #[test]
     fn point_outside_all_buttons_returns_none() {
-        let buttons = [
-            mk_button(Rect { left: 0, top: 0, right: 50, bottom: 28 }),
-        ];
+        let buttons = [mk_button(Rect {
+            left: 0,
+            top: 0,
+            right: 50,
+            bottom: 28,
+        })];
         assert_eq!(hit_test(&buttons, 100, 100), None);
     }
 
     #[test]
     fn top_left_corner_inclusive() {
-        let buttons = [mk_button(Rect { left: 10, top: 20, right: 50, bottom: 60 })];
+        let buttons = [mk_button(Rect {
+            left: 10,
+            top: 20,
+            right: 50,
+            bottom: 60,
+        })];
         assert_eq!(hit_test(&buttons, 10, 20), Some(0));
     }
 
     #[test]
     fn right_edge_exclusive() {
-        let buttons = [mk_button(Rect { left: 10, top: 20, right: 50, bottom: 60 })];
+        let buttons = [mk_button(Rect {
+            left: 10,
+            top: 20,
+            right: 50,
+            bottom: 60,
+        })];
         assert_eq!(hit_test(&buttons, 50, 30), None);
     }
 
     #[test]
     fn bottom_edge_exclusive() {
-        let buttons = [mk_button(Rect { left: 10, top: 20, right: 50, bottom: 60 })];
+        let buttons = [mk_button(Rect {
+            left: 10,
+            top: 20,
+            right: 50,
+            bottom: 60,
+        })];
         assert_eq!(hit_test(&buttons, 30, 60), None);
     }
 
     #[test]
     fn point_in_gap_between_buttons_returns_none() {
         let buttons = [
-            mk_button(Rect { left: 0,  top: 0, right: 50,  bottom: 28 }),
-            mk_button(Rect { left: 60, top: 0, right: 110, bottom: 28 }),
+            mk_button(Rect {
+                left: 0,
+                top: 0,
+                right: 50,
+                bottom: 28,
+            }),
+            mk_button(Rect {
+                left: 60,
+                top: 0,
+                right: 110,
+                bottom: 28,
+            }),
         ];
         assert_eq!(hit_test(&buttons, 55, 14), None);
     }
@@ -78,8 +120,18 @@ mod tests {
     #[test]
     fn returns_first_overlapping_button_if_overlapping() {
         let buttons = [
-            mk_button(Rect { left: 0,  top: 0, right: 50, bottom: 28 }),
-            mk_button(Rect { left: 20, top: 0, right: 80, bottom: 28 }),
+            mk_button(Rect {
+                left: 0,
+                top: 0,
+                right: 50,
+                bottom: 28,
+            }),
+            mk_button(Rect {
+                left: 20,
+                top: 0,
+                right: 80,
+                bottom: 28,
+            }),
         ];
         assert_eq!(hit_test(&buttons, 30, 14), Some(0));
     }

@@ -112,7 +112,12 @@ pub fn compute_layout(input: &LayoutInput) -> Layout {
         Orientation::Horizontal => {
             let mut x = grip;
             buttons.push(ButtonLayout {
-                rect: Rect { left: x, top: 0, right: x + add_size, bottom: btn_h },
+                rect: Rect {
+                    left: x,
+                    top: 0,
+                    right: x + add_size,
+                    bottom: btn_h,
+                },
                 folder: synthesized_add_button(),
                 is_add: true,
             });
@@ -120,7 +125,12 @@ pub fn compute_layout(input: &LayoutInput) -> Layout {
 
             for (entry, &w) in input.folders.iter().zip(folder_widths.iter()) {
                 buttons.push(ButtonLayout {
-                    rect: Rect { left: x, top: 0, right: x + w, bottom: btn_h },
+                    rect: Rect {
+                        left: x,
+                        top: 0,
+                        right: x + w,
+                        bottom: btn_h,
+                    },
                     folder: entry.clone(),
                     is_add: false,
                 });
@@ -129,15 +139,29 @@ pub fn compute_layout(input: &LayoutInput) -> Layout {
 
             let total_width = x - gap;
             let total_height = btn_h;
-            Layout { buttons, total_width, total_height }
+            Layout {
+                buttons,
+                total_width,
+                total_height,
+            }
         }
         Orientation::Vertical => {
             // Width of the toolbar = widest of add-button and all folder buttons.
-            let max_width = folder_widths.iter().copied().max().unwrap_or(0).max(add_size);
+            let max_width = folder_widths
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+                .max(add_size);
 
             let mut y = grip;
             buttons.push(ButtonLayout {
-                rect: Rect { left: 0, top: y, right: max_width, bottom: y + btn_h },
+                rect: Rect {
+                    left: 0,
+                    top: y,
+                    right: max_width,
+                    bottom: y + btn_h,
+                },
                 folder: synthesized_add_button(),
                 is_add: true,
             });
@@ -145,7 +169,12 @@ pub fn compute_layout(input: &LayoutInput) -> Layout {
 
             for entry in input.folders.iter() {
                 buttons.push(ButtonLayout {
-                    rect: Rect { left: 0, top: y, right: max_width, bottom: y + btn_h },
+                    rect: Rect {
+                        left: 0,
+                        top: y,
+                        right: max_width,
+                        bottom: y + btn_h,
+                    },
                     folder: entry.clone(),
                     is_add: false,
                 });
@@ -154,7 +183,11 @@ pub fn compute_layout(input: &LayoutInput) -> Layout {
 
             let total_width = max_width;
             let total_height = y - gap;
-            Layout { buttons, total_width, total_height }
+            Layout {
+                buttons,
+                total_width,
+                total_height,
+            }
         }
     }
 }
@@ -170,8 +203,7 @@ fn synthesized_add_button() -> FolderEntry {
 /// Given a cursor position, compute the folder-index insertion point in
 /// `0..=folder_count`.
 pub fn compute_insertion_index(input: &InsertionInput) -> usize {
-    let folder_buttons: Vec<&ButtonLayout> =
-        input.buttons.iter().filter(|b| !b.is_add).collect();
+    let folder_buttons: Vec<&ButtonLayout> = input.buttons.iter().filter(|b| !b.is_add).collect();
 
     if folder_buttons.is_empty() {
         return 0;
@@ -205,31 +237,50 @@ mod tests {
 
     #[test]
     fn rect_width_and_height() {
-        let r = Rect { left: 10, top: 20, right: 50, bottom: 60 };
+        let r = Rect {
+            left: 10,
+            top: 20,
+            right: 50,
+            bottom: 60,
+        };
         assert_eq!(r.width(), 40);
         assert_eq!(r.height(), 40);
     }
 
     #[test]
     fn rect_contains_point() {
-        let r = Rect { left: 10, top: 20, right: 50, bottom: 60 };
-        assert!(r.contains(10, 20));         // top-left corner inclusive
-        assert!(r.contains(30, 40));         // center
-        assert!(!r.contains(50, 40));        // right edge exclusive
-        assert!(!r.contains(30, 60));        // bottom edge exclusive
-        assert!(!r.contains(9, 30));         // outside left
-        assert!(!r.contains(30, 19));        // outside top
+        let r = Rect {
+            left: 10,
+            top: 20,
+            right: 50,
+            bottom: 60,
+        };
+        assert!(r.contains(10, 20)); // top-left corner inclusive
+        assert!(r.contains(30, 40)); // center
+        assert!(!r.contains(50, 40)); // right edge exclusive
+        assert!(!r.contains(30, 60)); // bottom edge exclusive
+        assert!(!r.contains(9, 30)); // outside left
+        assert!(!r.contains(30, 19)); // outside top
     }
 
     #[test]
     fn rect_zero_size_contains_nothing() {
-        let r = Rect { left: 10, top: 10, right: 10, bottom: 10 };
+        let r = Rect {
+            left: 10,
+            top: 10,
+            right: 10,
+            bottom: 10,
+        };
         assert!(!r.contains(10, 10));
         assert!(!r.contains(0, 0));
     }
 
     fn mk_folder(name: &str) -> FolderEntry {
-        FolderEntry { name: name.into(), path: "C:\\test".into(), icon: None }
+        FolderEntry {
+            name: name.into(),
+            path: "C:\\test".into(),
+            icon: None,
+        }
     }
 
     #[test]
@@ -244,7 +295,15 @@ mod tests {
         let layout = compute_layout(&input);
         assert_eq!(layout.buttons.len(), 1);
         assert!(layout.buttons[0].is_add);
-        assert_eq!(layout.buttons[0].rect, Rect { left: 12, top: 0, right: 40, bottom: 28 });
+        assert_eq!(
+            layout.buttons[0].rect,
+            Rect {
+                left: 12,
+                top: 0,
+                right: 40,
+                bottom: 28
+            }
+        );
         assert_eq!(layout.total_height, 28);
     }
 
@@ -260,7 +319,15 @@ mod tests {
         let layout = compute_layout(&input);
         assert_eq!(layout.buttons.len(), 1);
         assert!(layout.buttons[0].is_add);
-        assert_eq!(layout.buttons[0].rect, Rect { left: 0, top: 12, right: 28, bottom: 40 });
+        assert_eq!(
+            layout.buttons[0].rect,
+            Rect {
+                left: 0,
+                top: 12,
+                right: 28,
+                bottom: 40
+            }
+        );
         assert_eq!(layout.total_width, 28);
     }
 
@@ -282,7 +349,15 @@ mod tests {
         assert!(!layout.buttons[1].is_add);
         // Downloads x: left edge = grip(12) + add(28) + gap(2) = 42
         // Downloads width: pad(10) + icon(14) + icon_gap(4) + text(50) + pad(10) = 88
-        assert_eq!(layout.buttons[1].rect, Rect { left: 42, top: 0, right: 42 + 88, bottom: 28 });
+        assert_eq!(
+            layout.buttons[1].rect,
+            Rect {
+                left: 42,
+                top: 0,
+                right: 42 + 88,
+                bottom: 28
+            }
+        );
     }
 
     #[test]
@@ -305,8 +380,24 @@ mod tests {
         // icon: 14*1.5 = 21
         // icon_gap: 4*1.5 = 6
         // Downloads width = 15+21+6+75+15 = 132
-        assert_eq!(layout.buttons[0].rect, Rect { left: 18, top: 0, right: 60, bottom: 42 });
-        assert_eq!(layout.buttons[1].rect, Rect { left: 63, top: 0, right: 63 + 132, bottom: 42 });
+        assert_eq!(
+            layout.buttons[0].rect,
+            Rect {
+                left: 18,
+                top: 0,
+                right: 60,
+                bottom: 42
+            }
+        );
+        assert_eq!(
+            layout.buttons[1].rect,
+            Rect {
+                left: 63,
+                top: 0,
+                right: 63 + 132,
+                bottom: 42
+            }
+        );
     }
 
     #[test]
@@ -324,7 +415,12 @@ mod tests {
         assert_eq!(layout.buttons.len(), 4);
         for pair in layout.buttons.windows(2) {
             let (a, b) = (&pair[0], &pair[1]);
-            assert!(a.rect.right <= b.rect.left, "buttons must not overlap: {:?} then {:?}", a.rect, b.rect);
+            assert!(
+                a.rect.right <= b.rect.left,
+                "buttons must not overlap: {:?} then {:?}",
+                a.rect,
+                b.rect
+            );
         }
     }
 
@@ -411,7 +507,15 @@ mod tests {
 
     #[test]
     fn insertion_index_empty_folders_returns_zero() {
-        let only_add = [mk_button(true, Rect { left: 0, top: 0, right: 30, bottom: 28 })];
+        let only_add = [mk_button(
+            true,
+            Rect {
+                left: 0,
+                top: 0,
+                right: 30,
+                bottom: 28,
+            },
+        )];
         let input = InsertionInput {
             buttons: &only_add,
             orientation: Orientation::Horizontal,
@@ -425,9 +529,33 @@ mod tests {
     fn insertion_index_horizontal_left_of_first_folder() {
         // + at x=0..30, folder0 at x=40..100 (mid=70), folder1 at x=110..170 (mid=140)
         let buttons = [
-            mk_button(true,  Rect { left: 0, top: 0, right: 30, bottom: 28 }),
-            mk_button(false, Rect { left: 40, top: 0, right: 100, bottom: 28 }),
-            mk_button(false, Rect { left: 110, top: 0, right: 170, bottom: 28 }),
+            mk_button(
+                true,
+                Rect {
+                    left: 0,
+                    top: 0,
+                    right: 30,
+                    bottom: 28,
+                },
+            ),
+            mk_button(
+                false,
+                Rect {
+                    left: 40,
+                    top: 0,
+                    right: 100,
+                    bottom: 28,
+                },
+            ),
+            mk_button(
+                false,
+                Rect {
+                    left: 110,
+                    top: 0,
+                    right: 170,
+                    bottom: 28,
+                },
+            ),
         ];
         let input = InsertionInput {
             buttons: &buttons,
@@ -441,9 +569,33 @@ mod tests {
     #[test]
     fn insertion_index_horizontal_right_of_last_folder() {
         let buttons = [
-            mk_button(true,  Rect { left: 0, top: 0, right: 30, bottom: 28 }),
-            mk_button(false, Rect { left: 40, top: 0, right: 100, bottom: 28 }),
-            mk_button(false, Rect { left: 110, top: 0, right: 170, bottom: 28 }),
+            mk_button(
+                true,
+                Rect {
+                    left: 0,
+                    top: 0,
+                    right: 30,
+                    bottom: 28,
+                },
+            ),
+            mk_button(
+                false,
+                Rect {
+                    left: 40,
+                    top: 0,
+                    right: 100,
+                    bottom: 28,
+                },
+            ),
+            mk_button(
+                false,
+                Rect {
+                    left: 110,
+                    top: 0,
+                    right: 170,
+                    bottom: 28,
+                },
+            ),
         ];
         let input = InsertionInput {
             buttons: &buttons,
@@ -458,9 +610,33 @@ mod tests {
     fn insertion_index_horizontal_between_folders() {
         // folder0 mid = (40+100)/2 = 70; folder1 mid = (110+170)/2 = 140
         let buttons = [
-            mk_button(true,  Rect { left: 0, top: 0, right: 30, bottom: 28 }),
-            mk_button(false, Rect { left: 40, top: 0, right: 100, bottom: 28 }),
-            mk_button(false, Rect { left: 110, top: 0, right: 170, bottom: 28 }),
+            mk_button(
+                true,
+                Rect {
+                    left: 0,
+                    top: 0,
+                    right: 30,
+                    bottom: 28,
+                },
+            ),
+            mk_button(
+                false,
+                Rect {
+                    left: 40,
+                    top: 0,
+                    right: 100,
+                    bottom: 28,
+                },
+            ),
+            mk_button(
+                false,
+                Rect {
+                    left: 110,
+                    top: 0,
+                    right: 170,
+                    bottom: 28,
+                },
+            ),
         ];
         let input = InsertionInput {
             buttons: &buttons,
@@ -474,9 +650,33 @@ mod tests {
     #[test]
     fn insertion_index_vertical_above_first_folder() {
         let buttons = [
-            mk_button(true,  Rect { left: 0, top: 0,  right: 50, bottom: 30 }),
-            mk_button(false, Rect { left: 0, top: 40, right: 50, bottom: 68 }),
-            mk_button(false, Rect { left: 0, top: 70, right: 50, bottom: 98 }),
+            mk_button(
+                true,
+                Rect {
+                    left: 0,
+                    top: 0,
+                    right: 50,
+                    bottom: 30,
+                },
+            ),
+            mk_button(
+                false,
+                Rect {
+                    left: 0,
+                    top: 40,
+                    right: 50,
+                    bottom: 68,
+                },
+            ),
+            mk_button(
+                false,
+                Rect {
+                    left: 0,
+                    top: 70,
+                    right: 50,
+                    bottom: 98,
+                },
+            ),
         ];
         let input = InsertionInput {
             buttons: &buttons,
@@ -490,9 +690,33 @@ mod tests {
     #[test]
     fn insertion_index_vertical_below_last_folder() {
         let buttons = [
-            mk_button(true,  Rect { left: 0, top: 0,  right: 50, bottom: 30 }),
-            mk_button(false, Rect { left: 0, top: 40, right: 50, bottom: 68 }),
-            mk_button(false, Rect { left: 0, top: 70, right: 50, bottom: 98 }),
+            mk_button(
+                true,
+                Rect {
+                    left: 0,
+                    top: 0,
+                    right: 50,
+                    bottom: 30,
+                },
+            ),
+            mk_button(
+                false,
+                Rect {
+                    left: 0,
+                    top: 40,
+                    right: 50,
+                    bottom: 68,
+                },
+            ),
+            mk_button(
+                false,
+                Rect {
+                    left: 0,
+                    top: 70,
+                    right: 50,
+                    bottom: 98,
+                },
+            ),
         ];
         let input = InsertionInput {
             buttons: &buttons,
@@ -506,7 +730,8 @@ mod tests {
     use proptest::prelude::*;
 
     /// Generator for a LayoutInput scenario: (dpi, orientation, folder names, widths, grip).
-    fn arb_layout_scenario() -> impl Strategy<Value = (u32, Orientation, Vec<String>, Vec<i32>, i32)> {
+    fn arb_layout_scenario() -> impl Strategy<Value = (u32, Orientation, Vec<String>, Vec<i32>, i32)>
+    {
         (
             prop_oneof![Just(96u32), Just(120), Just(144), Just(168), Just(192)],
             prop_oneof![Just(Orientation::Horizontal), Just(Orientation::Vertical)],

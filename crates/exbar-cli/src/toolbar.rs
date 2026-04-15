@@ -7,8 +7,8 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, W
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, ClientToScreen, CreateSolidBrush, DEFAULT_GUI_FONT, DT_CENTER, DT_SINGLELINE,
     DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetStockObject,
-    GetTextExtentPoint32W, InvalidateRect, PAINTSTRUCT, ReleaseDC, ScreenToClient, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT, HDC,
+    GetTextExtentPoint32W, HDC, InvalidateRect, PAINTSTRUCT, ReleaseDC, ScreenToClient,
+    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
@@ -1239,7 +1239,9 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
             cx >= i.rect.left && cx < i.rect.right && cy >= i.rect.top && cy < i.rect.bottom
         })?;
         Some(match &hit.action {
-            ActionSource::Folder(p) => crate::dragdrop::DropAction::MoveCopyTo { target: std::path::PathBuf::from(p) },
+            ActionSource::Folder(p) => crate::dragdrop::DropAction::MoveCopyTo {
+                target: std::path::PathBuf::from(p),
+            },
             ActionSource::Add => crate::dragdrop::DropAction::AddFolder,
         })
     };

@@ -115,11 +115,16 @@ mod tests {
     use std::path::PathBuf;
 
     fn mk_target(path: &str) -> DropAction {
-        DropAction::MoveCopyTo { target: PathBuf::from(path) }
+        DropAction::MoveCopyTo {
+            target: PathBuf::from(path),
+        }
     }
 
     fn session(drive: Option<char>, single_dir: bool) -> DragSession {
-        DragSession { source_drive: drive, is_single_directory: single_dir }
+        DragSession {
+            source_drive: drive,
+            is_single_directory: single_dir,
+        }
     }
 
     #[test]
@@ -135,36 +140,54 @@ mod tests {
     fn add_folder_with_single_directory_copies() {
         let action = DropAction::AddFolder;
         let s = session(None, true);
-        assert_eq!(effect_for(Some(&action), Some(&s), KeyState::default()), Effect::Copy);
+        assert_eq!(
+            effect_for(Some(&action), Some(&s), KeyState::default()),
+            Effect::Copy
+        );
     }
 
     #[test]
     fn add_folder_without_single_directory_none() {
         let action = DropAction::AddFolder;
         let s = session(Some('C'), false);
-        assert_eq!(effect_for(Some(&action), Some(&s), KeyState::default()), Effect::None);
-        assert_eq!(effect_for(Some(&action), None, KeyState::default()), Effect::None);
+        assert_eq!(
+            effect_for(Some(&action), Some(&s), KeyState::default()),
+            Effect::None
+        );
+        assert_eq!(
+            effect_for(Some(&action), None, KeyState::default()),
+            Effect::None
+        );
     }
 
     #[test]
     fn same_drive_defaults_to_move() {
         let action = mk_target("C:\\Users\\me\\Documents");
         let s = session(Some('C'), false);
-        assert_eq!(effect_for(Some(&action), Some(&s), KeyState::default()), Effect::Move);
+        assert_eq!(
+            effect_for(Some(&action), Some(&s), KeyState::default()),
+            Effect::Move
+        );
     }
 
     #[test]
     fn cross_drive_defaults_to_copy() {
         let action = mk_target("D:\\Backups");
         let s = session(Some('C'), false);
-        assert_eq!(effect_for(Some(&action), Some(&s), KeyState::default()), Effect::Copy);
+        assert_eq!(
+            effect_for(Some(&action), Some(&s), KeyState::default()),
+            Effect::Copy
+        );
     }
 
     #[test]
     fn ctrl_forces_copy_even_on_same_drive() {
         let action = mk_target("C:\\Users\\me\\Documents");
         let s = session(Some('C'), false);
-        let k = KeyState { ctrl: true, ..KeyState::default() };
+        let k = KeyState {
+            ctrl: true,
+            ..KeyState::default()
+        };
         assert_eq!(effect_for(Some(&action), Some(&s), k), Effect::Copy);
     }
 
@@ -172,7 +195,10 @@ mod tests {
     fn shift_forces_move_even_cross_drive() {
         let action = mk_target("D:\\Backups");
         let s = session(Some('C'), false);
-        let k = KeyState { shift: true, ..KeyState::default() };
+        let k = KeyState {
+            shift: true,
+            ..KeyState::default()
+        };
         assert_eq!(effect_for(Some(&action), Some(&s), k), Effect::Move);
     }
 
@@ -182,7 +208,10 @@ mod tests {
         let action = mk_target("C:\\Users\\me\\Documents");
         let s = session(None, false);
         // determine_effect: (None, Some('C')) → not same drive, not None-target → Copy
-        assert_eq!(effect_for(Some(&action), Some(&s), KeyState::default()), Effect::Copy);
+        assert_eq!(
+            effect_for(Some(&action), Some(&s), KeyState::default()),
+            Effect::Copy
+        );
     }
 
     #[test]
@@ -190,7 +219,10 @@ mod tests {
         // Target path without a drive letter (e.g. a shell alias the adapter couldn't resolve).
         let action = mk_target("shell:Downloads");
         let s = session(Some('C'), false);
-        assert_eq!(effect_for(Some(&action), Some(&s), KeyState::default()), Effect::Move);
+        assert_eq!(
+            effect_for(Some(&action), Some(&s), KeyState::default()),
+            Effect::Move
+        );
     }
 
     #[test]
@@ -198,12 +230,19 @@ mod tests {
         // Implementation precedence: ctrl is checked first.
         let action = mk_target("C:\\Users\\me");
         let s = session(Some('C'), false);
-        let k = KeyState { ctrl: true, shift: true, ..KeyState::default() };
+        let k = KeyState {
+            ctrl: true,
+            shift: true,
+            ..KeyState::default()
+        };
         assert_eq!(effect_for(Some(&action), Some(&s), k), Effect::Copy);
     }
 
     #[test]
     fn determine_effect_both_unknown_gives_move() {
-        assert_eq!(determine_effect(KeyState::default(), None, None), Effect::Move);
+        assert_eq!(
+            determine_effect(KeyState::default(), None, None),
+            Effect::Move
+        );
     }
 }

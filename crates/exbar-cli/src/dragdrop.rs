@@ -23,8 +23,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows_core::{PCWSTR, Result, implement};
 
-use crate::drop_effect::{self, DragSession, Effect, KeyState};
 pub use crate::drop_effect::DropAction;
+use crate::drop_effect::{self, DragSession, Effect, KeyState};
 
 // ── FolderDropTarget ──────────────────────────────────────────────────────────
 
@@ -365,11 +365,14 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         let session = self.session.lock().unwrap().clone();
 
         let result = match action {
-            Some(DropAction::MoveCopyTo { target: ref target_path }) => {
+            Some(DropAction::MoveCopyTo {
+                target: ref target_path,
+            }) => {
                 let src = session.as_ref().and_then(|s| s.source_drive);
                 let real_target = resolve_to_real_path(&target_path.to_string_lossy());
                 let target_drive = drive_letter(&real_target);
-                let effect = drop_effect::determine_effect(keystate_from(grfkeystate), src, target_drive);
+                let effect =
+                    drop_effect::determine_effect(keystate_from(grfkeystate), src, target_drive);
                 let dropeffect = effect_to_dropeffect(effect);
                 if !pdweffect.is_null() {
                     unsafe { *pdweffect = dropeffect };
