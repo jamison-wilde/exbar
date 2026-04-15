@@ -16,6 +16,7 @@ pub mod layout;
 pub mod log;
 pub mod picker;
 pub mod pointer;
+pub mod rename;
 pub mod shell_windows;
 pub mod theme;
 pub mod toolbar;
