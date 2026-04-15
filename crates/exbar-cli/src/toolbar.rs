@@ -393,12 +393,12 @@ struct ToolbarState {
     pointer: pointer::PointerState,
     mouse_tracking_started: bool,
     self_release_pending: bool,
-    // SP3 trait seams (#[allow(dead_code)] until Tasks 7-9 migrate callers):
-    #[allow(dead_code)] shell_browser: Box<dyn ShellBrowser>,
-    #[allow(dead_code)] folder_picker: Box<dyn FolderPicker>,
+    // SP3 trait seams
+    shell_browser: Box<dyn ShellBrowser>,
+    folder_picker: Box<dyn FolderPicker>,
     file_operator: Arc<dyn FileOperator>,
     clipboard: Box<dyn Clipboard>,
-    #[allow(dead_code)] config_store: Box<dyn ConfigStore>,
+    config_store: Box<dyn ConfigStore>,
 }
 
 impl ToolbarState {
