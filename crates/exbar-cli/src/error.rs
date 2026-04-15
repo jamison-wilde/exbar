@@ -26,12 +26,6 @@ pub enum ExbarError {
     /// Config file path couldn't be resolved or was malformed.
     #[error("config error: {0}")]
     Config(String),
-
-    /// A precondition for a Win32 operation wasn't met (e.g. "window no
-    /// longer exists"). Surfaced as an error so callers can decide to
-    /// retry, bail, or log.
-    #[error("precondition failed: {0}")]
-    Precondition(String),
 }
 
 pub type ExbarResult<T> = Result<T, ExbarError>;
@@ -79,12 +73,5 @@ mod tests {
         let ex = ExbarError::Config("bad field".into());
         let msg = format!("{ex}");
         assert!(msg.starts_with("config error:"), "got: {msg}");
-    }
-
-    #[test]
-    fn precondition_variant_display_has_prefix() {
-        let ex = ExbarError::Precondition("hwnd closed".into());
-        let msg = format!("{ex}");
-        assert!(msg.starts_with("precondition failed:"), "got: {msg}");
     }
 }

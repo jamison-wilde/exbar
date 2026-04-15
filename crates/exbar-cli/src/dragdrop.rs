@@ -171,7 +171,9 @@ unsafe fn first_path_from_data_object(data_object: &IDataObject) -> Option<Strin
         }
     };
 
-    // GlobalLock is reference-counted; balance each Lock with an Unlock.
+    // SAFETY: `hglobal` was produced by the successful GlobalLock above; the
+    // ref-counted Lock/Unlock pair must be balanced. Return value indicates
+    // whether the object is still locked by any other caller — unactionable.
     let _ = unsafe { GlobalUnlock(hglobal) };
 
     result

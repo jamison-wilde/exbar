@@ -89,9 +89,15 @@ fn timestamp() -> String {
 /// the value either way. `stringify!($e)` captures the call text for
 /// log context.
 ///
-/// Usage:
+/// The expression must evaluate to a `Result<_, impl Display>`. For Win32
+/// BOOL-returning calls, use `.ok()` to convert to `windows::core::Result<()>`:
+///
 /// ```ignore
-/// warn_on_err!(InvalidateRect(Some(hwnd), None, false));
+/// // Windows BOOL-returning call:
+/// warn_on_err!(unsafe { ShowWindow(hwnd, SW_HIDE).ok() });
+///
+/// // Already returns Result:
+/// warn_on_err!(unsafe { CoCreateInstance::<_, IFileOperation>(&FileOperation, None, CLSCTX_ALL) });
 /// ```
 #[macro_export]
 macro_rules! warn_on_err {
