@@ -53,3 +53,27 @@ fn system_drive_root() -> String {
         .map(|d| format!("{d}\\"))
         .unwrap_or_else(|_| "C:\\".to_owned())
 }
+
+// ── SP3: FolderPicker trait ──────────────────────────────────────────────────
+
+pub trait FolderPicker: Send + Sync {
+    /// Show a modal folder picker. Returns the selected path or `None`
+    /// if the user cancelled or the dialog failed to open.
+    fn pick_folder(&self) -> Option<std::path::PathBuf>;
+}
+
+#[derive(Default)]
+#[allow(dead_code)]
+pub struct Win32Picker;
+
+impl Win32Picker {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FolderPicker for Win32Picker {
+    fn pick_folder(&self) -> Option<std::path::PathBuf> {
+        pick_folder()
+    }
+}
