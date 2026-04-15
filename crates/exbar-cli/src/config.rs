@@ -40,7 +40,7 @@ pub struct Config {
     pub new_tab_timeout_ms_zero_disables: u32,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct FolderEntry {
     pub name: String,
     pub path: String,
