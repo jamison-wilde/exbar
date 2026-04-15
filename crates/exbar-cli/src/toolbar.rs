@@ -342,7 +342,9 @@ fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, ref_hwnd: Option<HWND>) ->
 struct ReorderState {
     /// Source button index (NOT folder index). Always >= 1 since + is at 0.
     source_button: usize,
+    #[allow(dead_code)] // Zeroed by sync_legacy_fields; Task 8 deletes this struct.
     press_x: i32,
+    #[allow(dead_code)] // Zeroed by sync_legacy_fields; Task 8 deletes this struct.
     press_y: i32,
     /// False until mouse has moved REORDER_THRESHOLD logical pixels.
     active: bool,
@@ -363,11 +365,8 @@ struct ToolbarState {
     grip_size: i32,
     reorder: Option<ReorderState>,
     // SP2b additions (Task 6) — wired up by Task 7:
-    #[allow(dead_code)]
     pointer: pointer::PointerState,
-    #[allow(dead_code)]
     mouse_tracking_started: bool,
-    #[allow(dead_code)]
     self_release_pending: bool,
 }
 
@@ -398,7 +397,6 @@ impl ToolbarState {
 // ── SP2b pointer adapter methods ─────────────────────────────────────────────
 
 impl ToolbarState {
-    #[allow(dead_code)] // Used by Task 7's rewritten WM handlers.
     fn apply_pointer_event(&mut self, hwnd: HWND, event: pointer::PointerEvent) {
         let (new_state, commands) =
             pointer::transition(std::mem::take(&mut self.pointer), event);
@@ -406,9 +404,25 @@ impl ToolbarState {
         for cmd in commands {
             self.execute_pointer_command(hwnd, cmd);
         }
+        self.sync_legacy_fields();
     }
 
-    #[allow(dead_code)]
+    /// Temporary scaffolding (Task 7 → Task 8): mirrors `self.pointer` into the
+    /// legacy fields so paint code (still reading `hover_index`, `pressed_index`,
+    /// `reorder`) continues to work. Task 8 updates paint and deletes this.
+    fn sync_legacy_fields(&mut self) {
+        self.hover_index = self.pointer.hover_button();
+        self.pressed_index = self.pointer.pressed_button();
+        self.reorder = self.pointer.dragging_reorder().map(|(src, ins)| ReorderState {
+            source_button: src,
+            press_x: 0,
+            press_y: 0,
+            active: true,
+            insertion: ins,
+        });
+        self.tracking_mouse = self.mouse_tracking_started;
+    }
+
     fn execute_pointer_command(
         &mut self,
         hwnd: HWND,
@@ -968,48 +982,29 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
-                // Reorder tracking (runs before hover so active drag suppresses hover).
-                if let Some(mut r) = state.reorder {
-                    let moved = (x - r.press_x).abs() + (y - r.press_y).abs();
-                    if !r.active && moved > theme::scale(REORDER_THRESHOLD, state.dpi) {
-                        r.active = true;
-                        // Capture was already taken on WM_LBUTTONDOWN.
+                let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| {
+                    pointer::HitResult {
+                        button: idx,
+                        is_folder: !state.buttons[idx].is_add,
                     }
-                    if r.active {
-                        r.insertion = layout::compute_insertion_index(&layout::InsertionInput {
-                            buttons: &state.buttons,
-                            orientation: state.layout,
-                            cursor_x: x,
-                            cursor_y: 0,
-                        });
-                        state.reorder = Some(r);
-                        state.hover_index = None;
-                        unsafe {
-                            let _ = InvalidateRect(Some(hwnd), None, false);
-                        }
-                        return LRESULT(0);
-                    }
-                    state.reorder = Some(r);
-                }
+                });
+                let reorder_threshold_px = theme::scale(REORDER_THRESHOLD, state.dpi);
+                let insertion_if_reordering = layout::compute_insertion_index(
+                    &layout::InsertionInput {
+                        buttons: &state.buttons,
+                        orientation: state.layout,
+                        cursor_x: x,
+                        cursor_y: y,
+                    },
+                );
 
-                // Hover tracking (existing behavior)
-                let new_hover = hit_test::hit_test(&state.buttons, x, y);
-                if new_hover != state.hover_index {
-                    state.hover_index = new_hover;
-                    unsafe {
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                    }
-                }
-                if !state.tracking_mouse {
-                    let mut tme = TRACKMOUSEEVENT {
-                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
-                        hwndTrack: hwnd,
-                        dwHoverTime: 0,
-                    };
-                    let _ = unsafe { TrackMouseEvent(&mut tme) };
-                    state.tracking_mouse = true;
-                }
+                state.apply_pointer_event(hwnd, pointer::PointerEvent::Move {
+                    x,
+                    y,
+                    hit,
+                    reorder_threshold_px,
+                    insertion_if_reordering,
+                });
             }
             LRESULT(0)
         }
@@ -1018,30 +1013,22 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
                 let state = unsafe { &mut *ptr };
-                state.hover_index = None;
-                state.tracking_mouse = false;
-                unsafe {
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                }
+                state.mouse_tracking_started = false; // next hover will need to re-arm.
+                state.apply_pointer_event(hwnd, pointer::PointerEvent::Leave);
             }
             LRESULT(0)
         }
 
         x if x == WM_CAPTURECHANGED => {
-            // Only tear down state for an externally-interrupted active
-            // reorder (alt-tab, etc.). WM_LBUTTONUP's own ReleaseCapture
-            // also triggers this synchronously — if we cleared pressed_index
-            // here, the click-firing check further down in WM_LBUTTONUP would
-            // see None and silently drop the navigate call.
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
                 let state = unsafe { &mut *ptr };
-                if state.reorder.as_ref().map(|r| r.active).unwrap_or(false) {
-                    state.reorder = None;
-                    state.pressed_index = None;
-                    unsafe {
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                    }
+                if state.self_release_pending {
+                    // Our own ReleaseCapture() dispatched this; consume the flag.
+                    state.self_release_pending = false;
+                } else {
+                    // External capture loss — feed to machine.
+                    state.apply_pointer_event(hwnd, pointer::PointerEvent::CaptureLost);
                 }
             }
             LRESULT(0)
@@ -1053,29 +1040,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let state = unsafe { &mut *ptr };
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                state.pressed_index = hit_test::hit_test(&state.buttons, x, y);
-                // Only start a potential reorder on a folder button (not + and not grip).
-                if let Some(idx) = state.pressed_index
-                    && !state.buttons[idx].is_add
-                {
-                    // Cancel any active inline rename before starting a reorder gesture.
-                    cancel_inline_rename();
-                    state.reorder = Some(ReorderState {
-                        source_button: idx,
-                        press_x: x,
-                        press_y: y,
-                        active: false,
-                        insertion: idx - 1, // overwritten on first WM_MOUSEMOVE once active
-                    });
-                    // Capture on press so a fast flick out of the toolbar
-                    // still routes WM_MOUSEMOVE / WM_LBUTTONUP back to us.
-                    unsafe {
-                        let _ = SetCapture(hwnd);
+                let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| {
+                    pointer::HitResult {
+                        button: idx,
+                        is_folder: !state.buttons[idx].is_add,
                     }
-                }
-                unsafe {
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                }
+                });
+                state.apply_pointer_event(hwnd, pointer::PointerEvent::Press { x, y, hit });
             }
             LRESULT(0)
         }
@@ -1086,54 +1057,14 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let state = unsafe { &mut *ptr };
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-
-                // Handle reorder first: if the gesture became active, commit and skip click.
-                if let Some(r) = state.reorder.take() {
-                    unsafe {
-                        let _ = ReleaseCapture();
+                let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| {
+                    pointer::HitResult {
+                        button: idx,
+                        is_folder: !state.buttons[idx].is_add,
                     }
-                    if r.active {
-                        let source_folder = r.source_button - 1; // button 0 is +
-                        commit_reorder(hwnd, source_folder, r.insertion);
-                        state.pressed_index = None;
-                        unsafe {
-                            let _ = InvalidateRect(Some(hwnd), None, false);
-                        }
-                        return LRESULT(0);
-                    }
-                    // Not active = plain click; fall through to existing click logic.
-                }
-
-                if let Some(idx) = hit_test::hit_test(&state.buttons, x, y)
-                    && Some(idx) == state.pressed_index
-                {
-                    if state.buttons[idx].is_add {
-                        if let Some(path) = crate::picker::pick_folder() {
-                            append_folder_and_reload(&path);
-                        }
-                    } else {
-                        let path = state.buttons[idx].folder.path.clone();
-                        let ctrl = (wparam.0 & MK_CONTROL.0 as usize) != 0;
-                        if ctrl {
-                            let timeout = state
-                                .config
-                                .as_ref()
-                                .map(|c| c.new_tab_timeout_ms_zero_disables)
-                                .unwrap_or(500);
-                            crate::navigate::open_in_new_tab(get_active_explorer(), &path, timeout);
-                        } else if let Some(explorer_hwnd) = get_active_explorer()
-                            && let Some(sb) = unsafe {
-                                crate::shell_windows::get_shell_browser_for(explorer_hwnd)
-                            }
-                        {
-                            let _ = crate::navigate::navigate_to(&sb, &path);
-                        }
-                    }
-                }
-                state.pressed_index = None;
-                unsafe {
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                }
+                });
+                let ctrl = (wparam.0 & MK_CONTROL.0 as usize) != 0;
+                state.apply_pointer_event(hwnd, pointer::PointerEvent::Release { x, y, hit, ctrl });
             }
             LRESULT(0)
         }
