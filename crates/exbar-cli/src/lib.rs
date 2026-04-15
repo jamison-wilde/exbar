@@ -4,6 +4,7 @@
 //! binary (`src/bin/exbar.rs`) and unit tests can share them. The
 //! binary entry point wires these modules together into the CLI.
 
+pub mod clipboard;
 pub mod config;
 pub mod contextmenu;
 pub mod dragdrop;
