@@ -42,6 +42,7 @@ windows = { version = "0.61", features = [
 version = "0.61"
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3"
 
 [target.'cfg(windows)'.build-dependencies]
