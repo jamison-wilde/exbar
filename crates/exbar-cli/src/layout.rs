@@ -169,8 +169,34 @@ fn synthesized_add_button() -> FolderEntry {
 
 /// Given a cursor position, compute the folder-index insertion point in
 /// `0..=folder_count`.
-pub fn compute_insertion_index(_input: &InsertionInput) -> usize {
-    unimplemented!("Task 7 implements compute_insertion_index")
+pub fn compute_insertion_index(input: &InsertionInput) -> usize {
+    let folder_buttons: Vec<&ButtonLayout> =
+        input.buttons.iter().filter(|b| !b.is_add).collect();
+
+    if folder_buttons.is_empty() {
+        return 0;
+    }
+
+    match input.orientation {
+        Orientation::Horizontal => {
+            for (i, b) in folder_buttons.iter().enumerate() {
+                let mid = (b.rect.left + b.rect.right) / 2;
+                if input.cursor_x < mid {
+                    return i;
+                }
+            }
+            folder_buttons.len()
+        }
+        Orientation::Vertical => {
+            for (i, b) in folder_buttons.iter().enumerate() {
+                let mid = (b.rect.top + b.rect.bottom) / 2;
+                if input.cursor_y < mid {
+                    return i;
+                }
+            }
+            folder_buttons.len()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -373,5 +399,107 @@ mod tests {
             grip_size_logical_px: 12,
         };
         compute_layout(&input);
+    }
+
+    fn mk_button(is_add: bool, rect: Rect) -> ButtonLayout {
+        ButtonLayout {
+            rect,
+            folder: mk_folder("x"),
+            is_add,
+        }
+    }
+
+    #[test]
+    fn insertion_index_empty_folders_returns_zero() {
+        let only_add = [mk_button(true, Rect { left: 0, top: 0, right: 30, bottom: 28 })];
+        let input = InsertionInput {
+            buttons: &only_add,
+            orientation: Orientation::Horizontal,
+            cursor_x: 100,
+            cursor_y: 0,
+        };
+        assert_eq!(compute_insertion_index(&input), 0);
+    }
+
+    #[test]
+    fn insertion_index_horizontal_left_of_first_folder() {
+        // + at x=0..30, folder0 at x=40..100 (mid=70), folder1 at x=110..170 (mid=140)
+        let buttons = [
+            mk_button(true,  Rect { left: 0, top: 0, right: 30, bottom: 28 }),
+            mk_button(false, Rect { left: 40, top: 0, right: 100, bottom: 28 }),
+            mk_button(false, Rect { left: 110, top: 0, right: 170, bottom: 28 }),
+        ];
+        let input = InsertionInput {
+            buttons: &buttons,
+            orientation: Orientation::Horizontal,
+            cursor_x: 50,
+            cursor_y: 0,
+        };
+        assert_eq!(compute_insertion_index(&input), 0);
+    }
+
+    #[test]
+    fn insertion_index_horizontal_right_of_last_folder() {
+        let buttons = [
+            mk_button(true,  Rect { left: 0, top: 0, right: 30, bottom: 28 }),
+            mk_button(false, Rect { left: 40, top: 0, right: 100, bottom: 28 }),
+            mk_button(false, Rect { left: 110, top: 0, right: 170, bottom: 28 }),
+        ];
+        let input = InsertionInput {
+            buttons: &buttons,
+            orientation: Orientation::Horizontal,
+            cursor_x: 500,
+            cursor_y: 0,
+        };
+        assert_eq!(compute_insertion_index(&input), 2);
+    }
+
+    #[test]
+    fn insertion_index_horizontal_between_folders() {
+        // folder0 mid = (40+100)/2 = 70; folder1 mid = (110+170)/2 = 140
+        let buttons = [
+            mk_button(true,  Rect { left: 0, top: 0, right: 30, bottom: 28 }),
+            mk_button(false, Rect { left: 40, top: 0, right: 100, bottom: 28 }),
+            mk_button(false, Rect { left: 110, top: 0, right: 170, bottom: 28 }),
+        ];
+        let input = InsertionInput {
+            buttons: &buttons,
+            orientation: Orientation::Horizontal,
+            cursor_x: 130,
+            cursor_y: 0,
+        };
+        assert_eq!(compute_insertion_index(&input), 1);
+    }
+
+    #[test]
+    fn insertion_index_vertical_above_first_folder() {
+        let buttons = [
+            mk_button(true,  Rect { left: 0, top: 0,  right: 50, bottom: 30 }),
+            mk_button(false, Rect { left: 0, top: 40, right: 50, bottom: 68 }),
+            mk_button(false, Rect { left: 0, top: 70, right: 50, bottom: 98 }),
+        ];
+        let input = InsertionInput {
+            buttons: &buttons,
+            orientation: Orientation::Vertical,
+            cursor_x: 25,
+            cursor_y: 20,
+        };
+        assert_eq!(compute_insertion_index(&input), 0);
+    }
+
+    #[test]
+    fn insertion_index_vertical_below_last_folder() {
+        let buttons = [
+            mk_button(true,  Rect { left: 0, top: 0,  right: 50, bottom: 30 }),
+            mk_button(false, Rect { left: 0, top: 40, right: 50, bottom: 68 }),
+            mk_button(false, Rect { left: 0, top: 70, right: 50, bottom: 98 }),
+        ];
+        let input = InsertionInput {
+            buttons: &buttons,
+            orientation: Orientation::Vertical,
+            cursor_x: 25,
+            cursor_y: 500,
+        };
+        assert_eq!(compute_insertion_index(&input), 2);
     }
 }
