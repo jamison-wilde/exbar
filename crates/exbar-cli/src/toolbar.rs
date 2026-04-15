@@ -515,21 +515,22 @@ impl ToolbarState {
                 // folder_button is in folder-index space; buttons[0] is the + button.
                 let btn_slot = folder_button + 1;
                 if btn_slot < self.buttons.len() {
-                    let path = self.buttons[btn_slot].folder.path.clone();
+                    let path = std::path::PathBuf::from(&self.buttons[btn_slot].folder.path);
                     if ctrl {
                         let timeout = self
                             .config
                             .as_ref()
                             .map(|c| c.new_tab_timeout_ms_zero_disables)
                             .unwrap_or(500);
-                        crate::navigate::open_in_new_tab(get_active_explorer(), &path, timeout);
-                    } else if let Some(explorer_hwnd) = get_active_explorer()
-                        && let Some(sb) =
-                            // SAFETY: IShellBrowser obtained fresh via IShellWindows enumeration;
-                            // do not cache across calls (ABA risk if the Explorer window closes).
-                            unsafe { crate::shell_windows::get_shell_browser_for(explorer_hwnd) }
-                    {
-                        let _ = crate::navigate::navigate_to(&sb, &path);
+                        if let Some(explorer) = self.shell_browser.active_explorer() {
+                            self.shell_browser.open_in_new_tab(explorer, &path, timeout);
+                        } else {
+                            log::debug!("FireFolderClick(ctrl): no active explorer");
+                        }
+                    } else if let Some(explorer) = self.shell_browser.active_explorer() {
+                        crate::warn_on_err!(self.shell_browser.navigate(explorer, &path));
+                    } else {
+                        log::debug!("FireFolderClick: no active explorer");
                     }
                 }
             }
@@ -1168,18 +1169,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             },
                         ];
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
-                        let path = state.buttons[idx].folder.path.clone();
+                        let path = std::path::PathBuf::from(&state.buttons[idx].folder.path);
                         match chosen {
                             MENU_ID_OPEN => {
-                                if let Some(explorer_hwnd) = get_active_explorer()
-                                    && let Some(sb) = unsafe {
-                                        // SAFETY: IShellBrowser obtained fresh via IShellWindows
-                                        // enumeration; do not cache across calls (ABA risk if the
-                                        // Explorer window closes).
-                                        crate::shell_windows::get_shell_browser_for(explorer_hwnd)
-                                    }
-                                {
-                                    let _ = crate::navigate::navigate_to(&sb, &path);
+                                if let Some(explorer) = state.shell_browser.active_explorer() {
+                                    crate::warn_on_err!(
+                                        state.shell_browser.navigate(explorer, &path)
+                                    );
                                 }
                             }
                             MENU_ID_OPEN_NEW_TAB => {
@@ -1188,14 +1184,12 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                     .as_ref()
                                     .map(|c| c.new_tab_timeout_ms_zero_disables)
                                     .unwrap_or(500);
-                                crate::navigate::open_in_new_tab(
-                                    get_active_explorer(),
-                                    &path,
-                                    timeout,
-                                );
+                                if let Some(explorer) = state.shell_browser.active_explorer() {
+                                    state.shell_browser.open_in_new_tab(explorer, &path, timeout);
+                                }
                             }
                             MENU_ID_COPY_PATH => {
-                                copy_to_clipboard(&path);
+                                copy_to_clipboard(path.to_str().unwrap_or_default());
                             }
                             MENU_ID_RENAME => {
                                 let rect = rect_to_win32(state.buttons[idx].rect);
