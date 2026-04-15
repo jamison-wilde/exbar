@@ -1411,6 +1411,11 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
+/// Create the top-level popup toolbar window above `owner`.
+///
+/// `owner` is the triggering Explorer (`CabinetWClass`) HWND — used for
+/// monitor / DPI detection. Returns the new toolbar HWND on success.
+/// See ADR-0002 for why this is a top-level popup, not a child window.
 pub fn create_toolbar(
     owner: HWND,
     screen_pos: &RECT,
@@ -1506,6 +1511,7 @@ pub fn create_toolbar(
     }
 }
 
+/// Reload `~/.exbar.json` from disk for `hwnd`'s `ToolbarState` and recompute the layout.
 pub fn refresh_toolbar(hwnd: HWND) {
     let Some(state) = (unsafe { toolbar_state(hwnd) }) else {
         return;
