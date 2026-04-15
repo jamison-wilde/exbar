@@ -103,6 +103,12 @@ fn drive_letter(path: &str) -> Option<char> {
 
 /// Extract the first file path from CF_HDROP data in an IDataObject.
 /// Returns None on any failure.
+///
+/// # Safety
+///
+/// Must be called on an STA thread with COM initialized. `data_object`
+/// must be a live IDataObject (not dropped mid-call). Invalid payloads
+/// manifest as `None`; the caller is not exposed to UB.
 unsafe fn first_path_from_data_object(data_object: &IDataObject) -> Option<String> {
     let fmt = FORMATETC {
         cfFormat: CF_HDROP.0,
@@ -186,6 +192,11 @@ fn dropped_is_single_directory(data_object: &IDataObject) -> bool {
 }
 
 /// Return the number of files in the CF_HDROP payload, or None on failure.
+///
+/// # Safety
+///
+/// Same contract as `first_path_from_data_object`: STA thread with COM
+/// initialized; `data_object` must be live.
 unsafe fn hdrop_file_count(data_object: &IDataObject) -> Option<u32> {
     let fmt = FORMATETC {
         cfFormat: CF_HDROP.0,
@@ -240,6 +251,15 @@ fn build_session(data_object: &IDataObject) -> DragSession {
 
 // ── Execute drop ──────────────────────────────────────────────────────────────
 
+/// Execute a file-operation drop (move or copy) onto `target_path`
+/// using the shell's IFileOperation.
+///
+/// # Safety
+///
+/// Must be called on an STA thread with COM initialized. `data_object`
+/// must be live and must have provided the `target_path` via a valid
+/// IShellItemArray — typically obtained inside the same Drop handler
+/// callback chain.
 unsafe fn execute_drop(
     data_object: &IDataObject,
     effect: DROPEFFECT,

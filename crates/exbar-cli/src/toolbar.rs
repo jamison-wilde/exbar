@@ -488,6 +488,8 @@ impl ToolbarState {
                         crate::navigate::open_in_new_tab(get_active_explorer(), &path, timeout);
                     } else if let Some(explorer_hwnd) = get_active_explorer()
                         && let Some(sb) =
+                            // SAFETY: IShellBrowser obtained fresh via IShellWindows enumeration;
+                            // do not cache across calls (ABA risk if the Explorer window closes).
                             unsafe { crate::shell_windows::get_shell_browser_for(explorer_hwnd) }
                     {
                         let _ = crate::navigate::navigate_to(&sb, &path);
@@ -576,6 +578,14 @@ fn in_grip(state: &ToolbarState, x: i32, y: i32) -> bool {
 
 // ── Painting ─────────────────────────────────────────────────────────────────
 
+/// Render the toolbar into its window's DC. Called from WM_PAINT.
+///
+/// # Safety
+///
+/// Must be called from the WM_PAINT handler on the toolbar window's
+/// message-pump thread. `hwnd` must be a valid toolbar HWND. The
+/// function calls `BeginPaint`/`EndPaint` internally; callers must
+/// not call those themselves.
 unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
@@ -842,13 +852,27 @@ unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
 
 // ── Window procedure ─────────────────────────────────────────────────────────
 
+/// Toolbar window procedure. Registered as a WNDPROC via
+/// `RegisterClassW`; Win32 dispatches here from the message pump.
+///
+/// # Safety
+///
+/// Must be installed as the class wndproc via `RegisterClassW` and
+/// invoked by Win32's message dispatch — do not call directly. All
+/// mutable state access is routed through `toolbar_state(hwnd)`.
 unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_CREATE => {
+            // SAFETY: Win32 guarantees lparam is a valid CREATESTRUCTW pointer
+            // during WM_CREATE; lpCreateParams is the value passed to CreateWindowExW.
             let cs = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
             let state_ptr = cs.lpCreateParams as *mut ToolbarState;
+            // SAFETY: Box::into_raw transfers ownership to Win32's user-data slot.
+            // The matching Box::from_raw in WM_DESTROY reclaims ownership.
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize) };
 
+            // SAFETY: state_ptr was just set from a valid Box::into_raw in create_toolbar;
+            // we are on the message-pump thread during WM_CREATE so no aliasing is possible.
             let state = unsafe { &mut *state_ptr };
             let hdc = unsafe { GetDC(Some(hwnd)) };
             let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
@@ -913,6 +937,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
+                // SAFETY: The pointer was produced by Box::into_raw in WM_CREATE;
+                // Box::from_raw reclaims it so the Drop runs and state is freed.
+                // The slot is zeroed first to prevent double-free if WM_DESTROY fires again.
                 drop(unsafe { Box::from_raw(ptr) });
             }
             // Tell the message loop to exit — the toolbar is the only
@@ -1109,6 +1136,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             MENU_ID_OPEN => {
                                 if let Some(explorer_hwnd) = get_active_explorer()
                                     && let Some(sb) = unsafe {
+                                        // SAFETY: IShellBrowser obtained fresh via IShellWindows
+                                        // enumeration; do not cache across calls (ABA risk if the
+                                        // Explorer window closes).
                                         crate::shell_windows::get_shell_browser_for(explorer_hwnd)
                                     }
                                 {
@@ -1289,6 +1319,9 @@ pub fn create_toolbar(
     log::info!("create_toolbar: dark_mode={is_dark}");
 
     let state = Box::new(ToolbarState::new(dpi, config));
+    // SAFETY: Box::into_raw transfers ownership to the CreateWindowExW lpCreateParams
+    // slot, which Win32 delivers to WM_CREATE as cs.lpCreateParams. If window
+    // creation fails, the Err branch below reclaims the box via Box::from_raw.
     let state_ptr = Box::into_raw(state);
 
     let class_wide: Vec<u16> = wide_null(CLASS_NAME);
@@ -1338,6 +1371,9 @@ pub fn create_toolbar(
             Some(hwnd)
         }
         Err(_) => {
+            // SAFETY: CreateWindowExW never called WM_CREATE (window failed to
+            // create), so the pointer was not handed off to the window; we
+            // reclaim it here to avoid a leak.
             drop(unsafe { Box::from_raw(state_ptr) });
             None
         }
@@ -1457,6 +1493,8 @@ fn copy_to_clipboard(text: &str) {
             let _ = CloseClipboard();
             return;
         }
+        // SAFETY: dest is a GlobalLock'd buffer of exactly byte_size bytes allocated above;
+        // wide is a Vec<u16> of the same byte count; the regions cannot overlap.
         std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, dest as *mut u8, byte_size);
         let _ = GlobalUnlock(hmem);
 
@@ -1555,6 +1593,9 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
     }
 
     // Subclass for Enter/Esc/KillFocus.
+    // SAFETY: Box::into_raw leaks the allocation into SetWindowSubclass's ref_data.
+    // Ownership is reclaimed by Box::from_raw in commit_rename / cancel_rename
+    // (called from the subclass proc) or in cancel_inline_rename (WM_DESTROY path).
     let data: *mut RenameSubclassData = Box::into_raw(Box::new(RenameSubclassData {
         toolbar_hwnd: toolbar.0 as isize,
         folder_index,
@@ -1620,6 +1661,9 @@ fn read_edit_text(edit: HWND) -> String {
 }
 
 fn commit_rename(edit: HWND, ref_data: usize) {
+    // SAFETY: ref_data is the pointer produced by Box::into_raw in start_inline_rename;
+    // the subclass proc is invoked on the toolbar message-pump thread, and this is
+    // the single reclaim point for the Enter / WM_KILLFOCUS paths.
     let data = unsafe { Box::from_raw(ref_data as *mut RenameSubclassData) };
     let toolbar = HWND(data.toolbar_hwnd as *mut _);
     let text = read_edit_text(edit);
@@ -1639,6 +1683,7 @@ fn commit_rename(edit: HWND, ref_data: usize) {
 }
 
 fn cancel_rename(edit: HWND, ref_data: usize) {
+    // SAFETY: Same provenance as commit_rename; this is the Esc path reclaim point.
     let data = unsafe { Box::from_raw(ref_data as *mut RenameSubclassData) };
     let _ = data;
     destroy_rename_edit(edit);
@@ -1661,6 +1706,9 @@ fn cancel_inline_rename() {
         // Reclaim the Box leaked into SetWindowSubclass; RemoveWindowSubclass
         // inside destroy_rename_edit ran before this, so no callback can race.
         if s.subclass_data != 0 {
+            // SAFETY: subclass_data holds the Box::into_raw pointer from start_inline_rename.
+            // RemoveWindowSubclass (inside destroy_rename_edit above) has already run,
+            // so the subclass proc cannot fire again and race this reclaim.
             unsafe {
                 drop(Box::from_raw(s.subclass_data as *mut RenameSubclassData));
             }

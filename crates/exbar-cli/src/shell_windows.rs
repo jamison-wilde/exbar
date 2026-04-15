@@ -16,7 +16,14 @@ use windows::Win32::UI::Shell::{
 };
 use windows_core::Interface;
 
-/// Build a VT_I4 VARIANT holding value `n`.
+/// Construct a VT_I4 VARIANT wrapping an i32. Used for
+/// IShellWindows::Item(vIndex) calls.
+///
+/// # Safety
+///
+/// The returned VARIANT is a simple numeric type (VT_I4) — no allocation
+/// or interface pointer needs releasing. The caller may use it directly
+/// as an input argument; Windows does not modify it.
 unsafe fn variant_i4(n: i32) -> VARIANT {
     use core::mem::ManuallyDrop;
     VARIANT {
