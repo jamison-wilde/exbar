@@ -1789,21 +1789,10 @@ mod tests {
 
     // ── Mocks ────────────────────────────────────────────────────────────
 
-    // HWND contains *mut c_void which is !Send + !Sync, so we store the raw
-    // value as isize (which is Send + Sync) and re-wrap on the way out.
-    #[derive(Default)]
     struct MockShellBrowser {
-        navigate_calls: Mutex<Vec<(isize, PathBuf)>>,
-        new_tab_calls: Mutex<Vec<(isize, PathBuf, u32)>>,
-        /// Active explorer stored as isize so the struct is Send + Sync.
-        /// Field retained for Task 5 cleanup; no longer used by trait methods.
-        #[allow(dead_code)]
-        active: Mutex<Option<isize>>,
+        navigate_calls: Arc<Mutex<Vec<(isize, PathBuf)>>>,
+        new_tab_calls: Arc<Mutex<Vec<(isize, PathBuf, u32)>>>,
     }
-    // SAFETY: tests run single-threaded; the isize values are never
-    // dereferenced as pointers — they are opaque identifiers only.
-    unsafe impl Send for MockShellBrowser {}
-    unsafe impl Sync for MockShellBrowser {}
 
     impl ShellBrowser for MockShellBrowser {
         fn navigate(&self, explorer: HWND, path: &Path) -> ExbarResult<()> {
@@ -1883,18 +1872,6 @@ mod tests {
     }
 
     // Newtypes to bridge Arc<Concrete> → Box<dyn Trait>.
-    struct ShellArc(Arc<MockShellBrowser>);
-    // SAFETY: see MockShellBrowser's unsafe impl above.
-    unsafe impl Send for ShellArc {}
-    unsafe impl Sync for ShellArc {}
-    impl ShellBrowser for ShellArc {
-        fn navigate(&self, e: HWND, p: &Path) -> ExbarResult<()> {
-            self.0.navigate(e, p)
-        }
-        fn open_in_new_tab(&self, e: HWND, p: &Path, t: u32) {
-            self.0.open_in_new_tab(e, p, t)
-        }
-    }
     struct PickerArc(Arc<MockFolderPicker>);
     impl FolderPicker for PickerArc {
         fn pick_folder(&self) -> Option<PathBuf> {
@@ -1918,7 +1895,8 @@ mod tests {
     }
 
     struct TestDeps {
-        shell: Arc<MockShellBrowser>,
+        navigate_calls: Arc<Mutex<Vec<(isize, PathBuf)>>>,
+        new_tab_calls: Arc<Mutex<Vec<(isize, PathBuf, u32)>>>,
         picker: Arc<MockFolderPicker>,
         file_op: Arc<MockFileOp>,
         clipboard: Arc<MockClipboard>,
@@ -1927,7 +1905,8 @@ mod tests {
 
     fn mk_deps() -> TestDeps {
         TestDeps {
-            shell: Arc::new(MockShellBrowser::default()),
+            navigate_calls: Arc::default(),
+            new_tab_calls: Arc::default(),
             picker: Arc::new(MockFolderPicker::default()),
             file_op: Arc::new(MockFileOp::default()),
             clipboard: Arc::new(MockClipboard::default()),
@@ -1936,10 +1915,14 @@ mod tests {
     }
 
     fn make_test_state(deps: &TestDeps, config: Option<Config>) -> ToolbarState {
+        let shell = MockShellBrowser {
+            navigate_calls: Arc::clone(&deps.navigate_calls),
+            new_tab_calls: Arc::clone(&deps.new_tab_calls),
+        };
         ToolbarState::with_deps(
             96,
             config,
-            Box::new(ShellArc(deps.shell.clone())),
+            Box::new(shell),
             Box::new(PickerArc(deps.picker.clone())),
             deps.file_op.clone() as Arc<dyn FileOperator>,
             Box::new(ClipArc(deps.clipboard.clone())),
@@ -2016,10 +1999,10 @@ mod tests {
             },
         );
 
-        let calls = deps.shell.navigate_calls.lock().unwrap();
+        let calls = deps.navigate_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, PathBuf::from("C:\\Downloads"));
-        assert_eq!(deps.shell.new_tab_calls.lock().unwrap().len(), 0);
+        assert_eq!(deps.new_tab_calls.lock().unwrap().len(), 0);
     }
 
     #[test]
@@ -2041,10 +2024,10 @@ mod tests {
             },
         );
 
-        let calls = deps.shell.new_tab_calls.lock().unwrap();
+        let calls = deps.new_tab_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].2, 750);
-        assert_eq!(deps.shell.navigate_calls.lock().unwrap().len(), 0);
+        assert_eq!(deps.navigate_calls.lock().unwrap().len(), 0);
     }
 
     #[test]
