@@ -210,7 +210,7 @@ unsafe extern "system" fn foreground_event_proc(
         // own popup menu / rename edit / folder picker. Keep visible.
     } else if let Some(tb) = tb_opt {
         unsafe {
-            let _ = ShowWindow(tb, SW_HIDE);
+            crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
         }
     }
 }
@@ -218,11 +218,11 @@ unsafe extern "system" fn foreground_event_proc(
 fn show_above(toolbar: HWND, _explorer: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
     unsafe {
-        let _ = ShowWindow(toolbar, SW_SHOWNA);
+        crate::warn_on_err!(ShowWindow(toolbar, SW_SHOWNA).ok());
         // Use HWND_TOPMOST so the toolbar stays above Explorer reliably.
         // When a non-Explorer app is foreground, the toolbar is hidden entirely,
         // so topmost won't intrude on other applications.
-        let _ = SetWindowPos(
+        crate::warn_on_err!(SetWindowPos(
             toolbar,
             Some(HWND_TOPMOST),
             0,
@@ -230,7 +230,7 @@ fn show_above(toolbar: HWND, _explorer: HWND) {
             0,
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
+        ));
     }
 }
 
@@ -240,7 +240,7 @@ fn update_toolbar_visibility(toolbar: HWND) {
     let fg = unsafe { GetForegroundWindow() };
     if !hwnd_in_our_process(fg) {
         unsafe {
-            let _ = ShowWindow(toolbar, SW_HIDE);
+            crate::warn_on_err!(ShowWindow(toolbar, SW_HIDE).ok());
         }
     }
 }
@@ -405,7 +405,7 @@ impl ToolbarState {
                         hwndTrack: hwnd,
                         dwHoverTime: 0,
                     };
-                    let _ = unsafe { TrackMouseEvent(&mut tme) };
+                    crate::warn_on_err!(unsafe { TrackMouseEvent(&mut tme) });
                     self.mouse_tracking_started = true;
                 }
             }
@@ -424,7 +424,7 @@ impl ToolbarState {
                     self.self_release_pending = true;
                 }
                 unsafe {
-                    let _ = ReleaseCapture();
+                    crate::warn_on_err!(ReleaseCapture());
                 }
             }
             CancelInlineRename => cancel_inline_rename(),
@@ -832,7 +832,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 clamp_to_work_area(current_rect.left, current_rect.top, w, h, Some(hwnd));
 
             unsafe {
-                let _ = SetWindowPos(
+                crate::warn_on_err!(SetWindowPos(
                     hwnd,
                     None,
                     final_x,
@@ -840,7 +840,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     w,
                     h,
                     SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+                ));
             }
 
             // Apply layered window transparency
@@ -860,7 +860,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             } else {
                 log::info!("toolbar create: fg class={class}, hiding");
                 unsafe {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
+                    crate::warn_on_err!(ShowWindow(hwnd, SW_HIDE).ok());
                 }
             }
 
@@ -1150,7 +1150,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     let _ = ReleaseDC(Some(hwnd), hdc);
                 }
                 unsafe {
-                    let _ = SetWindowPos(
+                    crate::warn_on_err!(SetWindowPos(
                         hwnd,
                         None,
                         0,
@@ -1160,7 +1160,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         SWP_NOZORDER
                             | SWP_NOACTIVATE
                             | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE,
-                    );
+                    ));
                     let _ = InvalidateRect(Some(hwnd), None, true);
                 }
             }
@@ -1191,7 +1191,7 @@ fn apply_opacity(hwnd: HWND, state: &ToolbarState) {
     let opacity = state.config.as_ref().map_or(0.8, |c| c.background_opacity);
     let alpha = (opacity.clamp(0.0, 1.0) * 255.0) as u8;
     unsafe {
-        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
+        crate::warn_on_err!(SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA));
     }
 }
 
@@ -1358,7 +1358,7 @@ pub fn refresh_toolbar(hwnd: HWND) {
         let _ = ReleaseDC(Some(hwnd), hdc);
     }
     unsafe {
-        let _ = SetWindowPos(
+        crate::warn_on_err!(SetWindowPos(
             hwnd,
             None,
             0,
@@ -1366,7 +1366,7 @@ pub fn refresh_toolbar(hwnd: HWND) {
             w,
             h,
             SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE,
-        );
+        ));
         let _ = InvalidateRect(Some(hwnd), None, true);
     }
 }
@@ -1556,7 +1556,7 @@ fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, in
     }));
     unsafe {
         use windows::Win32::UI::Shell::SetWindowSubclass;
-        let _ = SetWindowSubclass(edit, Some(rename_subclass_proc), 1, data as usize);
+        crate::warn_on_err!(SetWindowSubclass(edit, Some(rename_subclass_proc), 1, data as usize).ok());
     }
 
     *RENAME_STATE.lock().unwrap() = Some(RenameState {
@@ -1621,7 +1621,9 @@ fn commit_rename(edit: HWND, ref_data: usize) {
 
     if let Some(mut cfg) = crate::config::Config::load() {
         cfg.rename_folder(data.folder_index, text);
-        let _ = cfg.save();
+        if let Err(e) = cfg.save() {
+            log::error!("commit_rename: save failed: {e}");
+        }
     }
 
     destroy_rename_edit(edit);
