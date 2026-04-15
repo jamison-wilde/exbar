@@ -1737,3 +1737,316 @@ fn cancel_inline_rename() {
         }
     }
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clipboard::Clipboard;
+    use crate::config::{Config, ConfigStore, FolderEntry};
+    use crate::dragdrop::FileOperator;
+    use crate::error::ExbarResult;
+    use crate::layout::{ButtonLayout, Rect};
+    use crate::picker::FolderPicker;
+    use crate::pointer;
+    use crate::shell_windows::ShellBrowser;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use windows::Win32::Foundation::HWND;
+
+    // ── Mocks ────────────────────────────────────────────────────────────
+
+    // HWND contains *mut c_void which is !Send + !Sync, so we store the raw
+    // value as isize (which is Send + Sync) and re-wrap on the way out.
+    #[derive(Default)]
+    struct MockShellBrowser {
+        navigate_calls: Mutex<Vec<(isize, PathBuf)>>,
+        new_tab_calls: Mutex<Vec<(isize, PathBuf, u32)>>,
+        /// Active explorer stored as isize so the struct is Send + Sync.
+        active: Mutex<Option<isize>>,
+    }
+    // SAFETY: tests run single-threaded; the isize values are never
+    // dereferenced as pointers — they are opaque identifiers only.
+    unsafe impl Send for MockShellBrowser {}
+    unsafe impl Sync for MockShellBrowser {}
+
+    impl ShellBrowser for MockShellBrowser {
+        fn navigate(&self, explorer: HWND, path: &Path) -> ExbarResult<()> {
+            self.navigate_calls
+                .lock()
+                .unwrap()
+                .push((explorer.0 as isize, path.to_path_buf()));
+            Ok(())
+        }
+        fn open_in_new_tab(&self, explorer: HWND, path: &Path, timeout_ms: u32) {
+            self.new_tab_calls
+                .lock()
+                .unwrap()
+                .push((explorer.0 as isize, path.to_path_buf(), timeout_ms));
+        }
+        fn active_explorer(&self) -> Option<HWND> {
+            self.active
+                .lock()
+                .unwrap()
+                .map(|v| HWND(v as *mut _))
+        }
+        fn set_active_explorer(&self, hwnd: HWND) {
+            *self.active.lock().unwrap() = Some(hwnd.0 as isize);
+        }
+    }
+
+    #[derive(Default)]
+    struct MockFolderPicker {
+        next_result: Mutex<Option<PathBuf>>,
+        calls: Mutex<u32>,
+    }
+    impl FolderPicker for MockFolderPicker {
+        fn pick_folder(&self) -> Option<PathBuf> {
+            *self.calls.lock().unwrap() += 1;
+            self.next_result.lock().unwrap().clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct MockFileOp {
+        move_calls: Mutex<Vec<(Vec<PathBuf>, PathBuf)>>,
+        copy_calls: Mutex<Vec<(Vec<PathBuf>, PathBuf)>>,
+    }
+    impl FileOperator for MockFileOp {
+        fn move_items(&self, sources: &[PathBuf], target: &Path) -> ExbarResult<()> {
+            self.move_calls
+                .lock()
+                .unwrap()
+                .push((sources.to_vec(), target.to_path_buf()));
+            Ok(())
+        }
+        fn copy_items(&self, sources: &[PathBuf], target: &Path) -> ExbarResult<()> {
+            self.copy_calls
+                .lock()
+                .unwrap()
+                .push((sources.to_vec(), target.to_path_buf()));
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockClipboard {
+        set_text_calls: Mutex<Vec<String>>,
+    }
+    impl Clipboard for MockClipboard {
+        fn set_text(&self, text: &str) -> ExbarResult<()> {
+            self.set_text_calls.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockConfigStore {
+        load_value: Mutex<Option<Config>>,
+        save_calls: Mutex<Vec<Config>>,
+    }
+    impl ConfigStore for MockConfigStore {
+        fn load(&self) -> Option<Config> {
+            self.load_value.lock().unwrap().clone()
+        }
+        fn save(&self, config: &Config) -> ExbarResult<()> {
+            self.save_calls.lock().unwrap().push(config.clone());
+            Ok(())
+        }
+    }
+
+    // Newtypes to bridge Arc<Concrete> → Box<dyn Trait>.
+    struct ShellArc(Arc<MockShellBrowser>);
+    // SAFETY: see MockShellBrowser's unsafe impl above.
+    unsafe impl Send for ShellArc {}
+    unsafe impl Sync for ShellArc {}
+    impl ShellBrowser for ShellArc {
+        fn navigate(&self, e: HWND, p: &Path) -> ExbarResult<()> { self.0.navigate(e, p) }
+        fn open_in_new_tab(&self, e: HWND, p: &Path, t: u32) { self.0.open_in_new_tab(e, p, t) }
+        fn active_explorer(&self) -> Option<HWND> { self.0.active_explorer() }
+        fn set_active_explorer(&self, h: HWND) { self.0.set_active_explorer(h) }
+    }
+    struct PickerArc(Arc<MockFolderPicker>);
+    impl FolderPicker for PickerArc {
+        fn pick_folder(&self) -> Option<PathBuf> { self.0.pick_folder() }
+    }
+    struct ClipArc(Arc<MockClipboard>);
+    impl Clipboard for ClipArc {
+        fn set_text(&self, t: &str) -> ExbarResult<()> { self.0.set_text(t) }
+    }
+    struct CfgArc(Arc<MockConfigStore>);
+    impl ConfigStore for CfgArc {
+        fn load(&self) -> Option<Config> { self.0.load() }
+        fn save(&self, c: &Config) -> ExbarResult<()> { self.0.save(c) }
+    }
+
+    struct TestDeps {
+        shell: Arc<MockShellBrowser>,
+        picker: Arc<MockFolderPicker>,
+        file_op: Arc<MockFileOp>,
+        clipboard: Arc<MockClipboard>,
+        cfg_store: Arc<MockConfigStore>,
+    }
+
+    fn mk_deps() -> TestDeps {
+        TestDeps {
+            shell: Arc::new(MockShellBrowser::default()),
+            picker: Arc::new(MockFolderPicker::default()),
+            file_op: Arc::new(MockFileOp::default()),
+            clipboard: Arc::new(MockClipboard::default()),
+            cfg_store: Arc::new(MockConfigStore::default()),
+        }
+    }
+
+    fn make_test_state(deps: &TestDeps, config: Option<Config>) -> ToolbarState {
+        ToolbarState::with_deps(
+            96,
+            config,
+            Box::new(ShellArc(deps.shell.clone())),
+            Box::new(PickerArc(deps.picker.clone())),
+            deps.file_op.clone() as Arc<dyn FileOperator>,
+            Box::new(ClipArc(deps.clipboard.clone())),
+            Box::new(CfgArc(deps.cfg_store.clone())),
+        )
+    }
+
+    fn mk_add_button() -> ButtonLayout {
+        ButtonLayout {
+            rect: Rect { left: 0, top: 0, right: 40, bottom: 28 },
+            folder: FolderEntry { name: "+".into(), path: String::new(), icon: None },
+            is_add: true,
+        }
+    }
+
+    fn mk_folder_button(name: &str, path: &str, left: i32) -> ButtonLayout {
+        ButtonLayout {
+            rect: Rect { left, top: 0, right: left + 90, bottom: 28 },
+            folder: FolderEntry { name: name.into(), path: path.into(), icon: None },
+            is_add: false,
+        }
+    }
+
+    fn mk_config_with_folders(entries: &[(&str, &str)]) -> Config {
+        // Paths may contain backslashes; JSON-encode them so the parser
+        // doesn't see unescaped control characters.
+        let folders_json: Vec<String> = entries
+            .iter()
+            .map(|(n, p)| {
+                let escaped_path = p.replace('\\', "\\\\");
+                format!(r#"{{"name":"{n}","path":"{escaped_path}"}}"#)
+            })
+            .collect();
+        let json = format!(r#"{{"folders":[{}]}}"#, folders_json.join(","));
+        Config::from_str(&json).unwrap()
+    }
+
+    // ── Tests ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fire_folder_click_without_ctrl_calls_navigate_with_folder_path() {
+        let deps = mk_deps();
+        *deps.shell.active.lock().unwrap() = Some(42);
+        let cfg = mk_config_with_folders(&[("Downloads", "C:\\Downloads")]);
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.buttons = vec![
+            mk_add_button(),
+            mk_folder_button("Downloads", "C:\\Downloads", 42),
+        ];
+
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireFolderClick { folder_button: 0, ctrl: false },
+        );
+
+        let calls = deps.shell.navigate_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, PathBuf::from("C:\\Downloads"));
+        assert_eq!(deps.shell.new_tab_calls.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn fire_folder_click_with_ctrl_calls_open_in_new_tab_with_configured_timeout() {
+        let deps = mk_deps();
+        *deps.shell.active.lock().unwrap() = Some(42);
+        let cfg = Config::from_str(
+            r#"{"folders":[{"name":"D","path":"C:\\D"}],"newTabTimeoutMsZeroDisables":750}"#,
+        ).unwrap();
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.buttons = vec![
+            mk_add_button(),
+            mk_folder_button("D", "C:\\D", 42),
+        ];
+
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireFolderClick { folder_button: 0, ctrl: true },
+        );
+
+        let calls = deps.shell.new_tab_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].2, 750);
+        assert_eq!(deps.shell.navigate_calls.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn fire_add_click_when_picker_returns_some_appends_and_saves() {
+        let deps = mk_deps();
+        *deps.picker.next_result.lock().unwrap() = Some(PathBuf::from("C:\\NewFolder"));
+        *deps.cfg_store.load_value.lock().unwrap() = Some(mk_config_with_folders(&[]));
+
+        let mut state = make_test_state(&deps, None);
+        state.execute_pointer_command(HWND(std::ptr::dangling_mut()), pointer::PointerCommand::FireAddClick);
+
+        assert_eq!(*deps.picker.calls.lock().unwrap(), 1);
+        let saves = deps.cfg_store.save_calls.lock().unwrap();
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0].folders.len(), 1);
+        assert_eq!(saves[0].folders[0].path, "C:\\NewFolder");
+    }
+
+    #[test]
+    fn fire_add_click_when_picker_returns_none_is_noop() {
+        let deps = mk_deps();
+        *deps.picker.next_result.lock().unwrap() = None;
+        let mut state = make_test_state(&deps, None);
+        state.execute_pointer_command(HWND(std::ptr::dangling_mut()), pointer::PointerCommand::FireAddClick);
+
+        assert_eq!(*deps.picker.calls.lock().unwrap(), 1);
+        assert_eq!(deps.cfg_store.save_calls.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn commit_reorder_loads_modifies_saves_via_config_store() {
+        let deps = mk_deps();
+        *deps.cfg_store.load_value.lock().unwrap() = Some(mk_config_with_folders(&[
+            ("A", "C:\\a"), ("B", "C:\\b"), ("C", "C:\\c"),
+        ]));
+
+        let mut state = make_test_state(&deps, None);
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::CommitReorder { from_folder: 0, to_folder: 3 },
+        );
+
+        let saves = deps.cfg_store.save_calls.lock().unwrap();
+        assert_eq!(saves.len(), 1);
+        let names: Vec<&str> = saves[0].folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["B", "C", "A"]);
+    }
+
+    #[test]
+    fn copy_folder_path_calls_clipboard_set_text_with_folder_path() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+        state.buttons = vec![
+            mk_add_button(),
+            mk_folder_button("Target", "C:\\Target", 42),
+        ];
+
+        copy_folder_path_to_clipboard(&mut state, 0);
+
+        let calls = deps.clipboard.set_text_calls.lock().unwrap();
+        assert_eq!(*calls, vec!["C:\\Target".to_string()]);
+    }
+}
