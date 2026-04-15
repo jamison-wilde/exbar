@@ -14,6 +14,7 @@ pub mod layout;
 pub mod log;
 pub mod navigate;
 pub mod picker;
+pub mod pointer;
 pub mod shell_windows;
 pub mod theme;
 pub mod toolbar;
