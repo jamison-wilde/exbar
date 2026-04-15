@@ -14,7 +14,7 @@ use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Controls::{WC_EDITW, WM_MOUSELEAVE};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    GetCapture, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DLGC_WANTALLKEYS, DefWindowProcW,
@@ -32,6 +32,7 @@ use windows_core::PCWSTR;
 use crate::config::{Config, FolderEntry, Orientation};
 use crate::hit_test;
 use crate::layout::{self, ButtonLayout, LayoutInput};
+use crate::pointer;
 use crate::theme;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -361,6 +362,13 @@ struct ToolbarState {
     /// Logical pixel size of the grip (already includes DPI scale factor).
     grip_size: i32,
     reorder: Option<ReorderState>,
+    // SP2b additions (Task 6) — wired up by Task 7:
+    #[allow(dead_code)]
+    pointer: pointer::PointerState,
+    #[allow(dead_code)]
+    mouse_tracking_started: bool,
+    #[allow(dead_code)]
+    self_release_pending: bool,
 }
 
 impl ToolbarState {
@@ -379,6 +387,99 @@ impl ToolbarState {
             drop_registered: false,
             grip_size: theme::scale(GRIP_SIZE, dpi),
             reorder: None,
+            // SP2b:
+            pointer: pointer::PointerState::default(),
+            mouse_tracking_started: false,
+            self_release_pending: false,
+        }
+    }
+}
+
+// ── SP2b pointer adapter methods ─────────────────────────────────────────────
+
+impl ToolbarState {
+    #[allow(dead_code)] // Used by Task 7's rewritten WM handlers.
+    fn apply_pointer_event(&mut self, hwnd: HWND, event: pointer::PointerEvent) {
+        let (new_state, commands) =
+            pointer::transition(std::mem::take(&mut self.pointer), event);
+        self.pointer = new_state;
+        for cmd in commands {
+            self.execute_pointer_command(hwnd, cmd);
+        }
+    }
+
+    #[allow(dead_code)]
+    fn execute_pointer_command(
+        &mut self,
+        hwnd: HWND,
+        cmd: pointer::PointerCommand,
+    ) {
+        use pointer::PointerCommand::*;
+        match cmd {
+            Redraw => unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            },
+            StartMouseTracking => {
+                if !self.mouse_tracking_started {
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = unsafe { TrackMouseEvent(&mut tme) };
+                    self.mouse_tracking_started = true;
+                }
+            }
+            CaptureMouse => unsafe {
+                let _ = SetCapture(hwnd);
+            },
+            ReleaseMouse => {
+                // Only set the pending flag if we actually hold capture —
+                // else ReleaseCapture won't fire WM_CAPTURECHANGED and the
+                // flag would strand.
+                let we_have_capture = unsafe { GetCapture() } == hwnd;
+                if we_have_capture {
+                    self.self_release_pending = true;
+                }
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+            }
+            CancelInlineRename => cancel_inline_rename(),
+            FireAddClick => {
+                if let Some(path) = crate::picker::pick_folder() {
+                    append_folder_and_reload(&path);
+                }
+            }
+            FireFolderClick { folder_button, ctrl } => {
+                // folder_button is in folder-index space; buttons[0] is the + button.
+                let btn_slot = folder_button + 1;
+                if btn_slot < self.buttons.len() {
+                    let path = self.buttons[btn_slot].folder.path.clone();
+                    if ctrl {
+                        let timeout = self
+                            .config
+                            .as_ref()
+                            .map(|c| c.new_tab_timeout_ms_zero_disables)
+                            .unwrap_or(500);
+                        crate::navigate::open_in_new_tab(
+                            get_active_explorer(),
+                            &path,
+                            timeout,
+                        );
+                    } else if let Some(explorer_hwnd) = get_active_explorer()
+                        && let Some(sb) = unsafe {
+                            crate::shell_windows::get_shell_browser_for(explorer_hwnd)
+                        }
+                    {
+                        let _ = crate::navigate::navigate_to(&sb, &path);
+                    }
+                }
+            }
+            CommitReorder { from_folder, to_folder } => {
+                commit_reorder(hwnd, from_folder, to_folder);
+            }
         }
     }
 }
