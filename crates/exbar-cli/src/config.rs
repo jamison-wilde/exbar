@@ -150,6 +150,40 @@ pub fn is_shell_alias(path: &str) -> bool {
     path.starts_with("shell:")
 }
 
+// ── SP3: ConfigStore trait ──────────────────────────────────────────────────
+
+use crate::error::{ExbarError, ExbarResult};
+
+pub trait ConfigStore: Send + Sync {
+    fn load(&self) -> Option<Config>;
+    fn save(&self, config: &Config) -> ExbarResult<()>;
+}
+
+/// Production `ConfigStore` that reads/writes `~/.exbar.json`.
+#[derive(Default)]
+#[allow(dead_code)]
+pub struct JsonFileStore;
+
+impl JsonFileStore {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ConfigStore for JsonFileStore {
+    fn load(&self) -> Option<Config> {
+        Config::load_from_path(&default_config_path())
+    }
+
+    fn save(&self, config: &Config) -> ExbarResult<()> {
+        let path = default_config_path();
+        config
+            .save_to_path(&path)
+            .map_err(|e| ExbarError::io(&path, e))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
