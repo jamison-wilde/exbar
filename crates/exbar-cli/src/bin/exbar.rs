@@ -19,7 +19,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::core::PCWSTR;
 
-use exbar_cli::log;
+use exbar_cli::log as exbar_log;
 use exbar_cli::toolbar;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
@@ -196,6 +196,13 @@ fn run_hook() -> WinResult<()> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
 
+    // Initialise file logger from config (falls back to Info if config absent).
+    let log_level = exbar_cli::config::Config::load()
+        .as_ref()
+        .map(|c| c.log_level)
+        .unwrap_or_default();
+    exbar_log::init(log_level);
+
     // Install the foreground event hook. Because WINEVENT_OUTOFCONTEXT
     // marshals callbacks to the thread that installed the hook (provided
     // that thread has a message pump), our GetMessage loop below will
@@ -205,7 +212,7 @@ fn run_hook() -> WinResult<()> {
     // The first CabinetWClass foreground event triggers toolbar creation
     // inside foreground_event_proc.
     toolbar::install_foreground_hook();
-    log::info("run_hook: foreground hook installed; entering message pump");
+    log::info!("run_hook: foreground hook installed; entering message pump");
 
     // Message pump — runs indefinitely.
     let mut msg = MSG::default();

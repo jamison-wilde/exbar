@@ -262,7 +262,7 @@ pub fn install_foreground_hook() {
         )
     };
     *FOREGROUND_HOOK.lock().unwrap() = Some(hook.0 as isize);
-    crate::log::info("Installed foreground event hook");
+    log::info!("Installed foreground event hook");
 }
 
 // ── Position persistence ──────────────────────────────────────────────────────
@@ -855,12 +855,10 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 get_active_explorer().unwrap_or_else(|| unsafe { GetForegroundWindow() });
             let class = crate::explorer::get_class_name(explorer_hwnd);
             if class == "CabinetWClass" {
-                crate::log::info(&format!(
-                    "toolbar create: showing above explorer={explorer_hwnd:?}"
-                ));
+                log::info!("toolbar create: showing above explorer={explorer_hwnd:?}");
                 show_above(hwnd, explorer_hwnd);
             } else {
-                crate::log::info(&format!("toolbar create: fg class={class}, hiding"));
+                log::info!("toolbar create: fg class={class}, hiding");
                 unsafe {
                     let _ = ShowWindow(hwnd, SW_HIDE);
                 }
@@ -870,7 +868,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         }
 
         WM_DESTROY => {
-            crate::log::info("toolbar: WM_DESTROY — exiting process");
+            log::info!("toolbar: WM_DESTROY — exiting process");
             clear_global_toolbar();
             cancel_inline_rename();
             let _ = crate::dragdrop::unregister_drop_target(hwnd);
@@ -1243,7 +1241,7 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
 
     if crate::dragdrop::register_drop_target(hwnd, Box::new(resolver)).is_ok() {
         state.drop_registered = true;
-        crate::log::info("Registered OLE drop target on toolbar");
+        log::info!("Registered OLE drop target on toolbar");
     }
 }
 
@@ -1275,7 +1273,7 @@ pub fn create_toolbar(
     let dpi = theme::get_dpi(owner);
     let config = Config::load();
     let is_dark = theme::is_dark_mode();
-    crate::log::info(&format!("create_toolbar: dark_mode={is_dark}"));
+    log::info!("create_toolbar: dark_mode={is_dark}");
 
     let state = Box::new(ToolbarState::new(dpi, config));
     let state_ptr = Box::into_raw(state);
@@ -1296,7 +1294,7 @@ pub fn create_toolbar(
     x = clamped.0;
     y = clamped.1;
 
-    crate::log::info(&format!("create_toolbar: screen x={x} y={y}"));
+    log::info!("create_toolbar: screen x={x} y={y}");
 
     // Create as a TOP-LEVEL popup (no owner) so it survives individual
     // Explorer window closures. The `owner` HWND is used for monitor
@@ -1391,7 +1389,7 @@ pub(crate) fn append_folder_and_reload(path: &std::path::Path) {
     });
     cfg.add_folder(name, path_str);
     if let Err(e) = cfg.save() {
-        crate::log::error(&format!("append_folder_and_reload: save failed: {e}"));
+        log::error!("append_folder_and_reload: save failed: {e}");
         return;
     }
 
@@ -1467,7 +1465,7 @@ fn commit_reorder(hwnd: HWND, from: usize, to: usize) {
     };
     cfg.move_folder(from, to);
     if let Err(e) = cfg.save() {
-        crate::log::error(&format!("commit_reorder: save failed: {e}"));
+        log::error!("commit_reorder: save failed: {e}");
         return;
     }
     unsafe {
@@ -1487,7 +1485,7 @@ fn remove_folder_at(hwnd: HWND, index: usize) {
     let folder_index = index - 1;
     cfg.remove_folder(folder_index);
     if let Err(e) = cfg.save() {
-        crate::log::error(&format!("remove_folder_at: save failed: {e}"));
+        log::error!("remove_folder_at: save failed: {e}");
         return;
     }
     unsafe {

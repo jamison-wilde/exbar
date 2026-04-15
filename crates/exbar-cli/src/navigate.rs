@@ -79,7 +79,7 @@ pub fn open_in_new_tab(target_explorer: Option<HWND>, path: &str, timeout_ms: u3
     let start = std::time::Instant::now();
     loop {
         if start.elapsed() >= std::time::Duration::from_millis(timeout_ms as u64) {
-            crate::log::info("open_in_new_tab: timeout → falling back to new window");
+            log::info!("open_in_new_tab: timeout → falling back to new window");
             open_in_new_window(path);
             return;
         }
@@ -88,7 +88,7 @@ pub fn open_in_new_tab(target_explorer: Option<HWND>, path: &str, timeout_ms: u3
         for (hwnd, browser) in current {
             if !before.contains(&hwnd) {
                 if let Err(e) = navigate_to(&browser, path) {
-                    crate::log::error(&format!("open_in_new_tab: BrowseObject failed: {e}"));
+                    log::error!("open_in_new_tab: BrowseObject failed: {e}");
                     open_in_new_window(path);
                 }
                 return;

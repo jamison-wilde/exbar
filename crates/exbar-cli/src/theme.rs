@@ -32,12 +32,12 @@ pub fn is_dark_mode() -> bool {
         // data == 0 means dark mode; data == 1 means light mode
         let dark = result.is_ok() && data == 0;
         #[cfg(not(test))]
-        crate::log::info(&format!(
+        log::info!(
             "theme: AppsUseLightTheme registry read ok={} raw_value={} dark_mode={}",
             result.is_ok(),
             data,
             dark
-        ));
+        );
         dark
     })
 }

@@ -378,7 +378,7 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
                     unsafe { *pdweffect = dropeffect };
                 }
                 let target_str = target_path.to_string_lossy();
-                crate::log::info(&format!("drop: target={target_str:?} effect={effect:?}"));
+                log::info!("drop: target={target_str:?} effect={effect:?}");
                 unsafe { execute_drop(data_obj, dropeffect, &target_str) }
             }
             Some(DropAction::AddFolder) => {
@@ -391,7 +391,7 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
                 }
                 if let Some(folder) = unsafe { first_path_from_data_object(data_obj) } {
                     let pb = std::path::PathBuf::from(&folder);
-                    crate::log::info(&format!("drop: add-folder {folder:?}"));
+                    log::info!("drop: add-folder {folder:?}");
                     crate::toolbar::append_folder_and_reload(&pb);
                 }
                 if !pdweffect.is_null() {
