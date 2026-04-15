@@ -1736,9 +1736,11 @@ fn destroy_rename_edit(edit: HWND) {
     }
 }
 
-/// WM_DESTROY hook — emit a Cancelled event so the controller cleans up
-/// any in-flight rename. The transition table guarantees this is a noop
-/// when no rename is active.
+/// Emit a Cancelled event so the controller cleans up any in-flight
+/// rename. Called from WM_DESTROY (parent teardown) and from the pointer
+/// state machine's `CancelInlineRename` command (e.g., right-click on
+/// another button while editing). The transition table guarantees this
+/// is a noop when no rename is active.
 fn cancel_inline_rename(state: &mut ToolbarState, toolbar: HWND) {
     state.execute_rename_event(toolbar, RenameEvent::Cancelled);
 }
