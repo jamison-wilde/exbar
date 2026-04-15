@@ -12,27 +12,38 @@ Orientation for AI coding tools working in this repo.
 exbar/
 ├── Cargo.toml                          # workspace
 ├── crates/
-│   └── exbar-cli/                      # single binary
-│       ├── Cargo.toml
+│   └── exbar-cli/                      # lib + bin (one binary)
+│       ├── Cargo.toml                  # [lints.rust]/[clippy]/[rustdoc] gates
 │       ├── build.rs                    # winres version metadata
 │       ├── src/
-│       │   ├── main.rs                 # CLI + run_hook() with WinEvent + message pump
-│       │   ├── toolbar.rs              # Owner-drawn floating popup (the main UI)
-│       │   ├── dragdrop.rs             # IDropTarget — move/copy + add-to-config
-│       │   ├── navigate.rs             # IShellBrowser::BrowseObject + open_in_new_tab
-│       │   ├── shell_windows.rs        # IShellWindows enumeration helpers
+│       │   ├── lib.rs                  # Crate-level rustdoc + pub mod declarations
+│       │   ├── bin/
+│       │   │   └── exbar.rs            # CLI entry + run_hook() with WinEvent + message pump
+│       │   ├── toolbar.rs              # ToolbarState, wndproc, owner-drawn popup, install_foreground_hook
+│       │   │                           # Adapters: execute_pointer_command, execute_rename_event
+│       │   ├── pointer.rs              # Pure pointer-interaction state machine (SP2b)
+│       │   ├── rename.rs               # Pure inline-rename state machine (SP6)
+│       │   ├── layout.rs               # Pure button-layout computation (SP2a)
+│       │   ├── hit_test.rs             # Pure point-in-button hit testing (SP2a)
+│       │   ├── drop_effect.rs          # Pure drag-drop effect determination (SP2a)
+│       │   ├── dragdrop.rs             # IDropTarget + FileOperator trait (SP3)
+│       │   ├── shell_windows.rs        # IShellWindows enum + ShellBrowser trait (SP3)
 │       │   ├── explorer.rs             # check_explorer_ready, class-name walking
-│       │   ├── picker.rs               # IFileOpenDialog wrapper
+│       │   ├── picker.rs               # FolderPicker trait (IFileOpenDialog) (SP3)
+│       │   ├── clipboard.rs            # Clipboard trait (CF_UNICODETEXT) (SP3)
 │       │   ├── contextmenu.rs          # TrackPopupMenu wrapper
-│       │   ├── config.rs               # ~/.exbar.json load/save/mutation
+│       │   ├── config.rs               # Config + ConfigStore trait (SP3) — ~/.exbar.json
 │       │   ├── theme.rs                # DPI scale, dark-mode detection
-│       │   └── log.rs                  # %TEMP%\exbar.log writer
+│       │   ├── error.rs                # ExbarError + ExbarResult (SP5)
+│       │   └── log.rs                  # FileLogger (log crate) → %TEMP%\exbar.log (SP5)
 │       ├── tests/                      # integration tests
 │       └── wix/
 │           └── main.wxs                # WiX v4 installer definition
 ├── scripts/
-│   └── build-msi.sh                    # invokes `wix build`
+│   ├── build-msi.sh                    # invokes `wix build`
+│   └── doc-check.sh                    # RUSTDOCFLAGS="-D warnings" cargo doc gate (SP7)
 ├── docs/
+│   ├── adrs/                           # Architecture Decision Records (SP7)
 │   └── superpowers/
 │       ├── specs/                      # design docs
 │       └── plans/                      # implementation plans
@@ -44,10 +55,11 @@ exbar/
 All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` in git-bash).
 
 - **Build:** `cargo build` (dev) or `cargo build --release`
-- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`)
+- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 140 tests across 17 modules
 - **Build only the CLI:** `cargo build --release -p exbar-cli` (faster iteration)
 - **Run the CLI:** `./target/release/exbar.exe <install|uninstall|status|hook>`
 - **Build MSI:** `./scripts/build-msi.sh` (requires WiX v7 installed — see "MSI installer" section)
+- **Doc gate:** `./scripts/doc-check.sh` — runs `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace`; catches broken intra-doc links
 - **CLI subcommands**: `hook` (production, started by Run key), `status` (diagnostics). `install` and `uninstall` are dev-only fallbacks; end users use the MSI.
 
 ## Architecture
@@ -73,9 +85,10 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
 
 ### Navigation
 
-- Per-click, we look up the most-recently-activated Explorer via `ACTIVE_EXPLORER` (static Mutex in `toolbar.rs`)
-- `hook::get_shell_browser_for(hwnd)` enumerates `IShellWindows` to get a fresh `IShellBrowser` for that window (never stored — always obtained fresh to avoid stale COM references)
-- `navigate::navigate_to` calls `SHParseDisplayName` → `IShellBrowser::BrowseObject(pidl, SBSP_SAMEBROWSER)`
+- Per-click, we look up the most-recently-activated Explorer via `state.active_explorer` (field on `ToolbarState`; set by `foreground_event_proc`)
+- `shell_windows::get_shell_browser_for(hwnd)` enumerates `IShellWindows` to get a fresh `IShellBrowser` for that window (never stored — always obtained fresh to avoid stale COM references)
+- `Win32Shell::navigate` (the production impl of the `ShellBrowser` trait) calls `SHParseDisplayName` → `IShellBrowser::BrowseObject(pidl, SBSP_SAMEBROWSER)`
+- Click dispatch: `WM_LBUTTONUP` → `PointerEvent::Release` → `pointer::transition` returns a `PointerCommand::FireFolderClick` → `execute_pointer_command` calls `state.shell_browser.navigate(...)` or `state.shell_browser.open_in_new_tab(...)`. Tests use `MockShellBrowser`.
 
 ### Drag and drop
 
@@ -84,6 +97,40 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
 - Shell aliases (`shell:downloads`) are resolved to real paths via `SHParseDisplayName` + `SHGetPathFromIDListW` before comparing drive letters for the move/copy heuristic
 - Executes the drop via `IFileOperation` with `FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR`
 - Dispatches via `DropAction` enum: `MoveCopyTo(target)` for folder buttons, `AddFolder` for the `+` button (appends dropped directory to `~/.exbar.json`)
+
+### Pure controllers + Win32 adapters (SP2b, SP6)
+
+Pointer and rename interactions are split into pure state-machine modules and thin Win32 adapter methods on `ToolbarState`. See `docs/adrs/ADR-0003-pure-controller-adapter-pattern.md`.
+
+- `pointer.rs` — `PointerState`, `PointerEvent`, `PointerCommand`, `transition(state, event) → (state, Vec<command>)`. No Win32.
+- `rename.rs` — `RenameState`, `RenameEvent`, `RenameAction`, `transition(...)`. No Win32.
+- `toolbar.rs::execute_pointer_command` / `execute_rename_event` — the adapters. Translate `WM_*` messages to events, call `transition`, dispatch returned commands against Win32 + trait seams.
+
+Future interaction subsystems (context-menu controller, drag-reorder commit, etc.) should follow the same split.
+
+### Trait seams (SP3)
+
+All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` for mock-driven testability. See `docs/adrs/ADR-0004-trait-seams-via-box-dyn.md`.
+
+| Trait | Production impl | Used for |
+|---|---|---|
+| `shell_windows::ShellBrowser` | `Win32Shell` | Explorer navigation (`BrowseObject`, `open_in_new_tab`) |
+| `picker::FolderPicker` | `Win32Picker` | `IFileOpenDialog` folder picker |
+| `dragdrop::FileOperator` | `Win32FileOp` | `IFileOperation` move/copy |
+| `clipboard::Clipboard` | `Win32Clipboard` | `OleClipboard` text writes |
+| `config::ConfigStore` | `JsonFileStore` | `~/.exbar.json` load/save |
+
+Tests in `toolbar.rs::tests` inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`.
+
+### Error handling (SP5)
+
+`crate::error::ExbarError` is the unified error type (`Win32`, `Io`, `Json`, `Config`). `ExbarResult<T> = Result<T, ExbarError>`. `warn_on_err!` macro logs-and-continues on `Result`s where panic-on-error isn't appropriate (most Win32 one-shot calls).
+
+Logging goes through the `log` crate — `log::info!` / `warn!` / `error!` / `debug!`. `FileLogger` in `log.rs` is the sink; verbosity comes from `Config.log_level`.
+
+### State ownership (SP4)
+
+All runtime state lives on `ToolbarState`, owned by the wndproc via `GWLP_USERDATA`. See `docs/adrs/ADR-0005-toolbar-state-over-statics.md`. The one surviving static is `GLOBAL_TOOLBAR: Mutex<Option<isize>>` — a thread-safe bootstrap entry for `WINEVENT_OUTOFCONTEXT` callbacks (which have no `&self`) to find the toolbar HWND; from there, `unsafe { toolbar_state(hwnd) }` recovers the pointer. The safety of that helper relies on the single-threaded message-pump invariant.
 
 ### Context menus and inline rename
 
@@ -95,7 +142,7 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
   - **Left-click** → navigate active Explorer via `IShellBrowser::BrowseObject`
   - **Ctrl+left-click** → `navigate::open_in_new_tab` — posts Ctrl+T to the active Explorer HWND, polls `IShellWindows` for up to `newTabTimeoutMsZeroDisables` ms looking for a newly-appeared HWND, navigates it; on timeout or `0` config, falls back to `ShellExecuteW("explorer.exe", "\"path\"")`
   - **Right-click** → `Open / Open in new tab / Copy path / --- / Rename / Remove`
-  - **Rename** spawns a child `EDIT` control (`start_inline_rename` in `toolbar.rs`) subclassed via `SetWindowSubclass` to intercept Enter (commit), Esc (cancel), `WM_KILLFOCUS` (commit). Empty commit keeps the old name via `Config::rename_folder`'s trim-empty guard
+  - **Rename** spawns a child `EDIT` control (`start_inline_rename` in `toolbar.rs`) subclassed via `SetWindowSubclass` (ref_data = toolbar HWND) to intercept Enter (commit), Esc (cancel), `WM_KILLFOCUS` (commit). The subclass proc translates Win32 messages to `RenameEvent`s and calls `state.execute_rename_event()`, which drives the pure `rename::transition` function in `rename.rs`. Empty commit keeps the old name via `Config::rename_folder`'s trim-empty guard.
 - The `contextmenu.rs` wrapper exposes `show_menu(owner, pt, items) -> u32` around `TrackPopupMenu` with `TPM_RETURNCMD`
 
 ## Gotchas
@@ -111,7 +158,7 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
 - **`WINEVENT_SKIPOWNPROCESS`**: do NOT set this flag on the foreground-window WinEvent hook. Most events we care about (Explorer activations) happen in explorer.exe itself.
 - **`newTabTimeoutMsZeroDisables` semantics**: config field controls ctrl-click-new-tab behavior. `0` disables the new-tab attempt entirely (always opens a new Explorer window). Any positive value is both the poll ceiling AND the trigger to try the tab path. Clamped to `0..=5000` during deserialization.
 - **Inline rename on layered window**: the `EDIT` control is a child of the `WS_EX_LAYERED` toolbar. If paint artifacts appear, replace the child-window approach with a small `CreateDialogIndirectParamW` modal keyed to the button's screen rect.
-- **Inline rename lifetime**: `Box<RenameSubclassData>` is leaked into `SetWindowSubclass`'s `ref_data`. `commit_rename` / `cancel_rename` reclaim via `Box::from_raw` after `RemoveWindowSubclass`. `cancel_inline_rename` (called on `WM_DESTROY`) reclaims the box via the pointer stashed in `RENAME_STATE`. Do NOT fall through to `DefSubclassProc` after a commit — the HWND has been destroyed.
+- **Inline rename ownership (post-SP6)**: `SetWindowSubclass`'s `ref_data` is the **toolbar HWND** (`usize`), not a leaked `Box`. The subclass proc reaches context (folder index, edit HWND) via `toolbar_state(toolbar).rename_state`. Commit/cancel flow through `state.execute_rename_event(RenameEvent::CommitRequested|Cancelled)` → `rename::transition` → adapter executes `ApplyRename` / `DestroyEdit` / `ReloadToolbar` actions. `destroy_rename_edit` calls `RemoveWindowSubclass` before `DestroyWindow` so the WM_DESTROY re-entry can't reach our subclass proc. Do NOT fall through to `DefSubclassProc` after the adapter clears `rename_state` — the HWND has been destroyed.
 - **Toolbar UI thread blocks during `open_in_new_tab`**: the poll sleeps up to `newTabTimeoutMsZeroDisables` ms on the toolbar's wndproc thread. Accepted trade-off for v0.2.0 simplicity; revisit with a worker-thread variant if it feels bad.
 - **Hook process must not show a console**: `exbar.exe hook` calls `FreeConsole()` at the start to detach from any inherited console. The MSI's post-install custom action otherwise opens a visible terminal window. Don't add `println!` calls in `run_hook()` after `FreeConsole` — they'll silently no-op.
 - **Process-name detection for the foreground hook**: `hwnd_in_our_process` checks PID against `std::process::id()` (exbar.exe). `hwnd_in_explorer_process` does an executable-name check (`explorer.exe`) via `GetModuleFileNameExW`. The combination keeps the toolbar visible over Explorer's own popups (tooltips, tree-views, Quick Access flyouts) while still hiding when a different app takes foreground.
@@ -172,7 +219,11 @@ wix extension add --global WixToolset.Util.wixext
 ## Adding a new feature
 
 1. All runtime behavior lives in `exbar-cli`; the WiX installer is purely for packaging
-2. Write/extend integration tests in `crates/exbar-cli/tests/` for pure logic; Windows-API-heavy code is tested manually via the build-deploy loop
-3. All UI pixel values must pass through `theme::scale(px, dpi)` — no hardcoded pixels
-4. All theme colors must branch on `theme::is_dark_mode()` — don't assume dark
-5. Catch panics at FFI boundaries with `std::panic::catch_unwind` (see `toolbar_wndproc_safe`)
+2. Prefer inline `#[cfg(test)] mod tests` over `tests/` — the post-SP1.5 lib/bin split makes inline tests the natural choice. Pure modules (`pointer`, `rename`, `layout`, `hit_test`, `drop_effect`, `config`, `error`) are fully unit-testable; Win32-touching code is tested via the trait seams + mocks in `toolbar.rs::tests`. Only truly Win32-API-heavy code (paint, wndproc dispatch) stays manual-smoke.
+3. For new state-machine logic, follow the SP2b/SP6 pattern: pure `transition()` module + thin `execute_*` adapter on `ToolbarState`. See ADR-0003.
+4. For new cross-process Win32 surfaces, follow the SP3 pattern: trait + `Win32*` impl + mock. See ADR-0004.
+5. All UI pixel values must pass through `theme::scale(px, dpi)` — no hardcoded pixels
+6. All theme colors must branch on `theme::is_dark_mode()` — don't assume dark
+7. Catch panics at FFI boundaries with `std::panic::catch_unwind` (see `toolbar_wndproc_safe`)
+8. Before pushing, run `cargo fmt && cargo clippy --all-targets && cargo test && ./scripts/doc-check.sh`. All four must pass.
+9. Architectural decisions worth preserving as future-reader context go in `docs/adrs/ADR-NNNN-*.md` using the Nygard template.

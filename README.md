@@ -4,7 +4,7 @@ A floating, configurable folder-shortcut toolbar for Windows 11 File Explorer. P
 
 ## Install
 
-1. Download `exbar-0.1.0-x64.msi` from the [latest release](https://github.com/YOUR_GITHUB_USERNAME/exbar/releases/latest).
+1. Download `exbar-0.3.0-x64.msi` from the [latest release](https://github.com/YOUR_GITHUB_USERNAME/exbar/releases/latest).
    <!-- TODO: replace YOUR_GITHUB_USERNAME with the actual GitHub username when the repo is published -->
 2. Double-click the MSI.
 3. Windows SmartScreen will warn you that the publisher is unrecognized (the installer is not yet signed). Click **More info** → **Run anyway**.
@@ -74,10 +74,7 @@ Your config file (`~\.exbar.json`) is preserved.
 ## Troubleshooting
 
 **The toolbar isn't appearing.**
-Check the log file at `%TEMP%\exbar.log`. If there are no recent entries about `ExbarCBTHook` or `try_inject`, the hook process isn't running. Launch it from Start menu → Exbar.
-
-**An app crashed shortly after I installed.**
-The DLL is designed to no-op in non-Explorer processes, but report it on GitHub Issues with the log file (`%TEMP%\exbar.log`) attached.
+Check the log file at `%TEMP%\exbar.log`. If the file is empty or the most recent entries are old, the hook process isn't running. Launch it from Start menu → Exbar. The log should show a line like `foreground event proc: installed ...` shortly after launch.
 
 **SmartScreen warning on install.**
 Expected — the MSI is not yet code-signed. Click "More info" → "Run anyway".
@@ -100,20 +97,20 @@ cargo build --release
 ./scripts/build-msi.sh
 ```
 
-Output: `target/wix/exbar-0.1.0-x64.msi`
+Output: `target/wix/exbar-0.3.0-x64.msi`
 
 Prerequisites:
 - [Rust toolchain](https://rustup.rs/) — requires the `x86_64-pc-windows-msvc` target (installed by default on Windows)
 - [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with the *Desktop development with C++* workload
 - [WiX Toolset v7](https://wixtoolset.org/) — install via `dotnet tool install --global wix`, then `wix eula accept wix7 && wix extension add --global WixToolset.Util.wixext`
 
-See `CLAUDE.md` for architecture notes and the live-iteration build loop.
+See `CLAUDE.md` for architecture notes and the live-iteration build loop. See `docs/adrs/` for the architectural decision records.
 
 </details>
 
 ## Status
 
-Early release (v0.1.0). Known caveats:
+Current release: v0.3.0. Known caveats:
 - Installer is unsigned (SmartScreen warning)
 - Icon support not yet implemented (folder emoji + label only)
 - Only tested on Win11, x86_64, single-user installs
