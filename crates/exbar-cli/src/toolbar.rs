@@ -16,14 +16,9 @@
 //!   drives the pure controllers and executes their returned commands
 //!   against Win32. See
 //!   `docs/adrs/ADR-0003-pure-controller-adapter-pattern.md`.
-//! - **[`install_foreground_hook`]** — the cross-process WinEvent hook
-//!   that creates / shows / hides the toolbar based on Explorer
-//!   foreground events.
-//! - **`GLOBAL_TOOLBAR`** — the single surviving module-level static.
-//!   It exists because `WINEVENT_OUTOFCONTEXT` callbacks have no
-//!   `&self`; they need a thread-safe entry point to find the toolbar
-//!   HWND. From the HWND, `toolbar_state(hwnd)` recovers a pointer to
-//!   `ToolbarState`.
+//!
+//! Foreground-window tracking, the WinEvent hook, and `GLOBAL_TOOLBAR`
+//! live in [`crate::visibility`].
 //!
 //! ## Threading
 //!
@@ -33,7 +28,6 @@
 //! for soundness — it does not lock.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::Mutex;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -41,7 +35,6 @@ use windows::Win32::Graphics::Gdi::{
     PAINTSTRUCT, ReleaseDC, ScreenToClient, SelectObject,
 };
 use windows::Win32::System::SystemServices::MK_CONTROL;
-use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -50,7 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, DefWindowProcW,
     GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW,
     HTCAPTION, PostMessageW,
-    SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SW_HIDE, SWP_NOZORDER, SWP_NOACTIVATE,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED,
     WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP,
@@ -126,199 +119,6 @@ const MENU_ID_OPEN_NEW_TAB: u32 = 202;
 const MENU_ID_COPY_PATH: u32 = 203;
 const MENU_ID_RENAME: u32 = 204;
 const MENU_ID_REMOVE: u32 = 205;
-
-// ── Global state ──────────────────────────────────────────────────────────────
-
-/// The single global toolbar HWND (None if not yet created or destroyed).
-static GLOBAL_TOOLBAR: Mutex<Option<isize>> = Mutex::new(None);
-
-pub(crate) fn set_global_toolbar(hwnd: HWND) {
-    *GLOBAL_TOOLBAR.lock().unwrap() = Some(hwnd.0 as isize);
-}
-
-fn clear_global_toolbar() {
-    *GLOBAL_TOOLBAR.lock().unwrap() = None;
-}
-
-pub(crate) fn get_global_toolbar_hwnd() -> Option<HWND> {
-    GLOBAL_TOOLBAR.lock().unwrap().map(|h| HWND(h as *mut _))
-}
-
-// ── Foreground window tracking ───────────────────────────────────────────────
-
-const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
-const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
-const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
-const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
-
-/// True if `hwnd` belongs to our own (exbar.exe) process — e.g., our toolbar,
-/// our popup menu, our rename edit, our folder picker dialog.
-fn hwnd_in_our_process(hwnd: HWND) -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
-    let mut pid: u32 = 0;
-    unsafe {
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    }
-    pid != 0 && pid == std::process::id()
-}
-
-/// True if `hwnd` belongs to any process whose executable filename is `explorer.exe`.
-/// Used by the foreground hook to keep the toolbar visible over Explorer's own
-/// popups (tooltips, tree-view pop-outs, Quick Access breadcrumb flyouts, etc.).
-fn hwnd_in_explorer_process(hwnd: HWND) -> bool {
-    hwnd_process_name_is(hwnd, "explorer.exe")
-}
-
-fn hwnd_process_name_is(hwnd: HWND, want: &str) -> bool {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
-
-    let mut pid: u32 = 0;
-    unsafe {
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    }
-    if pid == 0 {
-        return false;
-    }
-    let h = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
-    let mut buf = [0u16; 260];
-    let len = unsafe { GetModuleFileNameExW(Some(h), None, &mut buf) } as usize;
-    unsafe {
-        let _ = CloseHandle(h);
-    }
-    if len == 0 {
-        return false;
-    }
-    let path = String::from_utf16_lossy(&buf[..len]);
-    path.rsplit('\\')
-        .next()
-        .map(|name| name.eq_ignore_ascii_case(want))
-        .unwrap_or(false)
-}
-
-
-unsafe extern "system" fn foreground_event_proc(
-    _hook: HWINEVENTHOOK,
-    event: u32,
-    hwnd: HWND,
-    _id_object: i32,
-    _id_child: i32,
-    _thread: u32,
-    _time: u32,
-) {
-    let tb_opt = get_global_toolbar_hwnd();
-
-    let class = crate::explorer::get_class_name(hwnd);
-    let is_explorer = class == "CabinetWClass";
-    let in_our_process = hwnd_in_our_process(hwnd);
-
-    if event == EVENT_SYSTEM_MINIMIZESTART {
-        // Only hide if NOT our process (avoid hiding on Explorer's internal popups)
-        if !in_our_process && let Some(tb) = tb_opt {
-            update_toolbar_visibility(tb);
-        }
-        return;
-    }
-
-    if event == EVENT_SYSTEM_MINIMIZEEND {
-        if is_explorer && let Some(tb) = tb_opt {
-            show_above(tb, hwnd);
-        }
-        return;
-    }
-
-    // EVENT_SYSTEM_FOREGROUND
-    // Keep toolbar visible if the foreground window is:
-    //   - An Explorer window (re-raise above it; create toolbar on first event)
-    //   - Explorer's own process popups (tooltips, tree-view pop-outs, etc.)
-    //   - OUR process (rename edit, folder picker, popup menu — all transient)
-    // Hide only when a window in a DIFFERENT unrelated process takes foreground.
-    if is_explorer {
-        if let Some(toolbar_hwnd) = get_global_toolbar_hwnd() {
-            // SAFETY: Win32 dispatches WinEvent callbacks on the thread that
-            // installed SetWinEventHook — our message-pump thread. Same
-            // single-threaded invariant `toolbar_state` relies on.
-            if let Some(state) = unsafe { toolbar_state(toolbar_hwnd) } {
-                state.active_explorer = Some(hwnd);
-            }
-        }
-        // First time we see an Explorer foreground, create the toolbar.
-        // If not ready, retry logic is deferred to Task 8.
-        if tb_opt.is_none()
-            && let Some(info) = crate::explorer::check_explorer_ready(hwnd)
-        {
-            let hinst = crate::lifecycle::exe_hinstance();
-            let _ = crate::lifecycle::create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
-        }
-        if let Some(tb) = get_global_toolbar_hwnd() {
-            show_above(tb, hwnd);
-        }
-    } else if hwnd_in_explorer_process(hwnd) || in_our_process {
-        // Transient popup — either Explorer's own tooltips/tree-views or our
-        // own popup menu / rename edit / folder picker. Keep visible.
-    } else if let Some(tb) = tb_opt {
-        unsafe {
-            crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
-        }
-    }
-}
-
-fn show_above(toolbar: HWND, _explorer: HWND) {
-    use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
-    unsafe {
-        crate::warn_on_err!(ShowWindow(toolbar, SW_SHOWNA).ok());
-        // Use HWND_TOPMOST so the toolbar stays above Explorer reliably.
-        // When a non-Explorer app is foreground, the toolbar is hidden entirely,
-        // so topmost won't intrude on other applications.
-        crate::warn_on_err!(SetWindowPos(
-            toolbar,
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        ));
-    }
-}
-
-/// Hide the toolbar if the foreground window is in a different process
-/// (i.e., not Explorer or any of its helper windows).
-fn update_toolbar_visibility(toolbar: HWND) {
-    let fg = unsafe { GetForegroundWindow() };
-    if !hwnd_in_our_process(fg) {
-        unsafe {
-            crate::warn_on_err!(ShowWindow(toolbar, SW_HIDE).ok());
-        }
-    }
-}
-
-/// Install the foreground WinEvent hook. Callers must invoke exactly once
-/// (from `run_hook`). Returns the hook handle so the caller can
-/// `UnhookWinEvent` it at process exit.
-pub fn install_foreground_hook() -> HWINEVENTHOOK {
-    // SAFETY: SetWinEventHook registers our extern "system" callback and
-    // returns a handle we own; single call from run_hook is the sole user.
-    let hook = unsafe {
-        SetWinEventHook(
-            EVENT_SYSTEM_FOREGROUND,
-            EVENT_SYSTEM_MINIMIZEEND, // range covers FOREGROUND, MINIMIZESTART, MINIMIZEEND
-            None,
-            Some(foreground_event_proc),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT,
-        )
-    };
-    log::info!("Installed foreground event hook");
-    hook
-}
-
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
@@ -598,7 +398,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             let class = crate::explorer::get_class_name(explorer_hwnd);
             if class == "CabinetWClass" {
                 log::info!("toolbar create: showing above explorer={explorer_hwnd:?}");
-                show_above(hwnd, explorer_hwnd);
+                crate::visibility::show_above(hwnd, explorer_hwnd);
             } else {
                 log::info!("toolbar create: fg class={class}, hiding");
                 unsafe {
@@ -611,7 +411,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         WM_DESTROY => {
             log::info!("toolbar: WM_DESTROY — exiting process");
-            clear_global_toolbar();
+            crate::visibility::clear_global_toolbar();
             let _ = crate::dragdrop::unregister_drop_target(hwnd);
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
             if !ptr.is_null() {

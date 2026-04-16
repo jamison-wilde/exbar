@@ -200,7 +200,7 @@ pub fn create_toolbar(
 
     match hwnd_result {
         Ok(hwnd) => {
-            crate::toolbar::set_global_toolbar(hwnd);
+            crate::visibility::set_global_toolbar(hwnd);
             Some(hwnd)
         }
         Err(_) => {

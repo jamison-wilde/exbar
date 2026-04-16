@@ -41,7 +41,7 @@ use windows::core::PCWSTR;
 
 use exbar_cli::error::{ExbarError, ExbarResult};
 use exbar_cli::log as exbar_log;
-use exbar_cli::toolbar;
+use exbar_cli::visibility;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
@@ -221,7 +221,7 @@ fn run_hook() -> ExbarResult<()> {
     //
     // The first CabinetWClass foreground event triggers toolbar creation
     // inside foreground_event_proc.
-    let foreground_hook = toolbar::install_foreground_hook();
+    let foreground_hook = visibility::install_foreground_hook();
     log::info!("run_hook: foreground hook installed; entering message pump");
 
     // Message pump — runs indefinitely.

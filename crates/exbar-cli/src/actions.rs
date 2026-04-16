@@ -47,7 +47,7 @@ pub(crate) fn append_folder_to_state(state: &mut ToolbarState, path: &Path) -> b
 /// No-op on empty / invalid paths.
 pub(crate) fn append_folder_and_reload(state: &mut ToolbarState, path: &Path) {
     if append_folder_to_state(state, path)
-        && let Some(hwnd) = crate::toolbar::get_global_toolbar_hwnd()
+        && let Some(hwnd) = crate::visibility::get_global_toolbar_hwnd()
     {
         post_reload(hwnd);
     }
@@ -56,7 +56,7 @@ pub(crate) fn append_folder_and_reload(state: &mut ToolbarState, path: &Path) {
 /// Drop-target entry point: looks up the global toolbar state and delegates to
 /// `append_folder_and_reload`. Called from `dragdrop.rs` which has no direct access to state.
 pub(crate) fn append_folder_and_reload_global(path: &Path) {
-    let hwnd = match crate::toolbar::get_global_toolbar_hwnd() {
+    let hwnd = match crate::visibility::get_global_toolbar_hwnd() {
         Some(h) => h,
         None => return,
     };
