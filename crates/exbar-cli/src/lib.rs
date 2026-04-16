@@ -104,6 +104,7 @@ pub mod shell_windows;
 pub mod theme;
 pub mod toolbar;
 pub mod visibility;
+pub mod wndproc;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;

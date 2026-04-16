@@ -128,7 +128,7 @@ pub fn create_toolbar(
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
-            lpfnWndProc: Some(crate::toolbar::toolbar_wndproc_safe),
+            lpfnWndProc: Some(crate::wndproc::toolbar_wndproc_safe),
             cbClsExtra: 0,
             cbWndExtra: std::mem::size_of::<*mut ToolbarState>() as i32,
             hInstance: hinstance,
