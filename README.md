@@ -83,8 +83,6 @@ It should hide when non-Explorer apps are in the foreground. If it isn't hiding,
 
 ## For developers
 
-- **Planned CI:** see [docs/ci-plan.md](docs/ci-plan.md) for the deferred GitHub Actions workflow.
-
 <details>
 <summary>Build from source</summary>
 
@@ -103,7 +101,7 @@ Prerequisites:
 - [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with the *Desktop development with C++* workload
 - [WiX Toolset v7](https://wixtoolset.org/) — install via `dotnet tool install --global wix`, then `wix eula accept wix7 && wix extension add --global WixToolset.Util.wixext`
 
-See `CLAUDE.md` for architecture notes and the live-iteration build loop. See `docs/adrs/` for the architectural decision records.
+See `CLAUDE.md` for architecture notes and the live-iteration build loop.
 
 </details>
 

@@ -48,12 +48,9 @@ exbar/
 ├── scripts/
 │   ├── build-msi.sh                    # invokes `wix build`
 │   └── doc-check.sh                    # RUSTDOCFLAGS="-D warnings" cargo doc gate (SP7)
-├── docs/
-│   ├── adrs/                           # Architecture Decision Records (SP7)
-│   └── superpowers/
-│       ├── specs/                      # design docs
-│       └── plans/                      # implementation plans
-└── legacy_source/                      # QtTabBar C# source (reference only)
+└── .github/
+    └── workflows/
+        └── ci.yml                      # GitHub Actions: lint, test, doc-check, build-msi
 ```
 
 ## Commands
@@ -106,7 +103,7 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
 
 ### Pure controllers + Win32 adapters (SP2b, SP6)
 
-Pointer and rename interactions are split into pure state-machine modules and thin Win32 adapter methods on `ToolbarState`. See `docs/adrs/ADR-0003-pure-controller-adapter-pattern.md`.
+Pointer and rename interactions are split into pure state-machine modules and thin Win32 adapter methods on `ToolbarState`.
 
 - `pointer.rs` — `PointerState`, `PointerEvent`, `PointerCommand`, `transition(state, event) → (state, Vec<command>)`. No Win32.
 - `rename.rs` — `RenameState`, `RenameEvent`, `RenameAction`, `transition(...)`. No Win32.
@@ -116,7 +113,7 @@ Future interaction subsystems (context-menu controller, drag-reorder commit, etc
 
 ### Trait seams (SP3)
 
-All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` for mock-driven testability. See `docs/adrs/ADR-0004-trait-seams-via-box-dyn.md`.
+All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` for mock-driven testability.
 
 | Trait | Production impl | Used for |
 |---|---|---|
@@ -136,7 +133,7 @@ Logging goes through the `log` crate — `log::info!` / `warn!` / `error!` / `de
 
 ### State ownership (SP4)
 
-All runtime state lives on `ToolbarState`, owned by the wndproc via `GWLP_USERDATA`. See `docs/adrs/ADR-0005-toolbar-state-over-statics.md`. The one surviving static is `GLOBAL_TOOLBAR: Mutex<Option<isize>>` — a thread-safe bootstrap entry for `WINEVENT_OUTOFCONTEXT` callbacks (which have no `&self`) to find the toolbar HWND; from there, `unsafe { toolbar_state(hwnd) }` recovers the pointer. The safety of that helper relies on the single-threaded message-pump invariant.
+All runtime state lives on `ToolbarState`, owned by the wndproc via `GWLP_USERDATA`. The one surviving static is `GLOBAL_TOOLBAR: Mutex<Option<isize>>` — a thread-safe bootstrap entry for `WINEVENT_OUTOFCONTEXT` callbacks (which have no `&self`) to find the toolbar HWND; from there, `unsafe { toolbar_state(hwnd) }` recovers the pointer. The safety of that helper relies on the single-threaded message-pump invariant.
 
 ### Context menus and inline rename
 
@@ -226,10 +223,10 @@ wix extension add --global WixToolset.Util.wixext
 
 1. All runtime behavior lives in `exbar-cli`; the WiX installer is purely for packaging
 2. Prefer inline `#[cfg(test)] mod tests` over `tests/` — the post-SP1.5 lib/bin split makes inline tests the natural choice. Pure modules (`pointer`, `rename`, `layout`, `hit_test`, `drop_effect`, `config`, `error`, `position`, `actions`, `visibility`) are fully unit-testable; Win32-touching code is tested via the trait seams + mocks (each mock lives in its trait file's `test_mocks` sub-module; shared builders live in `test_helpers.rs`). Only truly Win32-API-heavy code (paint, wndproc dispatch) stays manual-smoke.
-3. For new state-machine logic, follow the SP2b/SP6 pattern: pure `transition()` module + thin `execute_*` adapter on `ToolbarState`. See ADR-0003.
-4. For new cross-process Win32 surfaces, follow the SP3 pattern: trait + `Win32*` impl + mock. See ADR-0004.
+3. For new state-machine logic, follow the pure-controller + adapter pattern: pure `transition()` module + thin `execute_*` adapter on `ToolbarState` (see `pointer.rs`/`rename.rs` for examples).
+4. For new cross-process Win32 surfaces, follow the trait-seam pattern: trait + `Win32*` impl + mock (see `shell_windows.rs`/`dragdrop.rs` for examples).
 5. All UI pixel values must pass through `theme::scale(px, dpi)` — no hardcoded pixels
 6. All theme colors must branch on `theme::is_dark_mode()` — don't assume dark
 7. Catch panics at FFI boundaries with `std::panic::catch_unwind` (see `wndproc::toolbar_wndproc_safe`)
 8. Before pushing, run `cargo fmt && cargo clippy --all-targets && cargo test && ./scripts/doc-check.sh`. All four must pass.
-9. Architectural decisions worth preserving as future-reader context go in `docs/adrs/ADR-NNNN-*.md` using the Nygard template.
+9. Document architectural decisions as comments in the relevant module or in this file's Architecture section.
