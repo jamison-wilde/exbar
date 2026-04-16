@@ -82,6 +82,7 @@
 //! produces the binary directly; the build/deploy loop is documented
 //! in `CLAUDE.md`.
 
+pub mod actions;
 pub mod clipboard;
 pub mod config;
 pub mod contextmenu;
