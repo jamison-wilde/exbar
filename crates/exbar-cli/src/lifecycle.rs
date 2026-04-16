@@ -98,15 +98,18 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
         })
     };
 
-    if crate::dragdrop::register_drop_target(
+    match crate::dragdrop::register_drop_target(
         hwnd,
         Box::new(resolver),
         std::sync::Arc::clone(&state.file_operator),
-    )
-    .is_ok()
-    {
-        state.drop_registered = true;
-        log::info!("Registered OLE drop target on toolbar");
+    ) {
+        Ok(()) => {
+            state.drop_registered = true;
+            log::info!("Registered OLE drop target on toolbar");
+        }
+        Err(e) => {
+            log::error!("RegisterDragDrop failed: {e}");
+        }
     }
 }
 

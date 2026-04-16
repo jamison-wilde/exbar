@@ -179,7 +179,7 @@ const RUN_VALUE: &str = "Exbar";
 // ── hook ──────────────────────────────────────────────────────────────────────
 
 fn run_hook() -> ExbarResult<()> {
-    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    use windows::Win32::System::Com::CoUninitialize;
     use windows::Win32::System::Console::FreeConsole;
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, GetMessageW, MSG, TranslateMessage,
@@ -201,9 +201,11 @@ fn run_hook() -> ExbarResult<()> {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 
-    // STA for COM — IShellWindows, IFileOperation, drag-drop, folder picker.
+    // OleInitialize sets up STA + OLE drag-drop infrastructure.
+    // RegisterDragDrop requires OleInitialize, not just CoInitializeEx.
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        use windows::Win32::System::Ole::OleInitialize;
+        let _ = OleInitialize(None);
     }
 
     // Initialise file logger from config (falls back to Info if config absent).
