@@ -92,6 +92,7 @@ pub mod error;
 pub mod explorer;
 pub mod hit_test;
 pub mod layout;
+pub mod lifecycle;
 pub mod log;
 pub mod paint;
 pub mod picker;

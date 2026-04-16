@@ -16,9 +16,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_core::PCWSTR;
 
+use crate::lifecycle::exe_hinstance;
 use crate::rename::RenameEvent;
-use crate::toolbar::{exe_hinstance, toolbar_state};
-use crate::toolbar::wide_null;
+use crate::toolbar::{toolbar_state, wide_null};
 
 /// Create a Win32 EDIT control over `button_rect` (client coords on `toolbar`),
 /// pre-populate it with `initial_name`, subclass it with `rename_subclass_proc`,
