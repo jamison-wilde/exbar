@@ -94,6 +94,7 @@ pub mod layout;
 pub mod log;
 pub mod picker;
 pub mod pointer;
+pub mod position;
 pub mod rename;
 pub mod shell_windows;
 pub mod theme;

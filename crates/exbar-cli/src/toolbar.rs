@@ -52,9 +52,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DLGC_WANTALLKEYS, DefWindowProcW,
     DestroyWindow, GWLP_USERDATA, GetClientRect, GetForegroundWindow, GetWindowLongPtrW,
     GetWindowTextLengthW, GetWindowTextW, HTCAPTION, LWA_ALPHA, PostMessageW, RegisterClassExW,
-    SPI_GETWORKAREA, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, WM_CAPTURECHANGED,
+    SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SendMessageW, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED,
     WM_CREATE, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WNDCLASSEXW,
     WS_BORDER, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
@@ -332,76 +332,6 @@ pub fn install_foreground_hook() -> HWINEVENTHOOK {
     hook
 }
 
-// ── Position persistence ──────────────────────────────────────────────────────
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SavedPos {
-    x: i32,
-    y: i32,
-}
-
-fn pos_file_path() -> std::path::PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| "C:\\Users\\Default".into());
-    let mut p = std::path::PathBuf::from(home);
-    p.push(".exbar-pos.json");
-    p
-}
-
-fn load_saved_pos() -> Option<(i32, i32)> {
-    let bytes = std::fs::read(pos_file_path()).ok()?;
-    let saved: SavedPos = serde_json::from_slice(&bytes).ok()?;
-    Some((saved.x, saved.y))
-}
-
-fn save_pos(x: i32, y: i32) {
-    let saved = SavedPos { x, y };
-    if let Ok(json) = serde_json::to_string(&saved) {
-        let _ = std::fs::write(pos_file_path(), json);
-    }
-}
-
-// ── Screen bounds clamping ────────────────────────────────────────────────────
-
-/// Return the work area of the monitor containing `ref_hwnd`, or the primary
-/// monitor work area if that fails.
-fn work_area_for(ref_hwnd: Option<HWND>) -> RECT {
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
-    };
-
-    if let Some(hwnd) = ref_hwnd {
-        let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-        if !monitor.is_invalid() {
-            let mut mi = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            if unsafe { GetMonitorInfoW(monitor, &mut mi) }.as_bool() {
-                return mi.rcWork;
-            }
-        }
-    }
-    // Fallback: primary monitor work area
-    let mut wa = RECT::default();
-    unsafe {
-        let _ = SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            Some(&mut wa as *mut RECT as *mut _),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        );
-    }
-    wa
-}
-
-fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, ref_hwnd: Option<HWND>) -> (i32, i32) {
-    let wa = work_area_for(ref_hwnd);
-    let cx = x.max(wa.left).min((wa.right - w).max(wa.left));
-    let cy = y.max(wa.top).min((wa.bottom - h).max(wa.top));
-    (cx, cy)
-}
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
@@ -997,7 +927,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut current_rect);
             }
             let (final_x, final_y) =
-                clamp_to_work_area(current_rect.left, current_rect.top, w, h, Some(hwnd));
+                crate::position::clamp_to_work_area_for(current_rect.left, current_rect.top, w, h, Some(hwnd));
 
             unsafe {
                 crate::warn_on_err!(SetWindowPos(
@@ -1108,7 +1038,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         WM_MOVE => {
             let (x, y) = lparam_point(lparam);
-            save_pos(x, y);
+            crate::position::save_pos(x, y);
             LRESULT(0)
         }
 
@@ -1458,13 +1388,13 @@ pub fn create_toolbar(
     let class_wide: Vec<u16> = wide_null(CLASS_NAME);
 
     // Determine initial window position: saved pos > default pos
-    let (mut x, mut y) = load_saved_pos().unwrap_or((screen_pos.left, screen_pos.top));
+    let (mut x, mut y) = crate::position::load_saved_pos().unwrap_or((screen_pos.left, screen_pos.top));
 
     // Rough placeholder size for clamping; resized in WM_CREATE.
     // Clamp using the monitor that contains the triggering Explorer window.
     let placeholder_w = 400;
     let placeholder_h = 30;
-    let clamped = clamp_to_work_area(x, y, placeholder_w, placeholder_h, Some(owner));
+    let clamped = crate::position::clamp_to_work_area_for(x, y, placeholder_w, placeholder_h, Some(owner));
     x = clamped.0;
     y = clamped.1;
 
