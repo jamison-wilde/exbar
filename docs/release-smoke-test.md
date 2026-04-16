@@ -90,14 +90,14 @@ Do not tag a release with any failing items.
 
 ## A2 (out-of-process) additions
 
-Exbar v0.3.0 moved from DLL injection to an out-of-process architecture. Verify:
+Exbar v1.0.0 moved from DLL injection to an out-of-process architecture. Verify:
 
 - [ ] Kill `exbar.exe` via Task Manager → toolbar disappears immediately. Explorer does NOT crash, flicker, or show any visual disruption.
 - [ ] Restart `exbar.exe hook` → toolbar reappears above the active Explorer within ~1 second.
 - [ ] Close the Explorer window that was foreground when exbar started → toolbar stays functional over other Explorer windows. Does not orphan or go silent.
 - [ ] Open three Explorer windows, close in various orders → toolbar follows foreground correctly regardless of close order.
 - [ ] Uninstall via Settings → Apps completes within a few seconds. Explorer does NOT close or restart. No "file in use" dialog.
-- [ ] Upgrade install (v0.2.0 MSI → v0.3.0 MSI): `%LOCALAPPDATA%\Exbar\exbar.exe` is replaced, `exbar_dll.dll` is removed or scheduled for deletion. Explorer is not touched.
+- [ ] Upgrade install (v0.2.0 MSI → v1.0.0 MSI): `%LOCALAPPDATA%\Exbar\exbar.exe` is replaced, `exbar_dll.dll` is removed or scheduled for deletion. Explorer is not touched.
 - [ ] Dev loop: `cargo build --release -p exbar-cli && cp target/release/exbar.exe %LOCALAPPDATA%\Exbar\` works with no file-lock errors (there's no longer a DLL pinned in every process).
 - [ ] Drag file from Explorer → drop on a folder button → move/copy works (cross-process OLE drag-drop).
 - [ ] Drag folder from Explorer → drop on `+` button → appended to config.
