@@ -1,5 +1,7 @@
 /target
 legacy_source/
+docs/adrs/
+docs/superpowers/
 .superpowers/
 .aideck/
 .claude/
