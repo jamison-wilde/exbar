@@ -30,9 +30,7 @@ use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    GWLP_USERDATA, GetWindowLongPtrW, PostMessageW,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GWLP_USERDATA, GetWindowLongPtrW, PostMessageW};
 
 use std::sync::Arc;
 
@@ -314,10 +312,10 @@ use crate::rename::{self, RenameAction, RenameEvent};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pointer;
     use crate::test_helpers::{
         make_test_state, mk_add_button, mk_config_with_folders, mk_deps, mk_folder_button,
     };
-    use crate::pointer;
     use std::path::PathBuf;
     use windows::Win32::Foundation::HWND;
 

@@ -103,7 +103,12 @@ mod tests {
     use super::*;
 
     fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
-        RECT { left: l, top: t, right: r, bottom: b }
+        RECT {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        }
     }
 
     #[test]

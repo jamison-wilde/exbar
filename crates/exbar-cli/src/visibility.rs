@@ -9,8 +9,8 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SetWindowPos, ShowWindow,
+    GetForegroundWindow, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    ShowWindow,
 };
 
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -55,11 +55,7 @@ pub enum Foreground {
 /// `target_pid` — the PID of the window gaining foreground.
 /// `target_exe` — full path of the exe for that PID (or `None` if unknown).
 /// `our_pid`    — PID of the current exbar.exe process.
-pub fn classify_foreground(
-    target_pid: u32,
-    target_exe: Option<&str>,
-    our_pid: u32,
-) -> Foreground {
+pub fn classify_foreground(target_pid: u32, target_exe: Option<&str>, our_pid: u32) -> Foreground {
     if target_pid == our_pid {
         return Foreground::Ours;
     }
@@ -84,7 +80,9 @@ fn exe_path_for_pid(pid: u32) -> Option<String> {
     let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
     let mut buf = [0u16; 260];
     let len = unsafe { GetModuleFileNameExW(Some(h), None, &mut buf) } as usize;
-    unsafe { let _ = CloseHandle(h); }
+    unsafe {
+        let _ = CloseHandle(h);
+    }
     if len == 0 {
         return None;
     }
@@ -95,7 +93,9 @@ fn exe_path_for_pid(pid: u32) -> Option<String> {
 fn pid_for_hwnd(hwnd: HWND) -> u32 {
     use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
     let mut pid: u32 = 0;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
     pid
 }
 

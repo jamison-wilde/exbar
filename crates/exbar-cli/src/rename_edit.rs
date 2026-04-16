@@ -8,12 +8,12 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{DEFAULT_GUI_FONT, GetStockObject};
 use windows::Win32::UI::Controls::WC_EDITW;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, DLGC_WANTALLKEYS, GetWindowTextLengthW, GetWindowTextW,
-    SendMessageW, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_SETFONT, WS_BORDER,
-    WS_CHILD, WS_VISIBLE,
-};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DLGC_WANTALLKEYS, DestroyWindow, GetWindowTextLengthW, GetWindowTextW,
+    SendMessageW, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_SETFONT, WS_BORDER, WS_CHILD,
+    WS_VISIBLE,
+};
 use windows_core::PCWSTR;
 
 use crate::lifecycle::exe_hinstance;
