@@ -15,20 +15,17 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, DefWindowProcW,
-    GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW,
-    HTCAPTION, PostMessageW,
-    SW_HIDE, SWP_NOZORDER, SWP_NOACTIVATE,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED,
-    WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP,
+    CREATESTRUCTW, DefWindowProcW, GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW,
+    HTCAPTION, PostMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP,
 };
 
 use crate::hit_test;
 use crate::layout;
 use crate::pointer;
 use crate::theme;
-use crate::toolbar::{ToolbarState, WM_USER_RELOAD, GRIP_SIZE, toolbar_state};
+use crate::toolbar::{GRIP_SIZE, ToolbarState, WM_USER_RELOAD, toolbar_state};
 
 const WM_DPICHANGED: u32 = 0x02E0;
 const REORDER_THRESHOLD: i32 = 5;
@@ -87,8 +84,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let _ =
                     windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut current_rect);
             }
-            let (final_x, final_y) =
-                crate::position::clamp_to_work_area_for(current_rect.left, current_rect.top, w, h, Some(hwnd));
+            let (final_x, final_y) = crate::position::clamp_to_work_area_for(
+                current_rect.left,
+                current_rect.top,
+                w,
+                h,
+                Some(hwnd),
+            );
 
             unsafe {
                 crate::warn_on_err!(SetWindowPos(
@@ -359,7 +361,12 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 let rect = crate::paint::rect_to_win32(state.buttons[idx].rect);
                                 let name = state.buttons[idx].folder.name.clone();
                                 let folder_index = idx - 1; // + button at index 0
-                                crate::rename_edit::start_inline_rename(hwnd, rect, folder_index, &name);
+                                crate::rename_edit::start_inline_rename(
+                                    hwnd,
+                                    rect,
+                                    folder_index,
+                                    &name,
+                                );
                             }
                             MENU_ID_REMOVE => {
                                 crate::actions::remove_folder_at(state, hwnd, idx);

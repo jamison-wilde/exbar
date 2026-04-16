@@ -12,7 +12,12 @@ use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 fn post_reload(hwnd: HWND) {
     unsafe {
-        let _ = PostMessageW(Some(hwnd), crate::toolbar::WM_USER_RELOAD, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(
+            Some(hwnd),
+            crate::toolbar::WM_USER_RELOAD,
+            WPARAM(0),
+            LPARAM(0),
+        );
     }
 }
 
@@ -102,11 +107,7 @@ pub(crate) fn remove_folder_at(state: &mut ToolbarState, hwnd: HWND, button_inde
 
 /// Core: load → move `from` to `to` → save → assign. Returns `true` on success.
 /// Does not post `WM_USER_RELOAD` or touch any HWND.
-pub(crate) fn commit_reorder_in_state(
-    state: &mut ToolbarState,
-    from: usize,
-    to: usize,
-) -> bool {
+pub(crate) fn commit_reorder_in_state(state: &mut ToolbarState, from: usize, to: usize) -> bool {
     let mut cfg = match state.config_store.load() {
         Some(c) => c,
         None => {
@@ -143,9 +144,9 @@ pub(crate) fn copy_folder_path_to_clipboard(state: &mut ToolbarState, folder_but
 // ── Edit config ──────────────────────────────────────────────────────
 
 pub(crate) fn open_config_in_editor() {
-    use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
 
     let path = crate::config::default_config_path();
     let path_wide: Vec<u16> = crate::toolbar::wide_null(&path);
@@ -168,7 +169,7 @@ pub(crate) fn open_config_in_editor() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{make_test_state, mk_config_with_folders, mk_deps, TestDeps};
+    use crate::test_helpers::{TestDeps, make_test_state, mk_config_with_folders, mk_deps};
 
     fn current_folders(state: &ToolbarState) -> Vec<String> {
         state.config.as_ref().map_or_else(Vec::new, |c| {
@@ -319,10 +320,8 @@ mod tests {
     #[test]
     fn reorder_save_error_does_not_assign_state_config() {
         let deps = mk_deps();
-        *deps.cfg_store.load_value.lock().unwrap() = Some(mk_config_with_folders(&[
-            ("A", "C:\\a"),
-            ("B", "C:\\b"),
-        ]));
+        *deps.cfg_store.load_value.lock().unwrap() =
+            Some(mk_config_with_folders(&[("A", "C:\\a"), ("B", "C:\\b")]));
         *deps.cfg_store.save_should_err.lock().unwrap() = true;
         let mut state = make_test_state(&deps, None);
 

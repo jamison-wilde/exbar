@@ -19,8 +19,14 @@ exbar/
 │       │   ├── lib.rs                  # Crate-level rustdoc + pub mod declarations
 │       │   ├── bin/
 │       │   │   └── exbar.rs            # CLI entry + run_hook() with WinEvent + message pump
-│       │   ├── toolbar.rs              # ToolbarState, wndproc, owner-drawn popup, install_foreground_hook
-│       │   │                           # Adapters: execute_pointer_command, execute_rename_event
+│       │   ├── toolbar.rs              # ToolbarState struct + adapter impls (execute_pointer_command, execute_rename_event)
+│       │   ├── wndproc.rs              # Win32 WM_* dispatcher (SP8)
+│       │   ├── visibility.rs           # foreground_event_proc, install_foreground_hook, classify_foreground (SP8)
+│       │   ├── lifecycle.rs            # create_toolbar, refresh_toolbar, register_drop_targets (SP8)
+│       │   ├── paint.rs                # GDI render path: paint, compute_layout, in_grip (SP8)
+│       │   ├── actions.rs              # Folder action handlers + pure *_to_state cores (SP8)
+│       │   ├── rename_edit.rs          # Inline-rename Win32 EDIT control mgmt (SP8)
+│       │   ├── position.rs             # Position persistence + pure clamp_to_work_area (SP8)
 │       │   ├── pointer.rs              # Pure pointer-interaction state machine (SP2b)
 │       │   ├── rename.rs               # Pure inline-rename state machine (SP6)
 │       │   ├── layout.rs               # Pure button-layout computation (SP2a)
@@ -55,7 +61,7 @@ exbar/
 All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` in git-bash).
 
 - **Build:** `cargo build` (dev) or `cargo build --release`
-- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 140 tests across 17 modules
+- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 162 tests across 24 modules
 - **Build only the CLI:** `cargo build --release -p exbar-cli` (faster iteration)
 - **Run the CLI:** `./target/release/exbar.exe <install|uninstall|status|hook>`
 - **Build MSI:** `./scripts/build-msi.sh` (requires WiX v7 installed — see "MSI installer" section)
@@ -120,7 +126,7 @@ All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` 
 | `clipboard::Clipboard` | `Win32Clipboard` | `OleClipboard` text writes |
 | `config::ConfigStore` | `JsonFileStore` | `~/.exbar.json` load/save |
 
-Tests in `toolbar.rs::tests` inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`.
+Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
 
 ### Error handling (SP5)
 
@@ -142,7 +148,7 @@ All runtime state lives on `ToolbarState`, owned by the wndproc via `GWLP_USERDA
   - **Left-click** → navigate active Explorer via `IShellBrowser::BrowseObject`
   - **Ctrl+left-click** → `navigate::open_in_new_tab` — posts Ctrl+T to the active Explorer HWND, polls `IShellWindows` for up to `newTabTimeoutMsZeroDisables` ms looking for a newly-appeared HWND, navigates it; on timeout or `0` config, falls back to `ShellExecuteW("explorer.exe", "\"path\"")`
   - **Right-click** → `Open / Open in new tab / Copy path / --- / Rename / Remove`
-  - **Rename** spawns a child `EDIT` control (`start_inline_rename` in `toolbar.rs`) subclassed via `SetWindowSubclass` (ref_data = toolbar HWND) to intercept Enter (commit), Esc (cancel), `WM_KILLFOCUS` (commit). The subclass proc translates Win32 messages to `RenameEvent`s and calls `state.execute_rename_event()`, which drives the pure `rename::transition` function in `rename.rs`. Empty commit keeps the old name via `Config::rename_folder`'s trim-empty guard.
+  - **Rename** spawns a child `EDIT` control (`start_inline_rename` in `rename_edit.rs`) subclassed via `SetWindowSubclass` (ref_data = toolbar HWND) to intercept Enter (commit), Esc (cancel), `WM_KILLFOCUS` (commit). The subclass proc translates Win32 messages to `RenameEvent`s and calls `state.execute_rename_event()`, which drives the pure `rename::transition` function in `rename.rs`. Empty commit keeps the old name via `Config::rename_folder`'s trim-empty guard.
 - The `contextmenu.rs` wrapper exposes `show_menu(owner, pt, items) -> u32` around `TrackPopupMenu` with `TPM_RETURNCMD`
 
 ## Gotchas
@@ -219,11 +225,11 @@ wix extension add --global WixToolset.Util.wixext
 ## Adding a new feature
 
 1. All runtime behavior lives in `exbar-cli`; the WiX installer is purely for packaging
-2. Prefer inline `#[cfg(test)] mod tests` over `tests/` — the post-SP1.5 lib/bin split makes inline tests the natural choice. Pure modules (`pointer`, `rename`, `layout`, `hit_test`, `drop_effect`, `config`, `error`) are fully unit-testable; Win32-touching code is tested via the trait seams + mocks in `toolbar.rs::tests`. Only truly Win32-API-heavy code (paint, wndproc dispatch) stays manual-smoke.
+2. Prefer inline `#[cfg(test)] mod tests` over `tests/` — the post-SP1.5 lib/bin split makes inline tests the natural choice. Pure modules (`pointer`, `rename`, `layout`, `hit_test`, `drop_effect`, `config`, `error`, `position`, `actions`, `visibility`) are fully unit-testable; Win32-touching code is tested via the trait seams + mocks (each mock lives in its trait file's `test_mocks` sub-module; shared builders live in `test_helpers.rs`). Only truly Win32-API-heavy code (paint, wndproc dispatch) stays manual-smoke.
 3. For new state-machine logic, follow the SP2b/SP6 pattern: pure `transition()` module + thin `execute_*` adapter on `ToolbarState`. See ADR-0003.
 4. For new cross-process Win32 surfaces, follow the SP3 pattern: trait + `Win32*` impl + mock. See ADR-0004.
 5. All UI pixel values must pass through `theme::scale(px, dpi)` — no hardcoded pixels
 6. All theme colors must branch on `theme::is_dark_mode()` — don't assume dark
-7. Catch panics at FFI boundaries with `std::panic::catch_unwind` (see `toolbar_wndproc_safe`)
+7. Catch panics at FFI boundaries with `std::panic::catch_unwind` (see `wndproc::toolbar_wndproc_safe`)
 8. Before pushing, run `cargo fmt && cargo clippy --all-targets && cargo test && ./scripts/doc-check.sh`. All four must pass.
 9. Architectural decisions worth preserving as future-reader context go in `docs/adrs/ADR-NNNN-*.md` using the Nygard template.

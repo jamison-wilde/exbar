@@ -13,7 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use crate::config::{FolderEntry, Orientation};
 use crate::layout::{self, ButtonLayout, LayoutInput};
 use crate::theme;
-use crate::toolbar::{ToolbarState, BTN_PAD_H, GRIP_SIZE};
+use crate::toolbar::{BTN_PAD_H, GRIP_SIZE, ToolbarState};
 
 /// Measure the rendered-pixel width of each folder's label ("📁 Name" — the
 /// same format used in paint) using the currently-selected font in `hdc`.

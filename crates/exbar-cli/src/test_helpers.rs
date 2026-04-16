@@ -2,12 +2,12 @@
 //! newtypes for constructing a `ToolbarState` with mocks. Compiled
 //! only under `#[cfg(test)]`.
 
-use crate::clipboard::{test_mocks::MockClipboard, Clipboard};
-use crate::config::{test_mocks::MockConfigStore, Config, ConfigStore, FolderEntry};
-use crate::dragdrop::{test_mocks::MockFileOp, FileOperator};
+use crate::clipboard::{Clipboard, test_mocks::MockClipboard};
+use crate::config::{Config, ConfigStore, FolderEntry, test_mocks::MockConfigStore};
+use crate::dragdrop::{FileOperator, test_mocks::MockFileOp};
 use crate::error::ExbarResult;
 use crate::layout::{ButtonLayout, Rect};
-use crate::picker::{test_mocks::MockFolderPicker, FolderPicker};
+use crate::picker::{FolderPicker, test_mocks::MockFolderPicker};
 use crate::shell_windows::test_mocks::MockShellBrowser;
 use crate::toolbar::ToolbarState;
 use std::path::PathBuf;

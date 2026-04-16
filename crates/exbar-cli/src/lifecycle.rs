@@ -10,15 +10,14 @@ use windows::Win32::Graphics::Gdi::{
     DEFAULT_GUI_FONT, GetDC, GetStockObject, InvalidateRect, ReleaseDC, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, LWA_ALPHA, RegisterClassExW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetLayeredWindowAttributes,
-    SetWindowPos, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_POPUP, WS_VISIBLE,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, LWA_ALPHA, RegisterClassExW, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowPos, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::config::Config;
 use crate::theme;
-use crate::toolbar::{toolbar_state, wide_null, ToolbarState};
+use crate::toolbar::{ToolbarState, toolbar_state, wide_null};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -118,11 +117,7 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
 /// `owner` is the triggering Explorer (`CabinetWClass`) HWND — used for
 /// monitor / DPI detection. Returns the new toolbar HWND on success.
 /// See ADR-0002 for why this is a top-level popup, not a child window.
-pub fn create_toolbar(
-    owner: HWND,
-    screen_pos: &RECT,
-    hinstance: HINSTANCE,
-) -> Option<HWND> {
+pub fn create_toolbar(owner: HWND, screen_pos: &RECT, hinstance: HINSTANCE) -> Option<HWND> {
     CLASS_REGISTERED.call_once(|| {
         let class_wide: Vec<u16> = wide_null(CLASS_NAME);
         let wc = WNDCLASSEXW {
@@ -160,13 +155,15 @@ pub fn create_toolbar(
     let class_wide: Vec<u16> = wide_null(CLASS_NAME);
 
     // Determine initial window position: saved pos > default pos
-    let (mut x, mut y) = crate::position::load_saved_pos().unwrap_or((screen_pos.left, screen_pos.top));
+    let (mut x, mut y) =
+        crate::position::load_saved_pos().unwrap_or((screen_pos.left, screen_pos.top));
 
     // Rough placeholder size for clamping; resized in WM_CREATE.
     // Clamp using the monitor that contains the triggering Explorer window.
     let placeholder_w = 400;
     let placeholder_h = 30;
-    let clamped = crate::position::clamp_to_work_area_for(x, y, placeholder_w, placeholder_h, Some(owner));
+    let clamped =
+        crate::position::clamp_to_work_area_for(x, y, placeholder_w, placeholder_h, Some(owner));
     x = clamped.0;
     y = clamped.1;
 

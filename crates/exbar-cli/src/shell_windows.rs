@@ -182,7 +182,6 @@ unsafe fn browser_view_is_under(browser: &IShellBrowser, target: HWND) -> bool {
     false
 }
 
-
 /// Return the list of all Explorer `IShellBrowser`s keyed by their HWND (as isize).
 /// Used by the new-tab flow to detect which tab/window is newly created.
 ///
