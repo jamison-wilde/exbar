@@ -36,6 +36,8 @@ const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
 const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
+const EVENT_SYSTEM_MOVESIZESTART: u32 = 0x000A;
+const EVENT_SYSTEM_MOVESIZEEND: u32 = 0x000B;
 
 // ── Pure classifier ───────────────────────────────────────────────────────────
 
@@ -144,6 +146,38 @@ unsafe extern "system" fn foreground_event_proc(
     if event == EVENT_SYSTEM_MINIMIZEEND {
         if is_explorer && let Some(tb) = tb_opt {
             show_above(tb, hwnd);
+        }
+        return;
+    }
+
+    if event == EVENT_SYSTEM_MOVESIZESTART {
+        // Explorer is being moved/resized — hide toolbar to avoid it
+        // sitting in the wrong position mid-drag.
+        if !in_our_process && hwnd_in_explorer_process(hwnd) {
+            if let Some(tb) = tb_opt {
+                unsafe {
+                    crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
+                }
+            }
+        }
+        return;
+    }
+
+    if event == EVENT_SYSTEM_MOVESIZEEND {
+        // Explorer finished moving/resizing — reposition and show toolbar.
+        if !in_our_process && hwnd_in_explorer_process(hwnd) {
+            if let Some(tb) = tb_opt {
+                // Use the CabinetWClass for origin, not the HWND from the
+                // event (which might be a child window).
+                let explorer = if class == "CabinetWClass" {
+                    hwnd
+                } else if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
+                    state.active_explorer.unwrap_or(hwnd)
+                } else {
+                    hwnd
+                };
+                show_above(tb, explorer);
+            }
         }
         return;
     }
