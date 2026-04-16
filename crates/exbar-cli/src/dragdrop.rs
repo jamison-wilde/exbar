@@ -572,6 +572,36 @@ pub unsafe fn extract_paths_from_data_object(
     paths
 }
 
+#[cfg(test)]
+pub(crate) mod test_mocks {
+    use super::FileOperator;
+    use crate::error::ExbarResult;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    pub struct MockFileOp {
+        pub move_calls: Mutex<Vec<(Vec<PathBuf>, PathBuf)>>,
+        pub copy_calls: Mutex<Vec<(Vec<PathBuf>, PathBuf)>>,
+    }
+    impl FileOperator for MockFileOp {
+        fn move_items(&self, sources: &[PathBuf], target: &Path) -> ExbarResult<()> {
+            self.move_calls
+                .lock()
+                .unwrap()
+                .push((sources.to_vec(), target.to_path_buf()));
+            Ok(())
+        }
+        fn copy_items(&self, sources: &[PathBuf], target: &Path) -> ExbarResult<()> {
+            self.copy_calls
+                .lock()
+                .unwrap()
+                .push((sources.to_vec(), target.to_path_buf()));
+            Ok(())
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

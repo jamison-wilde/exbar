@@ -84,3 +84,21 @@ impl Clipboard for Win32Clipboard {
         result
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_mocks {
+    use super::Clipboard;
+    use crate::error::ExbarResult;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    pub struct MockClipboard {
+        pub set_text_calls: Mutex<Vec<String>>,
+    }
+    impl Clipboard for MockClipboard {
+        fn set_text(&self, text: &str) -> ExbarResult<()> {
+            self.set_text_calls.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+    }
+}

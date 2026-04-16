@@ -211,6 +211,34 @@ impl ConfigStore for JsonFileStore {
 }
 
 #[cfg(test)]
+pub(crate) mod test_mocks {
+    use super::{Config, ConfigStore};
+    use crate::error::{ExbarError, ExbarResult};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    pub struct MockConfigStore {
+        pub load_value: Mutex<Option<Config>>,
+        pub load_calls: Mutex<usize>,
+        pub save_calls: Mutex<Vec<Config>>,
+        pub save_should_err: Mutex<bool>,
+    }
+    impl ConfigStore for MockConfigStore {
+        fn load(&self) -> Option<Config> {
+            *self.load_calls.lock().unwrap() += 1;
+            self.load_value.lock().unwrap().clone()
+        }
+        fn save(&self, config: &Config) -> ExbarResult<()> {
+            self.save_calls.lock().unwrap().push(config.clone());
+            if *self.save_should_err.lock().unwrap() {
+                return Err(ExbarError::Config("mock save error".into()));
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;

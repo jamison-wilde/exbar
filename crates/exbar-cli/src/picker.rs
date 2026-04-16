@@ -76,3 +76,22 @@ impl FolderPicker for Win32Picker {
         pick_folder()
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_mocks {
+    use super::FolderPicker;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    pub struct MockFolderPicker {
+        pub next_result: Mutex<Option<PathBuf>>,
+        pub calls: Mutex<u32>,
+    }
+    impl FolderPicker for MockFolderPicker {
+        fn pick_folder(&self) -> Option<PathBuf> {
+            *self.calls.lock().unwrap() += 1;
+            self.next_result.lock().unwrap().clone()
+        }
+    }
+}

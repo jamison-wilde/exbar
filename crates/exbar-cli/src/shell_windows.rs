@@ -386,6 +386,37 @@ impl ShellBrowser for Win32Shell {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod test_mocks {
+    use super::ShellBrowser;
+    use crate::error::ExbarResult;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use windows::Win32::Foundation::HWND;
+
+    pub struct MockShellBrowser {
+        pub navigate_calls: Arc<Mutex<Vec<(isize, PathBuf)>>>,
+        pub new_tab_calls: Arc<Mutex<Vec<(isize, PathBuf, u32)>>>,
+    }
+
+    impl ShellBrowser for MockShellBrowser {
+        fn navigate(&self, explorer: HWND, path: &Path) -> ExbarResult<()> {
+            self.navigate_calls
+                .lock()
+                .unwrap()
+                .push((explorer.0 as isize, path.to_path_buf()));
+            Ok(())
+        }
+        fn open_in_new_tab(&self, explorer: HWND, path: &Path, timeout_ms: u32) {
+            self.new_tab_calls.lock().unwrap().push((
+                explorer.0 as isize,
+                path.to_path_buf(),
+                timeout_ms,
+            ));
+        }
+    }
+}
+
 fn open_in_new_window(path: &str) {
     let quoted = format!("\"{path}\"");
     let path_wide: Vec<u16> = quoted.encode_utf16().chain(std::iter::once(0)).collect();
