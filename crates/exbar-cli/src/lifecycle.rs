@@ -157,9 +157,12 @@ pub fn create_toolbar(owner: HWND, screen_pos: &RECT, hinstance: HINSTANCE) -> O
 
     let class_wide: Vec<u16> = wide_null(CLASS_NAME);
 
-    // Determine initial window position: saved pos > default pos
-    let (mut x, mut y) =
-        crate::position::load_saved_pos().unwrap_or((screen_pos.left, screen_pos.top));
+    // Determine initial window position: saved offset > default pos
+    let (origin_x, origin_y) = crate::position::explorer_visible_origin(owner);
+    let (mut x, mut y) = match crate::position::load_saved_offset() {
+        Some((ox, oy)) => crate::position::apply_offset(ox, oy, origin_x, origin_y),
+        None => (screen_pos.left, screen_pos.top),
+    };
 
     // Rough placeholder size for clamping; resized in WM_CREATE.
     // Clamp using the monitor that contains the triggering Explorer window.

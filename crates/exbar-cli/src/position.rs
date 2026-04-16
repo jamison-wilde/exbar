@@ -10,8 +10,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedPos {
-    x: i32,
-    y: i32,
+    offset_x: i32,
+    offset_y: i32,
 }
 
 pub(crate) fn pos_file_path() -> std::path::PathBuf {
@@ -23,17 +23,45 @@ pub(crate) fn pos_file_path() -> std::path::PathBuf {
     p
 }
 
-pub(crate) fn load_saved_pos() -> Option<(i32, i32)> {
+pub(crate) fn load_saved_offset() -> Option<(i32, i32)> {
     let bytes = std::fs::read(pos_file_path()).ok()?;
     let saved: SavedPos = serde_json::from_slice(&bytes).ok()?;
-    Some((saved.x, saved.y))
+    Some((saved.offset_x, saved.offset_y))
 }
 
-pub(crate) fn save_pos(x: i32, y: i32) {
-    let saved = SavedPos { x, y };
+pub(crate) fn save_offset(offset_x: i32, offset_y: i32) {
+    let saved = SavedPos { offset_x, offset_y };
     if let Ok(json) = serde_json::to_string(&saved) {
         let _ = std::fs::write(pos_file_path(), json);
     }
+}
+
+/// Get the visible frame origin of an Explorer window.
+/// Uses DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) to exclude
+/// the invisible ~8px border Windows adds around maximized windows.
+/// Falls back to GetWindowRect if DWM call fails.
+pub(crate) fn explorer_visible_origin(hwnd: HWND) -> (i32, i32) {
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+
+    let mut frame = RECT::default();
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut frame as *mut RECT as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    if hr.is_ok() {
+        return (frame.left, frame.top);
+    }
+
+    // Fallback: raw window rect (includes invisible border)
+    let mut wr = RECT::default();
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr);
+    }
+    (wr.left, wr.top)
 }
 
 /// Return the work area of the monitor containing `ref_hwnd`, or the primary
