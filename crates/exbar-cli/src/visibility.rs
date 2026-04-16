@@ -177,11 +177,17 @@ unsafe extern "system" fn foreground_event_proc(
         }
     } else if in_explorer {
         // Explorer-process window (XAML islands, ForegroundStaging, etc.)
-        // that isn't CabinetWClass. Re-show the toolbar in case it was
-        // hidden by a transient app (e.g. the JSON editor launched by
-        // "Edit Config" briefly taking foreground before Explorer regains it).
-        if let Some(tb) = tb_opt {
-            show_above(tb, hwnd);
+        // that isn't CabinetWClass. Re-show the toolbar only if Explorer
+        // is genuinely foreground — Win11 fires these events during
+        // transition animations even when switching AWAY from Explorer.
+        let actual_fg = unsafe { GetForegroundWindow() };
+        if actual_fg == hwnd
+            || crate::explorer::get_class_name(actual_fg) == "CabinetWClass"
+            || hwnd_in_explorer_process(actual_fg)
+        {
+            if let Some(tb) = tb_opt {
+                show_above(tb, hwnd);
+            }
         }
     } else if in_our_process {
         // Our own popup menu / rename edit / folder picker. Keep visible.

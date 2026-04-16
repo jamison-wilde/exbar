@@ -73,12 +73,12 @@ pub struct InsertionInput<'a> {
 }
 
 /// Layout constants (logical pixels — scaled internally by `theme::scale`).
-const BTN_HEIGHT_LOGICAL_PX: i32 = 28;
-const BTN_PAD_H_LOGICAL_PX: i32 = 10;
-const BTN_GAP_LOGICAL_PX: i32 = 2;
+const BTN_HEIGHT_LOGICAL_PX: i32 = 26;
+const BTN_PAD_H_LOGICAL_PX: i32 = 0;
+const BTN_GAP_LOGICAL_PX: i32 = 0;
 const ICON_WIDTH_LOGICAL_PX: i32 = 14;
 const ICON_TEXT_GAP_LOGICAL_PX: i32 = 4;
-const ADD_BUTTON_SIZE_LOGICAL_PX: i32 = 28;
+const ADD_BUTTON_SIZE_LOGICAL_PX: i32 = 20;
 
 /// Compute button positions and total toolbar dimensions.
 pub fn compute_layout(input: &LayoutInput) -> Layout {
@@ -295,16 +295,17 @@ mod tests {
         let layout = compute_layout(&input);
         assert_eq!(layout.buttons.len(), 1);
         assert!(layout.buttons[0].is_add);
+        // add button: left=grip(12), width=20, height=26
         assert_eq!(
             layout.buttons[0].rect,
             Rect {
                 left: 12,
                 top: 0,
-                right: 40,
-                bottom: 28
+                right: 32,
+                bottom: 26
             }
         );
-        assert_eq!(layout.total_height, 28);
+        assert_eq!(layout.total_height, 26);
     }
 
     #[test]
@@ -319,16 +320,17 @@ mod tests {
         let layout = compute_layout(&input);
         assert_eq!(layout.buttons.len(), 1);
         assert!(layout.buttons[0].is_add);
+        // add button: top=grip(12), width=20, height=26
         assert_eq!(
             layout.buttons[0].rect,
             Rect {
                 left: 0,
                 top: 12,
-                right: 28,
-                bottom: 40
+                right: 20,
+                bottom: 38
             }
         );
-        assert_eq!(layout.total_width, 28);
+        assert_eq!(layout.total_width, 20);
     }
 
     #[test]
@@ -347,15 +349,15 @@ mod tests {
         // buttons[0] = +, buttons[1] = Downloads.
         assert!(layout.buttons[0].is_add);
         assert!(!layout.buttons[1].is_add);
-        // Downloads x: left edge = grip(12) + add(28) + gap(2) = 42
-        // Downloads width: pad(10) + icon(14) + icon_gap(4) + text(50) + pad(10) = 88
+        // Downloads x: left edge = grip(12) + add(20) + gap(0) = 32
+        // Downloads width: pad(0) + icon(14) + icon_gap(4) + text(50) + pad(0) = 68
         assert_eq!(
             layout.buttons[1].rect,
             Rect {
-                left: 42,
+                left: 32,
                 top: 0,
-                right: 42 + 88,
-                bottom: 28
+                right: 32 + 68,
+                bottom: 26
             }
         );
     }
@@ -374,28 +376,29 @@ mod tests {
         let layout = compute_layout(&input);
         // Every non-text constant scales by 144/96 = 1.5.
         // grip: 12*1.5 = 18
-        // add_size: 28*1.5 = 42
-        // gap: 2*1.5 = 3
-        // pad: 10*1.5 = 15
+        // add_size: 20*1.5 = 30
+        // gap: 0*1.5 = 0
+        // pad: 0*1.5 = 0
         // icon: 14*1.5 = 21
         // icon_gap: 4*1.5 = 6
-        // Downloads width = 15+21+6+75+15 = 132
+        // btn_height: 26*1.5 = 39
+        // Downloads width = 0+21+6+75+0 = 102
         assert_eq!(
             layout.buttons[0].rect,
             Rect {
                 left: 18,
                 top: 0,
-                right: 60,
-                bottom: 42
+                right: 48,
+                bottom: 39
             }
         );
         assert_eq!(
             layout.buttons[1].rect,
             Rect {
-                left: 63,
+                left: 48,
                 top: 0,
-                right: 63 + 132,
-                bottom: 42
+                right: 48 + 102,
+                bottom: 39
             }
         );
     }
@@ -461,9 +464,9 @@ mod tests {
             grip_size_logical_px: 12,
         };
         let layout = compute_layout(&input);
-        // Widest folder width: pad + icon + gap + 200 + pad = 10 + 14 + 4 + 200 + 10 = 238
-        assert_eq!(layout.total_width, 238);
-        assert_eq!(layout.buttons[0].rect.width(), 238); // + button also uses max width
+        // Widest folder width: pad + icon + gap + 200 + pad = 0 + 14 + 4 + 200 + 0 = 218
+        assert_eq!(layout.total_width, 218);
+        assert_eq!(layout.buttons[0].rect.width(), 218); // + button also uses max width
     }
 
     #[test]

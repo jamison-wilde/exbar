@@ -1,6 +1,16 @@
 # Exbar
 
-A floating, configurable folder-shortcut toolbar for Windows 11 File Explorer. Pin your most-used folders to a draggable bar that hovers above Explorer. Click to navigate. Drag files onto a folder button to move or copy them with native Windows semantics (move on same drive, copy across drives; hold Ctrl or Shift to override).
+A floating, configurable folder-shortcut toolbar for Windows 11 File Explorer. 
+
+I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the early 2000's and then mostly have just used QTTabBar since for tabs and folder bars, but it is now bloated, unsupported ('[original](http://qttabbar.wikidot.com/)' version), and currently broken (including the newer [indiff](https://github.com/indiff/qttabbar) version, or needing deep workarounds). I previously used it mostly for tabs and folder bars because 'Quick Access' is a terrible UX. So this is my Rust-built version now that Windows 11's File Explorer has tab support.  
+
+## Features
+* Works with tabs.
+* Drag-n-drop support for copying files with native Windows semantics around ctrl/shift drop.
+* Drag-n-drop support for adding folders to Exbar.
+* Drag re-sort the order of the folders in Exbar.
+* Right click folder for various options.
+* Right click '+' for editing config.
 
 ## Install
 
@@ -51,35 +61,11 @@ If the file doesn't exist, the installer created a stub for you with Downloads, 
 
 Position is remembered across sign-outs. The toolbar auto-hides when you switch to non-Explorer apps.
 
-## Restart the toolbar
-
-If the toolbar disappears (e.g. you killed `exbar.exe` via Task Manager or it crashed), launch it from the Start menu:
-
-**Start menu** → type **Exbar** → **Enter**
-
-Or sign out and back in.
-
-## Uninstall
-
-**Settings** → **Apps** → **Installed apps** → search **Exbar** → **Uninstall**
-
-Your config file (`~\.exbar.json`) is preserved.
-
 ## Requirements
 
 - Windows 11 (x86_64)
-- That's it.
 
 ## Troubleshooting
-
-**The toolbar isn't appearing.**
-Check the log file at `%TEMP%\exbar.log`. If the file is empty or the most recent entries are old, the hook process isn't running. Launch it from Start menu → Exbar. The log should show a line like `foreground event proc: installed ...` shortly after launch.
-
-**SmartScreen warning on install.**
-Expected — the MSI is not yet code-signed. Click "More info" → "Run anyway".
-
-**Toolbar covers other apps.**
-It should hide when non-Explorer apps are in the foreground. If it isn't hiding, check `%TEMP%\exbar.log` for WinEvent activity and file an issue.
 
 ## For developers
 
@@ -93,8 +79,6 @@ cargo build --release
 # Build the MSI installer
 ./scripts/build-msi.sh
 ```
-
-Output: `target/wix/exbar-0.3.0-x64.msi`
 
 Prerequisites:
 - [Rust toolchain](https://rustup.rs/) — requires the `x86_64-pc-windows-msvc` target (installed by default on Windows)
