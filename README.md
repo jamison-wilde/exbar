@@ -4,8 +4,7 @@ A floating, configurable folder-shortcut toolbar for Windows 11 File Explorer. P
 
 ## Install
 
-1. Download `exbar-0.3.0-x64.msi` from the [latest release](https://github.com/YOUR_GITHUB_USERNAME/exbar/releases/latest).
-   <!-- TODO: replace YOUR_GITHUB_USERNAME with the actual GitHub username when the repo is published -->
+1. Download `exbar-0.3.0-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
 2. Double-click the MSI.
 3. Windows SmartScreen will warn you that the publisher is unrecognized (the installer is not yet signed). Click **More info** → **Run anyway**.
 4. Step through the installer dialogs — defaults are correct.
@@ -117,4 +116,4 @@ Current release: v0.3.0. Known caveats:
 
 ## License
 
-See repository for details.
+MIT — see [LICENSE](LICENSE).
