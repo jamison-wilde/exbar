@@ -97,6 +97,7 @@ pub mod picker;
 pub mod pointer;
 pub mod position;
 pub mod rename;
+pub mod rename_edit;
 pub mod shell_windows;
 pub mod theme;
 pub mod toolbar;

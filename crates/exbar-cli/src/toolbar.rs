@@ -42,20 +42,20 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
-use windows::Win32::UI::Controls::{WC_EDITW, WM_MOUSELEAVE};
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetCapture, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DLGC_WANTALLKEYS, DefWindowProcW,
-    DestroyWindow, GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowTextW, HTCAPTION, LWA_ALPHA, PostMessageW, RegisterClassExW,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
+    GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW,
+    HTCAPTION, LWA_ALPHA, PostMessageW, RegisterClassExW,
     SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SendMessageW, SetLayeredWindowAttributes,
+    SetLayeredWindowAttributes,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED,
-    WM_CREATE, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WNDCLASSEXW,
-    WS_BORDER, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+    WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows_core::PCWSTR;
 
@@ -83,7 +83,7 @@ use crate::theme;
 /// - The returned reference borrows the state for the caller's scope; no
 ///   other code path may hold a mutable reference in parallel (guaranteed
 ///   by single-threaded message dispatch).
-unsafe fn toolbar_state<'a>(hwnd: HWND) -> Option<&'a mut ToolbarState> {
+pub(crate) unsafe fn toolbar_state<'a>(hwnd: HWND) -> Option<&'a mut ToolbarState> {
     // SAFETY: GetWindowLongPtrW returns the value set by SetWindowLongPtrW;
     // we stored a Box::into_raw pointer in WM_CREATE.
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ToolbarState;
@@ -105,7 +105,7 @@ fn lparam_point(lparam: LPARAM) -> (i32, i32) {
 
 /// Encode `s` as a null-terminated UTF-16 vector suitable for
 /// `PCWSTR(v.as_ptr())`. The vec must outlive the PCWSTR usage.
-fn wide_null(s: &str) -> Vec<u16> {
+pub(crate) fn wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
@@ -206,7 +206,7 @@ fn hwnd_process_name_is(hwnd: HWND, want: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn exe_hinstance() -> windows::Win32::Foundation::HINSTANCE {
+pub(crate) fn exe_hinstance() -> windows::Win32::Foundation::HINSTANCE {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     let hmod = unsafe { GetModuleHandleW(windows_core::PCWSTR::null()) }
         .unwrap_or(windows::Win32::Foundation::HMODULE(std::ptr::null_mut()));
@@ -525,7 +525,7 @@ impl ToolbarState {
                     }
                 }
                 RenameAction::DestroyEdit { edit_hwnd } => {
-                    destroy_rename_edit(HWND(edit_hwnd as *mut _));
+                    crate::rename_edit::destroy_rename_edit(HWND(edit_hwnd as *mut _));
                 }
                 RenameAction::ReloadToolbar => unsafe {
                     crate::warn_on_err!(PostMessageW(
@@ -857,7 +857,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 let rect = crate::paint::rect_to_win32(state.buttons[idx].rect);
                                 let name = state.buttons[idx].folder.name.clone();
                                 let folder_index = idx - 1; // + button at index 0
-                                start_inline_rename(hwnd, rect, folder_index, &name);
+                                crate::rename_edit::start_inline_rename(hwnd, rect, folder_index, &name);
                             }
                             MENU_ID_REMOVE => {
                                 remove_folder_at(state, hwnd, idx);
@@ -1243,136 +1243,9 @@ fn remove_folder_at(state: &mut ToolbarState, hwnd: HWND, index: usize) {
     }
 }
 
-// ── Inline rename ───────────────────────────────────────────────────────────
-
 use crate::rename::{self, RenameAction, RenameEvent};
 
-fn start_inline_rename(toolbar: HWND, button_rect: RECT, folder_index: usize, initial_name: &str) {
-    // 1. Cancel any in-flight rename via the controller (idempotent if none).
-    // SAFETY: toolbar is the toolbar HWND; we are on the message-pump thread.
-    if let Some(state) = unsafe { toolbar_state(toolbar) } {
-        state.execute_rename_event(toolbar, RenameEvent::Cancelled);
-    }
-
-    // 2. Create the EDIT control over the button's screen rect.
-    let hinstance = exe_hinstance();
-    let wide_initial: Vec<u16> = wide_null(initial_name);
-    // ES_AUTOHSCROLL = 0x0080
-    const ES_AUTOHSCROLL: u32 = 0x0080;
-    let style = WS_CHILD.0 | WS_VISIBLE.0 | WS_BORDER.0 | ES_AUTOHSCROLL;
-
-    let edit = unsafe {
-        CreateWindowExW(
-            windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE(0),
-            WC_EDITW,
-            PCWSTR(wide_initial.as_ptr()),
-            windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(style),
-            button_rect.left,
-            button_rect.top,
-            button_rect.right - button_rect.left,
-            button_rect.bottom - button_rect.top,
-            Some(toolbar),
-            None,
-            Some(hinstance),
-            None,
-        )
-    };
-    let Ok(edit) = edit else {
-        return;
-    };
-
-    // 3. Match the EDIT control's font to the toolbar button text
-    //    (DEFAULT_GUI_FONT, same as draw_buttons). Without this the
-    //    control falls back to the ancient SYSTEM_FONT which renders
-    //    ~8px on modern DPI — unreadable next to the button labels.
-    let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
-    unsafe {
-        SendMessageW(
-            edit,
-            WM_SETFONT,
-            Some(WPARAM(font.0 as usize)),
-            Some(LPARAM(1)),
-        );
-    }
-
-    // 4. Select-all + focus.
-    const EM_SETSEL: u32 = 0x00B1;
-    unsafe {
-        SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
-        let _ = SetFocus(Some(edit));
-    }
-
-    // 5. Subclass with the toolbar HWND as ref_data — no Box::into_raw.
-    // The subclass proc reads context (folder_index) from state.rename_state
-    // via `toolbar_state(toolbar)`.
-    unsafe {
-        use windows::Win32::UI::Shell::SetWindowSubclass;
-        crate::warn_on_err!(
-            SetWindowSubclass(edit, Some(rename_subclass_proc), 1, toolbar.0 as usize).ok()
-        );
-    }
-
-    // 6. Notify the controller — Started transition records the active rename.
-    // SAFETY: same single-thread invariant as the cancel call at the top.
-    if let Some(state) = unsafe { toolbar_state(toolbar) } {
-        state.execute_rename_event(
-            toolbar,
-            RenameEvent::Started {
-                folder_index,
-                edit_hwnd: edit.0 as isize,
-            },
-        );
-    }
-}
-
-unsafe extern "system" fn rename_subclass_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-    _subclass_id: usize,
-    ref_data: usize,
-) -> LRESULT {
-    use windows::Win32::UI::Shell::DefSubclassProc;
-
-    const VK_RETURN: usize = 0x0D;
-    const VK_ESCAPE: usize = 0x1B;
-
-    let toolbar = HWND(ref_data as *mut _);
-    let event = match msg {
-        WM_GETDLGCODE => return LRESULT(DLGC_WANTALLKEYS as isize),
-        WM_KEYDOWN if wparam.0 == VK_RETURN => RenameEvent::CommitRequested {
-            text: read_edit_text(hwnd),
-        },
-        WM_KEYDOWN if wparam.0 == VK_ESCAPE => RenameEvent::Cancelled,
-        WM_KILLFOCUS => RenameEvent::CommitRequested {
-            text: read_edit_text(hwnd),
-        },
-        _ => return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) },
-    };
-
-    // SAFETY: Subclass proc runs on the toolbar's message-pump thread —
-    // same single-threaded invariant `toolbar_state` relies on elsewhere.
-    if let Some(state) = unsafe { toolbar_state(toolbar) } {
-        state.execute_rename_event(toolbar, event);
-    }
-    LRESULT(0)
-}
-
-fn read_edit_text(edit: HWND) -> String {
-    let len = unsafe { GetWindowTextLengthW(edit) } as usize;
-    let mut buf = vec![0u16; len + 1];
-    let got = unsafe { GetWindowTextW(edit, &mut buf) } as usize;
-    String::from_utf16_lossy(&buf[..got])
-}
-
-fn destroy_rename_edit(edit: HWND) {
-    use windows::Win32::UI::Shell::RemoveWindowSubclass;
-    unsafe {
-        let _ = RemoveWindowSubclass(edit, Some(rename_subclass_proc), 1);
-        let _ = DestroyWindow(edit);
-    }
-}
+// ── Inline rename glue ───────────────────────────────────────────────────────
 
 /// Emit a Cancelled event so the controller cleans up any in-flight
 /// rename. Called from WM_DESTROY (parent teardown) and from the pointer
