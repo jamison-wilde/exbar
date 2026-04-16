@@ -405,7 +405,7 @@ fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, ref_hwnd: Option<HWND>) ->
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
-struct ToolbarState {
+pub(crate) struct ToolbarState {
     buttons: Vec<ButtonLayout>,
     dpi: u32,
     config: Option<Config>,
@@ -1812,6 +1812,7 @@ mod tests {
         mk_config_with_folders, mk_deps, mk_folder_button,
     };
     use crate::pointer;
+    use std::path::PathBuf;
     use windows::Win32::Foundation::HWND;
 
     // ── Tests ────────────────────────────────────────────────────────────
