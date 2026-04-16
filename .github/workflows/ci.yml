@@ -45,9 +45,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p exbar-cli
       - run: dotnet tool install --global wix
+      - run: wix eula accept wix7
       - run: wix extension add --global WixToolset.Util.wixext WixToolset.UI.wixext
-      - name: Accept WiX EULA
-        run: wix eula accept wix7
       - name: Build MSI
         run: bash ./scripts/build-msi.sh
       - name: Upload MSI artifact
