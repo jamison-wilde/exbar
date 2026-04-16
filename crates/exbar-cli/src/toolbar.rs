@@ -26,6 +26,7 @@
 //! for soundness — it does not lock.
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
@@ -38,8 +39,7 @@ use std::sync::Arc;
 use crate::clipboard::{Clipboard, Win32Clipboard};
 use crate::config::{Config, ConfigStore, JsonFileStore, Orientation};
 use crate::dragdrop::{FileOperator, Win32FileOp};
-use crate::hit_test;
-use crate::layout::{self, ButtonLayout};
+use crate::layout::ButtonLayout;
 use crate::picker::{FolderPicker, Win32Picker};
 use crate::pointer;
 use crate::shell_windows::{ShellBrowser, Win32Shell};
@@ -83,6 +83,16 @@ pub(crate) const WM_USER_RELOAD: u32 = 0x0401;
 pub(crate) const BTN_PAD_H: i32 = 10;
 /// Logical pixel width/height of the drag handle grip area.
 pub(crate) const GRIP_SIZE: i32 = 12;
+
+// ── Adapter helpers ──────────────────────────────────────────────────────────
+
+/// Emit a `Cancelled` rename event so the controller cleans up any in-flight
+/// rename. Called from `execute_pointer_command` (`CancelInlineRename` command)
+/// and from `wndproc` on `WM_DESTROY` (parent teardown). The transition table
+/// guarantees this is a noop when no rename is active.
+pub(crate) fn cancel_inline_rename(state: &mut ToolbarState, toolbar: HWND) {
+    state.execute_rename_event(toolbar, crate::rename::RenameEvent::Cancelled);
+}
 
 // ── Data structures ──────────────────────────────────────────────────────────
 

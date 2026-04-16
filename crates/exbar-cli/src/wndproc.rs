@@ -14,9 +14,6 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, DefWindowProcW,
     GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW,
@@ -30,7 +27,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::hit_test;
 use crate::layout;
 use crate::pointer;
-use crate::rename::RenameEvent;
 use crate::theme;
 use crate::toolbar::{ToolbarState, WM_USER_RELOAD, GRIP_SIZE, toolbar_state};
 
@@ -51,15 +47,6 @@ fn lparam_point(lparam: LPARAM) -> (i32, i32) {
     let x = (lparam.0 & 0xFFFF) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     (x, y)
-}
-
-/// Emit a Cancelled event so the controller cleans up any in-flight
-/// rename. Called from WM_DESTROY (parent teardown) and from the pointer
-/// state machine's `CancelInlineRename` command (e.g., right-click on
-/// another button while editing). The transition table guarantees this
-/// is a noop when no rename is active.
-fn cancel_inline_rename(state: &mut ToolbarState, toolbar: HWND) {
-    state.execute_rename_event(toolbar, RenameEvent::Cancelled);
 }
 
 /// Toolbar window procedure. Registered as a WNDPROC via
@@ -147,7 +134,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 // Cancel any active inline rename before freeing state.
                 // SAFETY: ptr is non-null and state is still live at this point;
                 // we zero the USERDATA slot and drop state below.
-                cancel_inline_rename(unsafe { &mut *ptr }, hwnd);
+                crate::toolbar::cancel_inline_rename(unsafe { &mut *ptr }, hwnd);
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
                 // SAFETY: The pointer was produced by Box::into_raw in WM_CREATE;
                 // Box::from_raw reclaims it so the Drop runs and state is freed.
