@@ -41,7 +41,7 @@ fn default_opacity() -> f32 {
     0.8
 }
 fn default_new_tab_timeout() -> u32 {
-    500
+    1000
 }
 fn default_reposition_delay() -> u32 {
     250
@@ -327,10 +327,10 @@ mod tests {
     }
 
     #[test]
-    fn new_tab_timeout_defaults_to_500_when_missing() {
+    fn new_tab_timeout_defaults_to_1000_when_missing() {
         let json = r#"{"folders": []}"#;
         let cfg = Config::from_str(json).unwrap();
-        assert_eq!(cfg.new_tab_timeout_ms_zero_disables, 500);
+        assert_eq!(cfg.new_tab_timeout_ms_zero_disables, 1000);
     }
 
     #[test]
