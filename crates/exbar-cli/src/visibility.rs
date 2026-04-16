@@ -9,8 +9,8 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
-    ShowWindow,
+    GetForegroundWindow, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SetWindowPos, ShowWindow,
 };
 
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -38,6 +38,9 @@ const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 const EVENT_SYSTEM_MOVESIZESTART: u32 = 0x000A;
 const EVENT_SYSTEM_MOVESIZEEND: u32 = 0x000B;
+const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
+const OBJID_WINDOW: i32 = 0;
+const CHILDID_SELF: i32 = 0;
 
 // ── Pure classifier ───────────────────────────────────────────────────────────
 
@@ -145,18 +148,20 @@ unsafe extern "system" fn foreground_event_proc(
 
     if event == EVENT_SYSTEM_MINIMIZEEND {
         if is_explorer && let Some(tb) = tb_opt {
-            show_above(tb, hwnd);
+            reposition_and_show(tb, hwnd);
         }
         return;
     }
 
     if event == EVENT_SYSTEM_MOVESIZESTART {
-        // Explorer is being moved/resized — hide toolbar to avoid it
-        // sitting in the wrong position mid-drag.
+        // Explorer is being moved/resized — hide toolbar and set flag.
         if !in_our_process
             && hwnd_in_explorer_process(hwnd)
             && let Some(tb) = tb_opt
         {
+            if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
+                state.explorer_moving = true;
+            }
             unsafe {
                 crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
             }
@@ -165,13 +170,14 @@ unsafe extern "system" fn foreground_event_proc(
     }
 
     if event == EVENT_SYSTEM_MOVESIZEEND {
-        // Explorer finished moving/resizing — reposition and show toolbar.
+        // Explorer finished moving/resizing — clear flag, reposition and show.
         if !in_our_process
             && hwnd_in_explorer_process(hwnd)
             && let Some(tb) = tb_opt
         {
-            // Use the CabinetWClass for origin, not the HWND from the
-            // event (which might be a child window).
+            if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
+                state.explorer_moving = false;
+            }
             let explorer = if class == "CabinetWClass" {
                 hwnd
             } else if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
@@ -179,8 +185,48 @@ unsafe extern "system" fn foreground_event_proc(
             } else {
                 hwnd
             };
-            show_above(tb, explorer);
+            reposition_and_show(tb, explorer);
         }
+        return;
+    }
+
+    if event == EVENT_OBJECT_LOCATIONCHANGE
+        && _id_object == OBJID_WINDOW
+        && _id_child == CHILDID_SELF
+    {
+        // Explorer window moved/resized (maximize, restore, snap, drag finish).
+        // Only react for the active CabinetWClass, and not during a drag
+        // (MOVESIZEEND handles that). Defer via PostMessage to avoid
+        // repositioning from an async callback before geometry settles.
+        if let Some(tb) = tb_opt
+            && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
+            && state.active_explorer == Some(hwnd)
+            && !state.explorer_moving
+        {
+            let delay = state.config.as_ref().map_or(250, |c| c.reposition_delay_ms);
+            log::debug!(
+                "LOCATIONCHANGE: explorer={hwnd:?}, hiding + scheduling reposition ({delay}ms)"
+            );
+            unsafe {
+                // Hide immediately so the toolbar doesn't sit in the wrong
+                // spot during the maximize/restore animation.
+                crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
+                // Schedule reposition after the animation settles.
+                // SetTimer with the same ID replaces any pending timer,
+                // so rapid LOCATIONCHANGE events naturally debounce.
+                let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                    Some(tb),
+                    crate::toolbar::TIMER_REPOSITION,
+                    delay,
+                    None,
+                );
+            }
+        }
+        return;
+    }
+
+    // Ignore all other event types — only process EVENT_SYSTEM_FOREGROUND below.
+    if event != EVENT_SYSTEM_FOREGROUND {
         return;
     }
 
@@ -209,7 +255,7 @@ unsafe extern "system" fn foreground_event_proc(
             let _ = crate::lifecycle::create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
         }
         if let Some(tb) = get_global_toolbar_hwnd() {
-            show_above(tb, hwnd);
+            reposition_and_show(tb, hwnd);
         }
     } else if in_explorer {
         // Explorer-process window (XAML islands, ForegroundStaging, etc.)
@@ -233,14 +279,53 @@ unsafe extern "system" fn foreground_event_proc(
     }
 }
 
-pub(crate) fn show_above(toolbar: HWND, explorer: HWND) {
+/// Show the toolbar and set it topmost. If the active Explorer window has
+/// moved since we last positioned (e.g. maximize/restore), reposition.
+/// Uses `state.active_explorer` (the CabinetWClass HWND) for the origin
+/// check — NOT the event HWND, which may be an XAML island child.
+pub(crate) fn show_above(toolbar: HWND, _explorer: HWND) {
+    if let Some(state) = unsafe { crate::toolbar::toolbar_state(toolbar) }
+        && let Some(active) = state.active_explorer
+    {
+        let current_origin = crate::position::explorer_visible_origin(active);
+        log::debug!(
+            "show_above: active={active:?} origin={current_origin:?} cached={:?}",
+            state.last_explorer_origin
+        );
+        if state.last_explorer_origin != Some(current_origin) {
+            log::debug!("show_above: explorer moved, repositioning");
+            reposition_and_show(toolbar, active);
+            return;
+        }
+    }
+
+    use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
+    unsafe {
+        crate::warn_on_err!(ShowWindow(toolbar, SW_SHOWNA).ok());
+        crate::warn_on_err!(SetWindowPos(
+            toolbar,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        ));
+    }
+}
+
+/// Reposition the toolbar relative to `explorer` using the saved offset,
+/// then show it topmost. Used on Explorer move/resize finish, maximize/restore,
+/// and Explorer window switch — NOT on routine foreground events.
+pub(crate) fn reposition_and_show(toolbar: HWND, explorer: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
 
-    // Reposition toolbar relative to the Explorer window using saved offset.
+    let origin = crate::position::explorer_visible_origin(explorer);
+    log::debug!("reposition_and_show: explorer={explorer:?} origin={origin:?}");
+
     if let Some((off_x, off_y)) = crate::position::load_saved_offset() {
-        let (ox, oy) = crate::position::explorer_visible_origin(explorer);
-        let (tx, ty) = crate::position::apply_offset(off_x, off_y, ox, oy);
-        // Get current toolbar size for clamping.
+        let (tx, ty) = crate::position::apply_offset(off_x, off_y, origin.0, origin.1);
+        log::debug!("reposition_and_show: offset=({off_x},{off_y}) target=({tx},{ty})");
         let mut tr = windows::Win32::Foundation::RECT::default();
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(toolbar, &mut tr);
@@ -248,20 +333,34 @@ pub(crate) fn show_above(toolbar: HWND, explorer: HWND) {
         let tw = tr.right - tr.left;
         let th = tr.bottom - tr.top;
         let (cx, cy) = crate::position::clamp_to_work_area_for(tx, ty, tw, th, Some(explorer));
+        log::debug!("reposition_and_show: clamped=({cx},{cy}) size=({tw},{th})");
         unsafe {
+            // Move first (no z-order change), then show, then raise topmost.
+            // Split into separate calls because during maximize/restore
+            // animations, a single SetWindowPos with move+topmost can lose
+            // the z-order fight with Explorer.
             crate::warn_on_err!(SetWindowPos(
                 toolbar,
-                Some(HWND_TOPMOST),
+                None,
                 cx,
                 cy,
                 0,
                 0,
-                SWP_NOSIZE | SWP_NOACTIVATE,
+                SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
             ));
             crate::warn_on_err!(ShowWindow(toolbar, SW_SHOWNA).ok());
+            crate::warn_on_err!(SetWindowPos(
+                toolbar,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            ));
         }
     } else {
-        // No saved offset — just show in place with topmost.
+        use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
         unsafe {
             crate::warn_on_err!(ShowWindow(toolbar, SW_SHOWNA).ok());
             crate::warn_on_err!(SetWindowPos(
@@ -274,6 +373,11 @@ pub(crate) fn show_above(toolbar: HWND, explorer: HWND) {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             ));
         }
+    }
+
+    // Cache the origin so show_above can detect future moves.
+    if let Some(state) = unsafe { crate::toolbar::toolbar_state(toolbar) } {
+        state.last_explorer_origin = Some(origin);
     }
 }
 
@@ -288,16 +392,19 @@ fn update_toolbar_visibility(toolbar: HWND) {
     }
 }
 
-/// Install the foreground WinEvent hook. Callers must invoke exactly once
-/// (from `run_hook`). Returns the hook handle so the caller can
-/// `UnhookWinEvent` it at process exit.
-pub fn install_foreground_hook() -> HWINEVENTHOOK {
+/// Install WinEvent hooks. Callers must invoke exactly once (from `run_hook`).
+/// Returns both hook handles so the caller can `UnhookWinEvent` them at exit.
+///
+/// Two hooks:
+/// 1. System events (0x0003–0x0017): FOREGROUND, MOVESIZESTART/END, MINIMIZESTART/END
+/// 2. LOCATIONCHANGE (0x800B): detects Explorer maximize/restore/snap
+pub fn install_foreground_hook() -> (HWINEVENTHOOK, HWINEVENTHOOK) {
     // SAFETY: SetWinEventHook registers our extern "system" callback and
     // returns a handle we own; single call from run_hook is the sole user.
-    let hook = unsafe {
+    let system_hook = unsafe {
         SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
-            EVENT_SYSTEM_MINIMIZEEND, // range covers FOREGROUND, MINIMIZESTART, MINIMIZEEND
+            EVENT_SYSTEM_MINIMIZEEND, // range covers FOREGROUND..MINIMIZEEND
             None,
             Some(foreground_event_proc),
             0,
@@ -305,8 +412,19 @@ pub fn install_foreground_hook() -> HWINEVENTHOOK {
             WINEVENT_OUTOFCONTEXT,
         )
     };
-    log::info!("Installed foreground event hook");
-    hook
+    let location_hook = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_LOCATIONCHANGE,
+            None,
+            Some(foreground_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+    log::info!("Installed foreground + location-change event hooks");
+    (system_hook, location_hook)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

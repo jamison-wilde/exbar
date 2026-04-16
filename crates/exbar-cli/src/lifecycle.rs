@@ -31,7 +31,7 @@ pub(crate) const CLASS_NAME: &str = "ExbarToolbar";
 /// Used when registering the window class and creating windows — must be
 /// the same instance that owns the wndproc, i.e. `exbar.exe` itself (not
 /// any injected DLL).
-pub(crate) fn exe_hinstance() -> HINSTANCE {
+pub fn exe_hinstance() -> HINSTANCE {
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     let hmod = unsafe { GetModuleHandleW(windows_core::PCWSTR::null()) }

@@ -223,8 +223,24 @@ fn run_hook() -> ExbarResult<()> {
     //
     // The first CabinetWClass foreground event triggers toolbar creation
     // inside foreground_event_proc.
-    let foreground_hook = visibility::install_foreground_hook();
+    let (system_hook, location_hook) = visibility::install_foreground_hook();
     log::info!("run_hook: foreground hook installed; entering message pump");
+
+    // SetWinEventHook only fires for future events. If Explorer is already
+    // foreground, create the toolbar now instead of waiting for the next
+    // foreground change.
+    {
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        let fg = unsafe { GetForegroundWindow() };
+        let class = exbar_cli::explorer::get_class_name(fg);
+        if class == "CabinetWClass"
+            && let Some(info) = exbar_cli::explorer::check_explorer_ready(fg)
+        {
+            let hinst = exbar_cli::lifecycle::exe_hinstance();
+            let _ =
+                exbar_cli::lifecycle::create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
+        }
+    }
 
     // Message pump — runs indefinitely.
     let mut msg = MSG::default();
@@ -240,11 +256,12 @@ fn run_hook() -> ExbarResult<()> {
     }
 
     // Cleanup — unreachable in normal operation.
-    // SAFETY: foreground_hook is the handle returned by the matching
+    // SAFETY: hooks are the handles returned by the matching
     // install_foreground_hook call on this thread.
     unsafe {
         use windows::Win32::UI::Accessibility::UnhookWinEvent;
-        let _ = UnhookWinEvent(foreground_hook);
+        let _ = UnhookWinEvent(system_hook);
+        let _ = UnhookWinEvent(location_hook);
     }
     unsafe {
         CoUninitialize();

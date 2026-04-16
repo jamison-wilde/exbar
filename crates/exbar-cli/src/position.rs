@@ -36,27 +36,14 @@ pub(crate) fn save_offset(offset_x: i32, offset_y: i32) {
     }
 }
 
-/// Get the visible frame origin of an Explorer window.
-/// Uses DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) to exclude
-/// the invisible ~8px border Windows adds around maximized windows.
-/// Falls back to GetWindowRect if DWM call fails.
+/// Get the window-rect origin of an Explorer window via `GetWindowRect`.
+/// Uses raw window rect (including the invisible DWM border) rather than
+/// `DWMWA_EXTENDED_FRAME_BOUNDS` because the border offset is inconsistent
+/// between maximized (border hidden, rect starts at -8,-8) and restored
+/// (border visible, extended bounds differ from rect by ~8px). Using
+/// `GetWindowRect` consistently means the invisible border cancels out
+/// when computing and applying offsets.
 pub(crate) fn explorer_visible_origin(hwnd: HWND) -> (i32, i32) {
-    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-
-    let mut frame = RECT::default();
-    let hr = unsafe {
-        DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_EXTENDED_FRAME_BOUNDS,
-            &mut frame as *mut RECT as *mut _,
-            std::mem::size_of::<RECT>() as u32,
-        )
-    };
-    if hr.is_ok() {
-        return (frame.left, frame.top);
-    }
-
-    // Fallback: raw window rect (includes invisible border)
     let mut wr = RECT::default();
     unsafe {
         let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr);

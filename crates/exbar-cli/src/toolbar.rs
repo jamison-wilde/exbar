@@ -76,6 +76,8 @@ pub(crate) fn wide_null(s: &str) -> Vec<u16> {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 pub(crate) const WM_USER_RELOAD: u32 = 0x0401;
+/// Timer ID for deferred reposition after maximize/restore animation.
+pub(crate) const TIMER_REPOSITION: usize = 1;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -113,6 +115,12 @@ pub(crate) struct ToolbarState {
     pub(crate) config_store: Box<dyn ConfigStore>,
     // SP4 consolidation — populated in Tasks 2-3:
     pub(crate) active_explorer: Option<HWND>,
+    /// Last-seen Explorer visible origin — used to detect moves/maximize/restore.
+    pub(crate) last_explorer_origin: Option<(i32, i32)>,
+    /// True while an Explorer window is being moved/resized (between
+    /// MOVESIZESTART and MOVESIZEEND). Used to suppress CAPTUREEND
+    /// repositioning during drag — MOVESIZEEND handles that instead.
+    pub(crate) explorer_moving: bool,
     pub(crate) rename_state: Option<rename::RenameState>,
 }
 
@@ -157,6 +165,8 @@ impl ToolbarState {
             clipboard,
             config_store,
             active_explorer: None,
+            last_explorer_origin: None,
+            explorer_moving: false,
             rename_state: None,
         }
     }

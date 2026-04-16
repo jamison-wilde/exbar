@@ -16,9 +16,9 @@ use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, DefWindowProcW, GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW,
-    HTCAPTION, PostMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW,
+    HTCAPTION, KillTimer, PostMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
 };
 
 use crate::hit_test;
@@ -387,6 +387,21 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         x if x == WM_USER_RELOAD => {
             crate::lifecycle::refresh_toolbar(hwnd);
+            LRESULT(0)
+        }
+
+        WM_TIMER if wparam.0 == crate::toolbar::TIMER_REPOSITION => {
+            // Deferred reposition after Explorer maximize/restore animation.
+            // Kill the timer (one-shot) then reposition.
+            unsafe {
+                let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_REPOSITION);
+            }
+            if let Some(state) = unsafe { toolbar_state(hwnd) }
+                && let Some(explorer) = state.active_explorer
+            {
+                log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
+                crate::visibility::reposition_and_show(hwnd, explorer);
+            }
             LRESULT(0)
         }
 

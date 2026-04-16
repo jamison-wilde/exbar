@@ -43,6 +43,9 @@ fn default_opacity() -> f32 {
 fn default_new_tab_timeout() -> u32 {
     500
 }
+fn default_reposition_delay() -> u32 {
+    500
+}
 
 fn deserialize_clamped_timeout<'de, D>(d: D) -> Result<u32, D::Error>
 where
@@ -69,6 +72,11 @@ pub struct Config {
     pub new_tab_timeout_ms_zero_disables: u32,
     #[serde(default)]
     pub log_level: LogLevel,
+    /// Delay in ms before showing the toolbar at its new position after
+    /// Explorer maximize/restore/move. Toolbar hides during this delay
+    /// so it doesn't visually jump mid-animation. 0 = no delay.
+    #[serde(rename = "repositionDelayMs", default = "default_reposition_delay")]
+    pub reposition_delay_ms: u32,
 }
 
 /// One folder shortcut. Persists to JSON as `{"name": "...", "path": "..."}` plus an optional cached icon.
