@@ -46,6 +46,9 @@ fn default_new_tab_timeout() -> u32 {
 fn default_reposition_delay() -> u32 {
     250
 }
+fn default_enable_file_dialogs() -> bool {
+    true
+}
 
 fn deserialize_clamped_timeout<'de, D>(d: D) -> Result<u32, D::Error>
 where
@@ -77,6 +80,8 @@ pub struct Config {
     /// so it doesn't visually jump mid-animation. 0 = no delay.
     #[serde(rename = "repositionDelayMs", default = "default_reposition_delay")]
     pub reposition_delay_ms: u32,
+    #[serde(rename = "enableFileDialogs", default = "default_enable_file_dialogs")]
+    pub enable_file_dialogs: bool,
 }
 
 /// One folder shortcut. Persists to JSON as `{"name": "...", "path": "..."}` plus an optional cached icon.
@@ -493,5 +498,18 @@ mod tests {
         let serialized = serde_json::to_string(&cfg).unwrap();
         let cfg2 = Config::from_str(&serialized).unwrap();
         assert_eq!(cfg2.log_level, LogLevel::Trace);
+    }
+
+    #[test]
+    fn enable_file_dialogs_defaults_to_true() {
+        let cfg: Config = serde_json::from_str(r#"{"folders":[]}"#).unwrap();
+        assert!(cfg.enable_file_dialogs);
+    }
+
+    #[test]
+    fn enable_file_dialogs_respects_explicit_false() {
+        let cfg: Config =
+            serde_json::from_str(r#"{"folders":[],"enableFileDialogs":false}"#).unwrap();
+        assert!(!cfg.enable_file_dialogs);
     }
 }
