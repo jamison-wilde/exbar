@@ -154,6 +154,7 @@ unsafe extern "system" fn foreground_event_proc(
     //   - Explorer's own process popups (tooltips, tree-view pop-outs, etc.)
     //   - OUR process (rename edit, folder picker, popup menu — all transient)
     // Hide only when a window in a DIFFERENT unrelated process takes foreground.
+    let in_explorer = hwnd_in_explorer_process(hwnd);
     if is_explorer {
         if let Some(toolbar_hwnd) = get_global_toolbar_hwnd() {
             // SAFETY: Win32 dispatches WinEvent callbacks on the thread that
@@ -174,9 +175,16 @@ unsafe extern "system" fn foreground_event_proc(
         if let Some(tb) = get_global_toolbar_hwnd() {
             show_above(tb, hwnd);
         }
-    } else if hwnd_in_explorer_process(hwnd) || in_our_process {
-        // Transient popup — either Explorer's own tooltips/tree-views or our
-        // own popup menu / rename edit / folder picker. Keep visible.
+    } else if in_explorer {
+        // Explorer-process window (XAML islands, ForegroundStaging, etc.)
+        // that isn't CabinetWClass. Re-show the toolbar in case it was
+        // hidden by a transient app (e.g. the JSON editor launched by
+        // "Edit Config" briefly taking foreground before Explorer regains it).
+        if let Some(tb) = tb_opt {
+            show_above(tb, hwnd);
+        }
+    } else if in_our_process {
+        // Our own popup menu / rename edit / folder picker. Keep visible.
     } else if let Some(tb) = tb_opt {
         unsafe {
             crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
