@@ -198,22 +198,48 @@ unsafe extern "system" fn foreground_event_proc(
     }
 }
 
-pub(crate) fn show_above(toolbar: HWND, _explorer: HWND) {
+pub(crate) fn show_above(toolbar: HWND, explorer: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
-    unsafe {
-        crate::warn_on_err!(ShowWindow(toolbar, SW_SHOWNA).ok());
-        // Use HWND_TOPMOST so the toolbar stays above Explorer reliably.
-        // When a non-Explorer app is foreground, the toolbar is hidden entirely,
-        // so topmost won't intrude on other applications.
-        crate::warn_on_err!(SetWindowPos(
-            toolbar,
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        ));
+
+    // Reposition toolbar relative to the Explorer window using saved offset.
+    if let Some((off_x, off_y)) = crate::position::load_saved_offset() {
+        let (ox, oy) = crate::position::explorer_visible_origin(explorer);
+        let (tx, ty) = crate::position::apply_offset(off_x, off_y, ox, oy);
+        // Get current toolbar size for clamping.
+        let mut tr = windows::Win32::Foundation::RECT::default();
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(toolbar, &mut tr);
+        }
+        let tw = tr.right - tr.left;
+        let th = tr.bottom - tr.top;
+        let (cx, cy) =
+            crate::position::clamp_to_work_area_for(tx, ty, tw, th, Some(explorer));
+        unsafe {
+            crate::warn_on_err!(SetWindowPos(
+                toolbar,
+                Some(HWND_TOPMOST),
+                cx,
+                cy,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOACTIVATE,
+            ));
+            crate::warn_on_err!(ShowWindow(toolbar, SW_SHOWNA).ok());
+        }
+    } else {
+        // No saved offset — just show in place with topmost.
+        unsafe {
+            crate::warn_on_err!(ShowWindow(toolbar, SW_SHOWNA).ok());
+            crate::warn_on_err!(SetWindowPos(
+                toolbar,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            ));
+        }
     }
 }
 
