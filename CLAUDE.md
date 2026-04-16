@@ -58,7 +58,7 @@ exbar/
 All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` in git-bash).
 
 - **Build:** `cargo build` (dev) or `cargo build --release`
-- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 162 tests across 24 modules
+- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 166 tests across 24 modules
 - **Build only the CLI:** `cargo build --release -p exbar-cli` (faster iteration)
 - **Run the CLI:** `./target/release/exbar.exe <install|uninstall|status|hook>`
 - **Build MSI:** `./scripts/build-msi.sh` (requires WiX v7 installed — see "MSI installer" section)
@@ -85,6 +85,8 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
   - Hides toolbar when a window in a different process becomes foreground
 - `WM_NCHITTEST` returns `HTCAPTION` for the grip area (dots on left/top edge) to make only the grip draggable; buttons get `HTCLIENT` for normal mouse handling
 - Auto-sized in `WM_CREATE` based on `compute_layout`; position is clamped to the work area of the monitor containing the triggering Explorer window
+- **Relative positioning**: toolbar position is stored as an offset from the active Explorer window's origin (`~/.exbar-pos.json`). `EVENT_OBJECT_LOCATIONCHANGE` (filtered to `OBJID_WINDOW`/`CHILDID_SELF` on `active_explorer`) detects Explorer maximize/restore/snap. The toolbar hides during the transition, then repositions after a configurable delay (`repositionDelayMs`, default 250ms) via `SetTimer`/`WM_TIMER`. `MOVESIZESTART`/`END` handle interactive drag (hide during, reposition after). `show_above` compares `last_explorer_origin` to detect changes from non-foreground events.
+- On startup, `run_hook` checks if Explorer is already foreground and creates the toolbar immediately (fixes post-MSI-install appearance)
 
 ### Navigation
 

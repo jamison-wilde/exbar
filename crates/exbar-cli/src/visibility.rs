@@ -155,13 +155,13 @@ unsafe extern "system" fn foreground_event_proc(
 
     if event == EVENT_SYSTEM_MOVESIZESTART {
         // Explorer is being moved/resized — hide toolbar and set flag.
-        if !in_our_process
-            && hwnd_in_explorer_process(hwnd)
-            && let Some(tb) = tb_opt
+        // Only react for the active Explorer to avoid hiding when a
+        // different Explorer window is being moved.
+        if let Some(tb) = tb_opt
+            && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
+            && state.active_explorer == Some(hwnd)
         {
-            if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
-                state.explorer_moving = true;
-            }
+            state.explorer_moving = true;
             unsafe {
                 crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
             }
@@ -171,21 +171,12 @@ unsafe extern "system" fn foreground_event_proc(
 
     if event == EVENT_SYSTEM_MOVESIZEEND {
         // Explorer finished moving/resizing — clear flag, reposition and show.
-        if !in_our_process
-            && hwnd_in_explorer_process(hwnd)
-            && let Some(tb) = tb_opt
+        if let Some(tb) = tb_opt
+            && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
+            && state.active_explorer == Some(hwnd)
         {
-            if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
-                state.explorer_moving = false;
-            }
-            let explorer = if class == "CabinetWClass" {
-                hwnd
-            } else if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
-                state.active_explorer.unwrap_or(hwnd)
-            } else {
-                hwnd
-            };
-            reposition_and_show(tb, explorer);
+            state.explorer_moving = false;
+            reposition_and_show(tb, hwnd);
         }
         return;
     }
@@ -360,7 +351,6 @@ pub(crate) fn reposition_and_show(toolbar: HWND, explorer: HWND) {
             ));
         }
     } else {
-        use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
         unsafe {
             crate::warn_on_err!(ShowWindow(toolbar, SW_SHOWNA).ok());
             crate::warn_on_err!(SetWindowPos(

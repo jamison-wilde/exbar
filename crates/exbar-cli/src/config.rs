@@ -44,7 +44,7 @@ fn default_new_tab_timeout() -> u32 {
     500
 }
 fn default_reposition_delay() -> u32 {
-    500
+    250
 }
 
 fn deserialize_clamped_timeout<'de, D>(d: D) -> Result<u32, D::Error>
