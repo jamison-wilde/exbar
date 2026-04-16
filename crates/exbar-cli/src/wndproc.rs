@@ -198,12 +198,12 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         WM_MOVE => {
             let (x, y) = lparam_point(lparam);
-            if let Some(state) = unsafe { toolbar_state(hwnd) } {
-                if let Some(explorer) = state.active_explorer {
-                    let (ox, oy) = crate::position::explorer_visible_origin(explorer);
-                    let (off_x, off_y) = crate::position::compute_offset(x, y, ox, oy);
-                    crate::position::save_offset(off_x, off_y);
-                }
+            if let Some(state) = unsafe { toolbar_state(hwnd) }
+                && let Some(explorer) = state.active_explorer
+            {
+                let (ox, oy) = crate::position::explorer_visible_origin(explorer);
+                let (off_x, off_y) = crate::position::compute_offset(x, y, ox, oy);
+                crate::position::save_offset(off_x, off_y);
             }
             LRESULT(0)
         }

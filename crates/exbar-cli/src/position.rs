@@ -41,7 +41,7 @@ pub(crate) fn save_offset(offset_x: i32, offset_y: i32) {
 /// the invisible ~8px border Windows adds around maximized windows.
 /// Falls back to GetWindowRect if DWM call fails.
 pub(crate) fn explorer_visible_origin(hwnd: HWND) -> (i32, i32) {
-    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 
     let mut frame = RECT::default();
     let hr = unsafe {
@@ -127,22 +127,12 @@ pub fn clamp_to_work_area_for(
 }
 
 /// Compute the toolbar's offset relative to an Explorer window origin.
-pub fn compute_offset(
-    toolbar_x: i32,
-    toolbar_y: i32,
-    origin_x: i32,
-    origin_y: i32,
-) -> (i32, i32) {
+pub fn compute_offset(toolbar_x: i32, toolbar_y: i32, origin_x: i32, origin_y: i32) -> (i32, i32) {
     (toolbar_x - origin_x, toolbar_y - origin_y)
 }
 
 /// Apply a saved offset to an Explorer window origin to get screen coords.
-pub fn apply_offset(
-    offset_x: i32,
-    offset_y: i32,
-    origin_x: i32,
-    origin_y: i32,
-) -> (i32, i32) {
+pub fn apply_offset(offset_x: i32, offset_y: i32, origin_x: i32, origin_y: i32) -> (i32, i32) {
     (origin_x + offset_x, origin_y + offset_y)
 }
 

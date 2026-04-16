@@ -153,11 +153,12 @@ unsafe extern "system" fn foreground_event_proc(
     if event == EVENT_SYSTEM_MOVESIZESTART {
         // Explorer is being moved/resized — hide toolbar to avoid it
         // sitting in the wrong position mid-drag.
-        if !in_our_process && hwnd_in_explorer_process(hwnd) {
-            if let Some(tb) = tb_opt {
-                unsafe {
-                    crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
-                }
+        if !in_our_process
+            && hwnd_in_explorer_process(hwnd)
+            && let Some(tb) = tb_opt
+        {
+            unsafe {
+                crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
             }
         }
         return;
@@ -165,19 +166,20 @@ unsafe extern "system" fn foreground_event_proc(
 
     if event == EVENT_SYSTEM_MOVESIZEEND {
         // Explorer finished moving/resizing — reposition and show toolbar.
-        if !in_our_process && hwnd_in_explorer_process(hwnd) {
-            if let Some(tb) = tb_opt {
-                // Use the CabinetWClass for origin, not the HWND from the
-                // event (which might be a child window).
-                let explorer = if class == "CabinetWClass" {
-                    hwnd
-                } else if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
-                    state.active_explorer.unwrap_or(hwnd)
-                } else {
-                    hwnd
-                };
-                show_above(tb, explorer);
-            }
+        if !in_our_process
+            && hwnd_in_explorer_process(hwnd)
+            && let Some(tb) = tb_opt
+        {
+            // Use the CabinetWClass for origin, not the HWND from the
+            // event (which might be a child window).
+            let explorer = if class == "CabinetWClass" {
+                hwnd
+            } else if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
+                state.active_explorer.unwrap_or(hwnd)
+            } else {
+                hwnd
+            };
+            show_above(tb, explorer);
         }
         return;
     }
@@ -215,13 +217,12 @@ unsafe extern "system" fn foreground_event_proc(
         // is genuinely foreground — Win11 fires these events during
         // transition animations even when switching AWAY from Explorer.
         let actual_fg = unsafe { GetForegroundWindow() };
-        if actual_fg == hwnd
+        if (actual_fg == hwnd
             || crate::explorer::get_class_name(actual_fg) == "CabinetWClass"
-            || hwnd_in_explorer_process(actual_fg)
+            || hwnd_in_explorer_process(actual_fg))
+            && let Some(tb) = tb_opt
         {
-            if let Some(tb) = tb_opt {
-                show_above(tb, hwnd);
-            }
+            show_above(tb, hwnd);
         }
     } else if in_our_process {
         // Our own popup menu / rename edit / folder picker. Keep visible.
@@ -246,8 +247,7 @@ pub(crate) fn show_above(toolbar: HWND, explorer: HWND) {
         }
         let tw = tr.right - tr.left;
         let th = tr.bottom - tr.top;
-        let (cx, cy) =
-            crate::position::clamp_to_work_area_for(tx, ty, tw, th, Some(explorer));
+        let (cx, cy) = crate::position::clamp_to_work_area_for(tx, ty, tw, th, Some(explorer));
         unsafe {
             crate::warn_on_err!(SetWindowPos(
                 toolbar,
