@@ -98,6 +98,26 @@ pub fn clamp_to_work_area_for(
     clamp_to_work_area(x, y, w, h, work_area_for(ref_hwnd))
 }
 
+/// Compute the toolbar's offset relative to an Explorer window origin.
+pub fn compute_offset(
+    toolbar_x: i32,
+    toolbar_y: i32,
+    origin_x: i32,
+    origin_y: i32,
+) -> (i32, i32) {
+    (toolbar_x - origin_x, toolbar_y - origin_y)
+}
+
+/// Apply a saved offset to an Explorer window origin to get screen coords.
+pub fn apply_offset(
+    offset_x: i32,
+    offset_y: i32,
+    origin_x: i32,
+    origin_y: i32,
+) -> (i32, i32) {
+    (origin_x + offset_x, origin_y + offset_y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +169,28 @@ mod tests {
         assert_eq!(clamp_to_work_area(2000, 100, 400, 40, work), (2000, 100));
         assert_eq!(clamp_to_work_area(1800, 100, 400, 40, work), (1920, 100));
         assert_eq!(clamp_to_work_area(4000, 100, 400, 40, work), (3440, 100));
+    }
+
+    #[test]
+    fn compute_offset_basic() {
+        assert_eq!(compute_offset(500, 200, 100, 100), (400, 100));
+    }
+
+    #[test]
+    fn apply_offset_basic() {
+        assert_eq!(apply_offset(400, 100, 100, 100), (500, 200));
+    }
+
+    #[test]
+    fn offset_round_trip() {
+        let (ox, oy) = compute_offset(500, 200, 100, 100);
+        assert_eq!(apply_offset(ox, oy, 100, 100), (500, 200));
+    }
+
+    #[test]
+    fn offset_negative_origin_multi_monitor() {
+        let (ox, oy) = compute_offset(-1500, 200, -1920, 0);
+        assert_eq!((ox, oy), (420, 200));
+        assert_eq!(apply_offset(ox, oy, -1920, 0), (-1500, 200));
     }
 }
