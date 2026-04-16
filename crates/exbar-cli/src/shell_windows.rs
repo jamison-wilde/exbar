@@ -318,36 +318,67 @@ impl ShellBrowser for Win32Shell {
             before_hwnds,
         );
 
-        // Post Ctrl+T to the Explorer window. This works when Explorer has
-        // foreground (ctrl+click path) but not after a right-click context
-        // menu steals focus. The timeout fallback handles the menu case.
+        // Give Explorer foreground, then inject Ctrl+T via SendInput.
+        // SendInput works at the hardware input level so it reaches Explorer
+        // even after a right-click context menu stole focus. PostMessageW
+        // only works when Explorer already has foreground (ctrl+click path).
         unsafe {
-            use windows::Win32::Foundation::{LPARAM, WPARAM};
-            use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN, WM_KEYUP};
-            crate::warn_on_err!(PostMessageW(
-                Some(explorer),
-                WM_KEYDOWN,
-                WPARAM(VK_CONTROL),
-                LPARAM(0)
-            ));
-            crate::warn_on_err!(PostMessageW(
-                Some(explorer),
-                WM_KEYDOWN,
-                WPARAM(VK_T_KEY),
-                LPARAM(0)
-            ));
-            crate::warn_on_err!(PostMessageW(
-                Some(explorer),
-                WM_KEYUP,
-                WPARAM(VK_T_KEY),
-                LPARAM(0)
-            ));
-            crate::warn_on_err!(PostMessageW(
-                Some(explorer),
-                WM_KEYUP,
-                WPARAM(VK_CONTROL),
-                LPARAM(0)
-            ));
+            use windows::Win32::UI::Input::KeyboardAndMouse::{
+                INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+                SendInput, VIRTUAL_KEY,
+            };
+            use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+
+            let _ = SetForegroundWindow(explorer);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            let vk_ctrl = VIRTUAL_KEY(VK_CONTROL as u16);
+            let vk_t = VIRTUAL_KEY(VK_T_KEY as u16);
+
+            let inputs = [
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: vk_ctrl,
+                            dwFlags: KEYBD_EVENT_FLAGS(0),
+                            ..Default::default()
+                        },
+                    },
+                },
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: vk_t,
+                            dwFlags: KEYBD_EVENT_FLAGS(0),
+                            ..Default::default()
+                        },
+                    },
+                },
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: vk_t,
+                            dwFlags: KEYEVENTF_KEYUP,
+                            ..Default::default()
+                        },
+                    },
+                },
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: vk_ctrl,
+                            dwFlags: KEYEVENTF_KEYUP,
+                            ..Default::default()
+                        },
+                    },
+                },
+            ];
+            let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            log::debug!("open_in_new_tab: SendInput sent {sent}/4 events");
         }
 
         let start = std::time::Instant::now();

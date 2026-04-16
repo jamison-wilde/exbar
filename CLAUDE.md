@@ -81,7 +81,8 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
 - `HWND_TOPMOST` when visible — avoids z-order issues with Explorer's WinUI 3 XAML content
 - `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, ...)` monitors foreground changes
   - Shows toolbar when a `CabinetWClass` becomes foreground
-  - Keeps toolbar visible when another window in `explorer.exe` becomes foreground (tooltips, tree view, Quick Access popups)
+  - Keeps toolbar visible when another `explorer.exe` window whose root ancestor is the active CabinetWClass becomes foreground (tooltips, tree view, Quick Access popups, XAML islands)
+  - Ignores explorer-process windows whose root is NOT the active CabinetWClass (alt-tab/win-tab task switcher overlay)
   - Hides toolbar when a window in a different process becomes foreground
 - `WM_NCHITTEST` returns `HTCAPTION` for the grip area (dots on left/top edge) to make only the grip draggable; buttons get `HTCLIENT` for normal mouse handling
 - Auto-sized in `WM_CREATE` based on `compute_layout`; position is clamped to the work area of the monitor containing the triggering Explorer window
@@ -167,7 +168,10 @@ All runtime state lives on `ToolbarState`, owned by the wndproc via `GWLP_USERDA
 - **Toolbar UI thread blocks during `open_in_new_tab`**: the poll sleeps up to `newTabTimeoutMsZeroDisables` ms on the toolbar's wndproc thread. Accepted trade-off for v0.2.0 simplicity; revisit with a worker-thread variant if it feels bad.
 - **Hook process must not show a console**: `exbar.exe hook` calls `FreeConsole()` at the start to detach from any inherited console. The MSI's post-install custom action otherwise opens a visible terminal window. Don't add `println!` calls in `run_hook()` after `FreeConsole` — they'll silently no-op.
 - **Process-name detection for the foreground hook**: `hwnd_in_our_process` checks PID against `std::process::id()` (exbar.exe). `hwnd_in_explorer_process` does an executable-name check (`explorer.exe`) via `GetModuleFileNameExW`. The combination keeps the toolbar visible over Explorer's own popups (tooltips, tree-views, Quick Access flyouts) while still hiding when a different app takes foreground.
-- **Foreground hook must be installed before the first toolbar exists**: `install_foreground_hook()` is called from `run_hook()` (not from toolbar `WM_CREATE`) because the hook is what creates the toolbar on the first `CabinetWClass` foreground event. Chicken-and-egg if reversed.
+- **Alt-tab/win-tab overlay is explorer.exe**: the task switcher UI uses `XamlExplorerHostIslandWindow` in explorer.exe's process — same class as Explorer's own XAML content. Distinguish via `GetAncestor(hwnd, GA_ROOT)`: if the root is the active CabinetWClass, it's a real Explorer child (show toolbar); if not, it's the task switcher (ignore).
+- **Win11 new-tab detection**: `IShellWindows` entries for tabs in the same window share the same HWND. Detect a new tab by `IShellWindows.Count()` increase, not by new-HWND appearance. The new tab is the last entry in enumeration. `open_in_new_tab` uses `SendInput` (hardware-level Ctrl+T injection) rather than `PostMessageW` because PostMessage doesn't reach Explorer after a right-click context menu steals focus.
+- **`OleInitialize` required**: `RegisterDragDrop` requires `OleInitialize`, not just `CoInitializeEx(COINIT_APARTMENTTHREADED)`. Without it, drop target registration silently fails.
+- **Foreground hook must be installed before the first toolbar exists**: `install_foreground_hook()` is called from `run_hook()` (not from toolbar `WM_CREATE`) because the hook is what creates the toolbar on the first `CabinetWClass` foreground event. Chicken-and-egg if reversed. However, `run_hook` also checks if Explorer is already foreground and creates the toolbar immediately (handles post-MSI-install case).
 
 ## Logging
 

@@ -249,17 +249,40 @@ unsafe extern "system" fn foreground_event_proc(
             reposition_and_show(tb, hwnd);
         }
     } else if in_explorer {
-        // Explorer-process window (XAML islands, ForegroundStaging, etc.)
-        // that isn't CabinetWClass. Re-show the toolbar only if Explorer
-        // is genuinely foreground — Win11 fires these events during
-        // transition animations even when switching AWAY from Explorer.
-        let actual_fg = unsafe { GetForegroundWindow() };
-        if (actual_fg == hwnd
-            || crate::explorer::get_class_name(actual_fg) == "CabinetWClass"
-            || hwnd_in_explorer_process(actual_fg))
-            && let Some(tb) = tb_opt
+        // Explorer-process window that isn't CabinetWClass. Only show the
+        // toolbar if it's related to the active Explorer file browser —
+        // check that its root ancestor is the active CabinetWClass.
+        // This filters out alt-tab/win-tab (XamlExplorerHostIslandWindow
+        // owned by the task switcher, not by a CabinetWClass) while still
+        // allowing Explorer's own XAML islands and popups through.
+        if let Some(tb) = tb_opt
+            && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
+            && let Some(active) = state.active_explorer
         {
-            show_above(tb, hwnd);
+            let root = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                    hwnd,
+                    windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                )
+            };
+            if root == active {
+                log::debug!(
+                    "foreground: explorer-process class={class:?} root={root:?} matches active, showing"
+                );
+                // Also verify Explorer is genuinely foreground — Win11 fires
+                // XAML events during transition animations away from Explorer.
+                let actual_fg = unsafe { GetForegroundWindow() };
+                if actual_fg == hwnd
+                    || crate::explorer::get_class_name(actual_fg) == "CabinetWClass"
+                    || hwnd_in_explorer_process(actual_fg)
+                {
+                    show_above(tb, hwnd);
+                }
+            } else {
+                log::debug!(
+                    "foreground: explorer-process class={class:?} root={root:?} != active={active:?}, ignoring (task switcher?)"
+                );
+            }
         }
     } else if in_our_process {
         // Our own popup menu / rename edit / folder picker. Keep visible.

@@ -2,15 +2,16 @@
 
 A floating, configurable folder-shortcut toolbar for Windows 11 File Explorer. 
 
-I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the early 2000's and then mostly have just used QTTabBar since for tabs and folder bars, but it is now bloated, unsupported ('[original](http://qttabbar.wikidot.com/)' version), and currently broken (including the newer [indiff](https://github.com/indiff/qttabbar) version, or needing deep workarounds). I previously used it mostly for tabs and folder bars because 'Quick Access' is a terrible UX. So this is my Rust-built version now that Windows 11's File Explorer has tab support.  
+I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the early 2000's and then mostly have just used QTTabBar since for tabs and folder bars, but it is now bloated, unsupported ('[original](http://qttabbar.wikidot.com/)' version), and currently broken (including the newer [indiff](https://github.com/indiff/qttabbar) version, or needing deep workarounds) on Windows 11. I previously used it mostly for tabs and folder bars because 'Quick Access' is a terrible UX. So this is my Rust-built version now that Windows 11's File Explorer has tab support.  
 
 ## Features
-* Works with tabs.
-* Drag-n-drop support for copying files with native Windows semantics around ctrl/shift drop.
+* Works with tabs, changing the active tab when clicking a folder in exbar. Ctrl-click to open in new tab.
+* Drag-n-drop support for moving and copying files with native Windows semantics around ctrl/shift drop.
 * Drag-n-drop support for adding folders to Exbar.
 * Drag re-sort the order of the folders in Exbar.
-* Right click folder for various options.
+* Right click exbar folder for various options, like
 * Right click '+' for editing config.
+* Remembers relative position and adjusts after drag, resize and maximize events.
 
 ## Install
 
