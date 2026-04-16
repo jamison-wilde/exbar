@@ -386,6 +386,27 @@ impl ShellBrowser for Win32Shell {
     }
 }
 
+fn open_in_new_window(path: &str) {
+    let quoted = format!("\"{path}\"");
+    let path_wide: Vec<u16> = quoted.encode_utf16().chain(std::iter::once(0)).collect();
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let exe: Vec<u16> = "explorer.exe"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let _ = ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(exe.as_ptr()),
+            PCWSTR(path_wide.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_mocks {
     use super::ShellBrowser;
@@ -414,26 +435,5 @@ pub(crate) mod test_mocks {
                 timeout_ms,
             ));
         }
-    }
-}
-
-fn open_in_new_window(path: &str) {
-    let quoted = format!("\"{path}\"");
-    let path_wide: Vec<u16> = quoted.encode_utf16().chain(std::iter::once(0)).collect();
-    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
-    let exe: Vec<u16> = "explorer.exe"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-
-    unsafe {
-        let _ = ShellExecuteW(
-            None,
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(exe.as_ptr()),
-            PCWSTR(path_wide.as_ptr()),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
     }
 }

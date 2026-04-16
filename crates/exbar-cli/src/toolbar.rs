@@ -1802,14 +1802,8 @@ fn cancel_inline_rename(state: &mut ToolbarState, toolbar: HWND) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clipboard::test_mocks::MockClipboard;
-    use crate::config::test_mocks::MockConfigStore;
-    use crate::dragdrop::test_mocks::MockFileOp;
-    use crate::picker::test_mocks::MockFolderPicker;
-    use crate::shell_windows::test_mocks::MockShellBrowser;
     use crate::test_helpers::{
-        CfgArc, ClipArc, PickerArc, TestDeps, make_test_state, mk_add_button,
-        mk_config_with_folders, mk_deps, mk_folder_button,
+        make_test_state, mk_add_button, mk_config_with_folders, mk_deps, mk_folder_button,
     };
     use crate::pointer;
     use std::path::PathBuf;
