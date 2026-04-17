@@ -30,6 +30,79 @@ pub(crate) fn get_global_toolbar_hwnd() -> Option<HWND> {
     GLOBAL_TOOLBAR.lock().unwrap().map(|h| HWND(h as *mut _))
 }
 
+// ── File-dialog probe ─────────────────────────────────────────────────────────
+
+/// Can tell whether a given HWND is a Shell-hosted file dialog, i.e. whether
+/// it has a `SHELLDLL_DefView` descendant. Separated behind a trait so the
+/// pure classifier can be tested without touching Win32.
+pub trait DefViewProbe {
+    fn has_defview(&self, hwnd: HWND) -> bool;
+}
+
+/// Production probe: walks the window tree via `EnumChildWindows`, checking
+/// each child's class name for `SHELLDLL_DefView`.
+pub struct Win32DefViewProbe;
+
+impl DefViewProbe for Win32DefViewProbe {
+    fn has_defview(&self, hwnd: HWND) -> bool {
+        use windows::Win32::Foundation::LPARAM;
+        use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
+        use windows_core::BOOL;
+
+        struct Ctx {
+            found: bool,
+        }
+        unsafe extern "system" fn cb(child: HWND, lparam: LPARAM) -> BOOL {
+            let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+            let mut buf = [0u16; 64];
+            let n = unsafe { GetClassNameW(child, &mut buf) } as usize;
+            if n > 0 && String::from_utf16_lossy(&buf[..n]) == "SHELLDLL_DefView" {
+                ctx.found = true;
+                BOOL(0) // stop enumeration
+            } else {
+                BOOL(1)
+            }
+        }
+        let mut ctx = Ctx { found: false };
+        unsafe {
+            let _ = EnumChildWindows(Some(hwnd), Some(cb), LPARAM(&mut ctx as *mut _ as isize));
+        }
+        ctx.found
+    }
+}
+
+/// Role a foreground HWND can play for the toolbar.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HwndRole {
+    /// A Shell-hosted file dialog (Save As / Open). Toolbar attaches to this.
+    FileDialog,
+    /// Not a role the toolbar cares about specifically.
+    Unknown,
+}
+
+/// Pure: decide whether an HWND represents a Shell-hosted file dialog.
+///
+/// Gated on `dialog_enabled` so the `Config.enable_file_dialogs = false`
+/// escape hatch produces `Unknown`.
+///
+/// Recognises a file dialog by: class name `#32770` AND a `SHELLDLL_DefView`
+/// descendant. Class name is passed in rather than queried here to keep this
+/// function fully pure and testable.
+pub fn classify_hwnd(
+    hwnd: HWND,
+    class_name: &str,
+    dialog_enabled: bool,
+    probe: &impl DefViewProbe,
+) -> HwndRole {
+    if !dialog_enabled {
+        return HwndRole::Unknown;
+    }
+    if class_name == "#32770" && probe.has_defview(hwnd) {
+        return HwndRole::FileDialog;
+    }
+    HwndRole::Unknown
+}
+
 // ── Foreground window tracking ───────────────────────────────────────────────
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
@@ -490,6 +563,71 @@ mod tests {
         assert_eq!(
             classify_foreground(7, Some("C:/Windows/explorer.exe"), 1),
             Foreground::Explorer
+        );
+    }
+
+    struct MockDefView(bool);
+    impl super::DefViewProbe for MockDefView {
+        fn has_defview(&self, _hwnd: windows::Win32::Foundation::HWND) -> bool {
+            self.0
+        }
+    }
+
+    #[test]
+    fn mock_defview_true() {
+        let m = MockDefView(true);
+        assert!(m.has_defview(HWND(42 as *mut _)));
+    }
+
+    #[test]
+    fn mock_defview_false() {
+        let m = MockDefView(false);
+        assert!(!m.has_defview(HWND(42 as *mut _)));
+    }
+
+    #[test]
+    fn classify_hwnd_dialog_class_with_defview_is_file_dialog() {
+        let probe = MockDefView(true);
+        assert_eq!(
+            classify_hwnd(
+                HWND(42 as *mut _),
+                "#32770",
+                /* dialog_enabled */ true,
+                &probe
+            ),
+            HwndRole::FileDialog,
+        );
+    }
+
+    #[test]
+    fn classify_hwnd_dialog_class_without_defview_is_unknown() {
+        let probe = MockDefView(false);
+        assert_eq!(
+            classify_hwnd(HWND(42 as *mut _), "#32770", true, &probe),
+            HwndRole::Unknown,
+        );
+    }
+
+    #[test]
+    fn classify_hwnd_non_dialog_class_is_unknown_even_if_defview_exists() {
+        let probe = MockDefView(true);
+        assert_eq!(
+            classify_hwnd(HWND(42 as *mut _), "CabinetWClass", true, &probe),
+            HwndRole::Unknown,
+        );
+    }
+
+    #[test]
+    fn classify_hwnd_dialog_disabled_suppresses_file_dialog() {
+        let probe = MockDefView(true);
+        assert_eq!(
+            classify_hwnd(
+                HWND(42 as *mut _),
+                "#32770",
+                /* dialog_enabled */ false,
+                &probe
+            ),
+            HwndRole::Unknown,
         );
     }
 }
