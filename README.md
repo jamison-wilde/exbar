@@ -3,9 +3,9 @@
 A configurable folder toolbar for Windows 11 File Explorer and Open/Save As dialogs. 
 
 
-![Main Explorer Demo](docs/images/main_demo_webm.mp4)
+![Main Explorer Demo](docs/images/main_demo.gif)
 
-![Save/Open Dialog Demo](docs/images/dialog_demo_webm.mp4)
+![Save/Open Dialog Demo](docs/images/dialog_demo.gif)
 
 I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the early 2000's and then mostly have just used QTTabBar since for tabs and folder bars, but it is now bloated, unsupported ('[original](http://qttabbar.wikidot.com/)' version), and currently broken (including the newer [indiff](https://github.com/indiff/qttabbar) version, or needing deep workarounds) on Windows 11. I previously used it mostly for tabs and folder bars because 'Quick Access' is a terrible UX. This is my Rust-built version now that Windows 11's File Explorer has tab support.  
 
