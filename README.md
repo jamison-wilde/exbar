@@ -16,7 +16,7 @@ I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the 
 
 ## Install
 
-1. Download `exbar-1.0.0-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
+1. Download `exbar-1.1.0-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
 2. Double-click the MSI.
 3. Windows SmartScreen will warn you that the publisher is unrecognized (the installer is not yet signed). Click **More info** → **Run anyway**.
 4. Step through the installer dialogs — defaults are correct.
@@ -94,7 +94,7 @@ See `CLAUDE.md` for architecture notes and the live-iteration build loop.
 
 ## Status
 
-Current release: v1.0.0. Known caveats:
+Current release: v1.1.0. Known caveats:
 - Installer is unsigned (SmartScreen warning)
 - Icon support not yet implemented (folder emoji + label only)
 - Only tested on Win11, x86_64, single-user installs
