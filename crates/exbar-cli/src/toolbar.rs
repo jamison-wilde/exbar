@@ -36,6 +36,7 @@ use std::sync::Arc;
 
 use crate::clipboard::{Clipboard, Win32Clipboard};
 use crate::config::{Config, ConfigStore, JsonFileStore, Orientation};
+use crate::dialog_nav::{DialogNavigator, KeybdDialogNavigator};
 use crate::dragdrop::{FileOperator, Win32FileOp};
 use crate::layout::ButtonLayout;
 use crate::picker::{FolderPicker, Win32Picker};
@@ -108,11 +109,12 @@ pub(crate) struct ToolbarState {
     pub(crate) mouse_tracking_started: bool,
     pub(crate) self_release_pending: bool,
     // SP3 trait seams
-    pub(crate) shell_browser: Box<dyn ShellBrowser>,
-    pub(crate) folder_picker: Box<dyn FolderPicker>,
-    pub(crate) file_operator: Arc<dyn FileOperator>,
     pub(crate) clipboard: Box<dyn Clipboard>,
     pub(crate) config_store: Box<dyn ConfigStore>,
+    pub(crate) dialog_nav: Box<dyn DialogNavigator>,
+    pub(crate) file_operator: Arc<dyn FileOperator>,
+    pub(crate) folder_picker: Box<dyn FolderPicker>,
+    pub(crate) shell_browser: Box<dyn ShellBrowser>,
     // SP4 consolidation — populated in Tasks 2-3:
     pub(crate) active_target: Option<crate::target::ActiveTarget>,
     /// Last-seen Explorer visible origin — used to detect moves/maximize/restore.
@@ -134,9 +136,11 @@ impl ToolbarState {
             Arc::new(Win32FileOp::new()),
             Box::new(Win32Clipboard::new()),
             Box::new(JsonFileStore::new()),
+            Box::new(KeybdDialogNavigator::new()),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_deps(
         dpi: u32,
         config: Option<Config>,
@@ -145,6 +149,7 @@ impl ToolbarState {
         file_operator: Arc<dyn FileOperator>,
         clipboard: Box<dyn Clipboard>,
         config_store: Box<dyn ConfigStore>,
+        dialog_nav: Box<dyn DialogNavigator>,
     ) -> Self {
         let layout = config
             .as_ref()
@@ -159,11 +164,12 @@ impl ToolbarState {
             pointer: pointer::PointerState::default(),
             mouse_tracking_started: false,
             self_release_pending: false,
-            shell_browser,
-            folder_picker,
-            file_operator,
             clipboard,
             config_store,
+            dialog_nav,
+            file_operator,
+            folder_picker,
+            shell_browser,
             active_target: None,
             last_explorer_origin: None,
             explorer_moving: false,
@@ -254,10 +260,25 @@ impl ToolbarState {
                         } else {
                             log::debug!("FireFolderClick(ctrl): no active explorer");
                         }
-                    } else if let Some(explorer) = self.active_target.map(|t| t.hwnd) {
-                        crate::warn_on_err!(self.shell_browser.navigate(explorer, &path));
                     } else {
-                        log::debug!("FireFolderClick: no active explorer");
+                        match self.active_target.map(|t| t.kind) {
+                            Some(crate::target::TargetKind::FileDialog) => {
+                                if let Some(target) = self.active_target
+                                    && let Err(e) = self.dialog_nav.navigate(target.hwnd, &path)
+                                {
+                                    log::warn!("dialog navigate failed: {e:?}");
+                                }
+                            }
+                            Some(crate::target::TargetKind::Explorer) => {
+                                crate::warn_on_err!(
+                                    self.shell_browser
+                                        .navigate(self.active_target.unwrap().hwnd, &path)
+                                );
+                            }
+                            None => {
+                                log::debug!("FireFolderClick: no active target");
+                            }
+                        }
                     }
                 }
             }
@@ -323,6 +344,7 @@ use crate::rename::{self, RenameAction, RenameEvent};
 mod tests {
     use super::*;
     use crate::pointer;
+    use crate::target::ActiveTarget;
     use crate::test_helpers::{
         make_test_state, mk_add_button, mk_config_with_folders, mk_deps, mk_folder_button,
     };
@@ -624,5 +646,47 @@ mod tests {
         assert_eq!(*deps.cfg_store.load_calls.lock().unwrap(), 0);
         assert_eq!(deps.cfg_store.save_calls.lock().unwrap().len(), 0);
         assert!(state.rename_state.is_none());
+    }
+
+    #[test]
+    fn click_dispatches_to_dialog_navigator_when_target_is_file_dialog() {
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("Downloads", "C:\\Downloads")]);
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.active_target = Some(ActiveTarget::file_dialog(HWND(99 as *mut _)));
+        state.buttons = vec![
+            mk_add_button(),
+            mk_folder_button("Downloads", "C:\\Downloads", 42),
+        ];
+
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireFolderClick {
+                folder_button: 0,
+                ctrl: false,
+            },
+        );
+
+        let dlg_calls = deps.dialog_nav.calls.borrow();
+        assert_eq!(
+            dlg_calls.len(),
+            1,
+            "dialog_nav should receive exactly one call"
+        );
+        assert_eq!(
+            dlg_calls[0].0, 99,
+            "dialog_nav should receive the file-dialog HWND"
+        );
+        assert_eq!(
+            dlg_calls[0].1,
+            PathBuf::from("C:\\Downloads"),
+            "dialog_nav should receive the folder path"
+        );
+        // shell_browser must NOT be called
+        assert_eq!(
+            deps.navigate_calls.lock().unwrap().len(),
+            0,
+            "shell_browser.navigate must not be called for a FileDialog target"
+        );
     }
 }
