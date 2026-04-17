@@ -250,15 +250,23 @@ impl ToolbarState {
                 if btn_slot < self.buttons.len() {
                     let path = std::path::PathBuf::from(&self.buttons[btn_slot].folder.path);
                     if ctrl {
-                        let timeout = self
-                            .config
-                            .as_ref()
-                            .map(|c| c.new_tab_timeout_ms_zero_disables)
-                            .unwrap_or(500);
-                        if let Some(explorer) = self.active_target.map(|t| t.hwnd) {
-                            self.shell_browser.open_in_new_tab(explorer, &path, timeout);
-                        } else {
-                            log::debug!("FireFolderClick(ctrl): no active explorer");
+                        match self.active_target.map(|t| t.kind) {
+                            Some(crate::target::TargetKind::FileDialog) => {
+                                self.shell_browser.open_in_new_window(&path);
+                            }
+                            Some(crate::target::TargetKind::Explorer) => {
+                                let timeout = self
+                                    .config
+                                    .as_ref()
+                                    .map(|c| c.new_tab_timeout_ms_zero_disables)
+                                    .unwrap_or(500);
+                                if let Some(explorer) = self.active_target.map(|t| t.hwnd) {
+                                    self.shell_browser.open_in_new_tab(explorer, &path, timeout);
+                                }
+                            }
+                            None => {
+                                log::debug!("FireFolderClick(ctrl): no active target");
+                            }
                         }
                     } else {
                         match self.active_target.map(|t| t.kind) {
@@ -401,6 +409,29 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].2, 750);
         assert_eq!(deps.navigate_calls.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn ctrl_click_in_dialog_mode_calls_open_in_new_window() {
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("D", "C:\\D")]);
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.active_target = Some(crate::target::ActiveTarget::file_dialog(HWND(99 as *mut _)));
+        state.buttons = vec![mk_add_button(), mk_folder_button("D", "C:\\D", 42)];
+
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireFolderClick {
+                folder_button: 0,
+                ctrl: true,
+            },
+        );
+
+        let calls = deps.new_window_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], PathBuf::from("C:\\D"));
+        assert!(deps.new_tab_calls.lock().unwrap().is_empty());
+        assert!(deps.navigate_calls.lock().unwrap().is_empty());
     }
 
     #[test]

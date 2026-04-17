@@ -341,25 +341,37 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
                         let path = std::path::PathBuf::from(&state.buttons[idx].folder.path);
                         match chosen {
-                            MENU_ID_OPEN => {
-                                if let Some(explorer) = state.active_target.map(|t| t.hwnd) {
-                                    crate::warn_on_err!(
-                                        state.shell_browser.navigate(explorer, &path)
-                                    );
+                            MENU_ID_OPEN => match state.active_target.map(|t| t.kind) {
+                                Some(crate::target::TargetKind::FileDialog) => {
+                                    state.shell_browser.open_in_new_window(&path);
                                 }
-                            }
-                            MENU_ID_OPEN_NEW_TAB => {
-                                let timeout = state
-                                    .config
-                                    .as_ref()
-                                    .map(|c| c.new_tab_timeout_ms_zero_disables)
-                                    .unwrap_or(500);
-                                if let Some(explorer) = state.active_target.map(|t| t.hwnd) {
-                                    state
-                                        .shell_browser
-                                        .open_in_new_tab(explorer, &path, timeout);
+                                Some(crate::target::TargetKind::Explorer) => {
+                                    if let Some(explorer) = state.active_target.map(|t| t.hwnd) {
+                                        crate::warn_on_err!(
+                                            state.shell_browser.navigate(explorer, &path)
+                                        );
+                                    }
                                 }
-                            }
+                                None => {}
+                            },
+                            MENU_ID_OPEN_NEW_TAB => match state.active_target.map(|t| t.kind) {
+                                Some(crate::target::TargetKind::FileDialog) => {
+                                    state.shell_browser.open_in_new_window(&path);
+                                }
+                                Some(crate::target::TargetKind::Explorer) => {
+                                    let timeout = state
+                                        .config
+                                        .as_ref()
+                                        .map(|c| c.new_tab_timeout_ms_zero_disables)
+                                        .unwrap_or(500);
+                                    if let Some(explorer) = state.active_target.map(|t| t.hwnd) {
+                                        state
+                                            .shell_browser
+                                            .open_in_new_tab(explorer, &path, timeout);
+                                    }
+                                }
+                                None => {}
+                            },
                             MENU_ID_COPY_PATH => {
                                 let folder_button = idx - 1; // + button at index 0
                                 crate::actions::copy_folder_path_to_clipboard(state, folder_button);

@@ -55,6 +55,7 @@ impl DialogNavigator for DlgNavRc {
 pub struct TestDeps {
     pub navigate_calls: Arc<Mutex<Vec<(isize, PathBuf)>>>,
     pub new_tab_calls: Arc<Mutex<Vec<(isize, PathBuf, u32)>>>,
+    pub new_window_calls: Arc<Mutex<Vec<PathBuf>>>,
     pub picker: Arc<MockFolderPicker>,
     pub file_op: Arc<MockFileOp>,
     pub clipboard: Arc<MockClipboard>,
@@ -66,6 +67,7 @@ pub fn mk_deps() -> TestDeps {
     TestDeps {
         navigate_calls: Arc::default(),
         new_tab_calls: Arc::default(),
+        new_window_calls: Arc::default(),
         picker: Arc::new(MockFolderPicker::default()),
         file_op: Arc::new(MockFileOp::default()),
         clipboard: Arc::new(MockClipboard::default()),
@@ -78,6 +80,7 @@ pub fn make_test_state(deps: &TestDeps, config: Option<Config>) -> ToolbarState 
     let shell = MockShellBrowser {
         navigate_calls: Arc::clone(&deps.navigate_calls),
         new_tab_calls: Arc::clone(&deps.new_tab_calls),
+        new_window_calls: Arc::clone(&deps.new_window_calls),
     };
     ToolbarState::with_deps(
         96,
