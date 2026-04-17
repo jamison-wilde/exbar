@@ -31,6 +31,7 @@
 //! - [`dragdrop::FileOperator`] — `IFileOperation` move/copy.
 //! - [`clipboard::Clipboard`] — `OleClipboard` text writes.
 //! - [`config::ConfigStore`] — JSON file load/save.
+//! - [`dialog_nav::DialogNavigator`] — keyboard-injection navigation for file dialogs.
 //!
 //! **Win32 wrappers** (thin adapters around system APIs):
 //! - [`contextmenu`] — `TrackPopupMenu` wrapper.
@@ -86,6 +87,7 @@ pub mod actions;
 pub mod clipboard;
 pub mod config;
 pub mod contextmenu;
+pub mod dialog_nav;
 pub mod dragdrop;
 pub mod drop_effect;
 pub mod error;
