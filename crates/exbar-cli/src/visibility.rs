@@ -337,7 +337,9 @@ pub(crate) fn reposition_and_show(toolbar: HWND, explorer: HWND) {
     let origin = crate::position::explorer_visible_origin(explorer);
     log::debug!("reposition_and_show: explorer={explorer:?} origin={origin:?}");
 
-    if let Some((off_x, off_y)) = crate::position::load_saved_offset() {
+    if let Some((off_x, off_y)) =
+        crate::position::load_saved_offset(crate::target::TargetKind::Explorer)
+    {
         let (tx, ty) = crate::position::apply_offset(off_x, off_y, origin.0, origin.1);
         log::debug!("reposition_and_show: offset=({off_x},{off_y}) target=({tx},{ty})");
         let mut tr = windows::Win32::Foundation::RECT::default();
