@@ -114,7 +114,7 @@ pub(crate) struct ToolbarState {
     pub(crate) clipboard: Box<dyn Clipboard>,
     pub(crate) config_store: Box<dyn ConfigStore>,
     // SP4 consolidation — populated in Tasks 2-3:
-    pub(crate) active_explorer: Option<HWND>,
+    pub(crate) active_target: Option<crate::target::ActiveTarget>,
     /// Last-seen Explorer visible origin — used to detect moves/maximize/restore.
     pub(crate) last_explorer_origin: Option<(i32, i32)>,
     /// True while an Explorer window is being moved/resized (between
@@ -164,7 +164,7 @@ impl ToolbarState {
             file_operator,
             clipboard,
             config_store,
-            active_explorer: None,
+            active_target: None,
             last_explorer_origin: None,
             explorer_moving: false,
             rename_state: None,
@@ -249,12 +249,12 @@ impl ToolbarState {
                             .as_ref()
                             .map(|c| c.new_tab_timeout_ms_zero_disables)
                             .unwrap_or(500);
-                        if let Some(explorer) = self.active_explorer {
+                        if let Some(explorer) = self.active_target.map(|t| t.hwnd) {
                             self.shell_browser.open_in_new_tab(explorer, &path, timeout);
                         } else {
                             log::debug!("FireFolderClick(ctrl): no active explorer");
                         }
-                    } else if let Some(explorer) = self.active_explorer {
+                    } else if let Some(explorer) = self.active_target.map(|t| t.hwnd) {
                         crate::warn_on_err!(self.shell_browser.navigate(explorer, &path));
                     } else {
                         log::debug!("FireFolderClick: no active explorer");
@@ -336,7 +336,7 @@ mod tests {
         let deps = mk_deps();
         let cfg = mk_config_with_folders(&[("Downloads", "C:\\Downloads")]);
         let mut state = make_test_state(&deps, Some(cfg));
-        state.active_explorer = Some(HWND(42 as *mut _));
+        state.active_target = Some(crate::target::ActiveTarget::explorer(HWND(42 as *mut _)));
         state.buttons = vec![
             mk_add_button(),
             mk_folder_button("Downloads", "C:\\Downloads", 42),
@@ -364,7 +364,7 @@ mod tests {
         )
         .unwrap();
         let mut state = make_test_state(&deps, Some(cfg));
-        state.active_explorer = Some(HWND(42 as *mut _));
+        state.active_target = Some(crate::target::ActiveTarget::explorer(HWND(42 as *mut _)));
         state.buttons = vec![mk_add_button(), mk_folder_button("D", "C:\\D", 42)];
 
         state.execute_pointer_command(
@@ -387,7 +387,7 @@ mod tests {
         let cfg = mk_config_with_folders(&[("D", "C:\\D")]);
         let mut state = make_test_state(&deps, Some(cfg));
         state.buttons = vec![mk_add_button(), mk_folder_button("D", "C:\\D", 42)];
-        // active_explorer intentionally left None.
+        // active_target intentionally left None.
 
         state.execute_pointer_command(
             HWND(std::ptr::dangling_mut()),

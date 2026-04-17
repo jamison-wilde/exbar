@@ -159,7 +159,7 @@ unsafe extern "system" fn foreground_event_proc(
         // different Explorer window is being moved.
         if let Some(tb) = tb_opt
             && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
-            && state.active_explorer == Some(hwnd)
+            && state.active_target.map(|t| t.hwnd) == Some(hwnd)
         {
             state.explorer_moving = true;
             unsafe {
@@ -173,7 +173,7 @@ unsafe extern "system" fn foreground_event_proc(
         // Explorer finished moving/resizing — clear flag, reposition and show.
         if let Some(tb) = tb_opt
             && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
-            && state.active_explorer == Some(hwnd)
+            && state.active_target.map(|t| t.hwnd) == Some(hwnd)
         {
             state.explorer_moving = false;
             reposition_and_show(tb, hwnd);
@@ -191,7 +191,7 @@ unsafe extern "system" fn foreground_event_proc(
         // repositioning from an async callback before geometry settles.
         if let Some(tb) = tb_opt
             && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
-            && state.active_explorer == Some(hwnd)
+            && state.active_target.map(|t| t.hwnd) == Some(hwnd)
             && !state.explorer_moving
         {
             let delay = state.config.as_ref().map_or(250, |c| c.reposition_delay_ms);
@@ -234,7 +234,7 @@ unsafe extern "system" fn foreground_event_proc(
             // installed SetWinEventHook — our message-pump thread. Same
             // single-threaded invariant `toolbar_state` relies on.
             if let Some(state) = unsafe { crate::toolbar::toolbar_state(toolbar_hwnd) } {
-                state.active_explorer = Some(hwnd);
+                state.active_target = Some(crate::target::ActiveTarget::explorer(hwnd));
             }
         }
         // First time we see an Explorer foreground, create the toolbar.
@@ -257,7 +257,7 @@ unsafe extern "system" fn foreground_event_proc(
         // allowing Explorer's own XAML islands and popups through.
         if let Some(tb) = tb_opt
             && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
-            && let Some(active) = state.active_explorer
+            && let Some(active) = state.active_target.map(|t| t.hwnd)
         {
             let root = unsafe {
                 windows::Win32::UI::WindowsAndMessaging::GetAncestor(
@@ -299,7 +299,7 @@ unsafe extern "system" fn foreground_event_proc(
 /// check — NOT the event HWND, which may be an XAML island child.
 pub(crate) fn show_above(toolbar: HWND, _explorer: HWND) {
     if let Some(state) = unsafe { crate::toolbar::toolbar_state(toolbar) }
-        && let Some(active) = state.active_explorer
+        && let Some(active) = state.active_target.map(|t| t.hwnd)
     {
         let current_origin = crate::position::explorer_visible_origin(active);
         log::debug!(
