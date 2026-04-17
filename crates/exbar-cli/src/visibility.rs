@@ -44,6 +44,15 @@ pub trait DefViewProbe {
 pub struct Win32DefViewProbe;
 
 impl DefViewProbe for Win32DefViewProbe {
+    /// Returns true if `hwnd` descends into a recognisable file-dialog shape.
+    ///
+    /// Two markers are accepted:
+    /// - `SHELLDLL_DefView` — modern Common Item Dialog (`IFileDialog`).
+    /// - `ComboBoxEx32` — legacy `GetOpenFileName` / `GetSaveFileName`
+    ///   Common Dialog's "Look in:" folder combo.
+    ///
+    /// Either marker is sufficient; both imply the dialog accepts path
+    /// input via Ctrl+L (modern) or typed-into-filename-and-Enter (legacy).
     fn has_defview(&self, hwnd: HWND) -> bool {
         use windows::Win32::Foundation::LPARAM;
         use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
@@ -56,12 +65,14 @@ impl DefViewProbe for Win32DefViewProbe {
             let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
             let mut buf = [0u16; 64];
             let n = unsafe { GetClassNameW(child, &mut buf) } as usize;
-            if n > 0 && String::from_utf16_lossy(&buf[..n]) == "SHELLDLL_DefView" {
-                ctx.found = true;
-                BOOL(0) // stop enumeration
-            } else {
-                BOOL(1)
+            if n > 0 {
+                let name = String::from_utf16_lossy(&buf[..n]);
+                if name == "SHELLDLL_DefView" || name == "ComboBoxEx32" {
+                    ctx.found = true;
+                    return BOOL(0); // stop enumeration
+                }
             }
+            BOOL(1)
         }
         let mut ctx = Ctx { found: false };
         unsafe {
@@ -80,14 +91,16 @@ pub enum HwndRole {
     Unknown,
 }
 
-/// Pure: decide whether an HWND represents a Shell-hosted file dialog.
+/// Pure: decide whether an HWND represents a file dialog.
 ///
 /// Gated on `dialog_enabled` so the `Config.enable_file_dialogs = false`
 /// escape hatch produces `Unknown`.
 ///
-/// Recognises a file dialog by: class name `#32770` AND a `SHELLDLL_DefView`
-/// descendant. Class name is passed in rather than queried here to keep this
-/// function fully pure and testable.
+/// Recognises a file dialog by: class name `#32770` AND a known file-dialog
+/// descendant (`SHELLDLL_DefView` for modern `IFileDialog`, or `ComboBoxEx32`
+/// for the legacy `GetOpenFileName`/`GetSaveFileName` Common Dialog).
+/// Class name is passed in rather than queried here to keep this function
+/// fully pure and testable.
 pub fn classify_hwnd(
     hwnd: HWND,
     class_name: &str,
