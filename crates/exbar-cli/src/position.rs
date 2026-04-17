@@ -1,4 +1,4 @@
-//! Toolbar window position: persistence (~/.exbar.pos.json) and
+//! Toolbar window position: persistence (~/.exbar/position.json) and
 //! work-area clamping. The pure `clamp_to_work_area` is the only
 //! testable surface; the rest is Win32 `SystemParametersInfoW` /
 //! filesystem I/O.
@@ -109,12 +109,7 @@ impl PositionStore {
 // ── Disk helpers ──────────────────────────────────────────────────────────────
 
 pub(crate) fn pos_file_path() -> std::path::PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| "C:\\Users\\Default".into());
-    let mut p = std::path::PathBuf::from(home);
-    p.push(".exbar-pos.json");
-    p
+    crate::paths::position_path()
 }
 
 /// Load the saved offset for `kind` from disk. Returns `None` on missing file
@@ -137,7 +132,11 @@ pub(crate) fn save_offset(kind: TargetKind, offset_x: i32, offset_y: i32) {
         .unwrap_or_default();
     store.set_offset(kind, SavedPos { offset_x, offset_y });
     if let Ok(json) = store.to_json_string() {
-        let _ = std::fs::write(pos_file_path(), json);
+        let path = pos_file_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, json);
     }
 }
 

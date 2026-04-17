@@ -1,8 +1,14 @@
 # Exbar
 
-A floating, configurable folder-shortcut toolbar for Windows 11 File Explorer. 
+A configurable folder toolbar for Windows 11 File Explorer and Open/Save As dialogs. 
 
-I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the early 2000's and then mostly have just used QTTabBar since for tabs and folder bars, but it is now bloated, unsupported ('[original](http://qttabbar.wikidot.com/)' version), and currently broken (including the newer [indiff](https://github.com/indiff/qttabbar) version, or needing deep workarounds) on Windows 11. I previously used it mostly for tabs and folder bars because 'Quick Access' is a terrible UX. So this is my Rust-built version now that Windows 11's File Explorer has tab support.  
+
+![alt text](docs/images/main_demo.webm)
+
+![alt text](docs/images/dialog_demo.webm)
+
+
+I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the early 2000's and then mostly have just used QTTabBar since for tabs and folder bars, but it is now bloated, unsupported ('[original](http://qttabbar.wikidot.com/)' version), and currently broken (including the newer [indiff](https://github.com/indiff/qttabbar) version, or needing deep workarounds) on Windows 11. I previously used it mostly for tabs and folder bars because 'Quick Access' is a terrible UX. This is my Rust-built version now that Windows 11's File Explorer has tab support.  
 
 ## Features
 * Works with tabs, changing the active tab when clicking a folder in exbar. Ctrl-click to open in new tab.
@@ -16,20 +22,28 @@ I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the 
 
 ## Install
 
-1. Download `exbar-1.1.0-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
-2. Double-click the MSI.
-3. Windows SmartScreen will warn you that the publisher is unrecognized (the installer is not yet signed). Click **More info** → **Run anyway**.
-4. Step through the installer dialogs — defaults are correct.
-5. When the installer finishes, open any Explorer window. The toolbar appears within a second.
+Download and install `exbar-1.1.0-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
+
+Windows SmartScreen will warn you that the publisher is unrecognized (the installer is not yet signed). Click **More info** → **Run anyway**.
 
 The installer is per-user (no admin required) and:
 - Installs to `%LOCALAPPDATA%\Exbar\`
 - Adds **Exbar** to your Start menu so you can re-launch it any time
 - Configures the toolbar to auto-start when you sign in
 
+## Use
+
+- **Click a folder button** — the active Explorer window's active tab navigates to that folder
+- **Drag a file/folder onto an exbar folder button** — moves (same drive) or copies (different drive) just like it would with a Quick Access folder
+  - Hold `Ctrl` to force copy, or `Shift` to force move
+- **Drag the grip** (dots on the left edge when horizontal, top edge when vertical) — move the toolbar
+- **Right click on the '+'** — to edit then reload the config
+
+Position is remembered across sign-outs. The toolbar auto-hides when you switch to non-Explorer apps.
+
 ## Configure
 
-Edit `~\.exbar.json` (in your user home folder):
+Edit `~\.exbar\config.json` (in your user home folder):
 
 ```json
 {
@@ -53,23 +67,6 @@ Edit `~\.exbar.json` (in your user home folder):
 
 If the file doesn't exist, the installer created a stub for you with Downloads, Documents, and Desktop. Click the refresh button (⟳) on the toolbar after editing.
 
-## Use
-
-- **Click a folder button** — the active Explorer window navigates to that folder
-- **Drag a file onto a folder button** — moves (same drive) or copies (different drive)
-  - Hold `Ctrl` to force copy
-  - Hold `Shift` to force move
-- **Drag the grip** (dots on the left edge when horizontal, top edge when vertical) — move the toolbar
-- **Refresh button (⟳)** — reload the config
-
-Position is remembered across sign-outs. The toolbar auto-hides when you switch to non-Explorer apps.
-
-## Requirements
-
-- Windows 11 (x86_64)
-
-## Troubleshooting
-
 ## For developers
 
 <details>
@@ -91,13 +88,6 @@ Prerequisites:
 See `CLAUDE.md` for architecture notes and the live-iteration build loop.
 
 </details>
-
-## Status
-
-Current release: v1.1.0. Known caveats:
-- Installer is unsigned (SmartScreen warning)
-- Icon support not yet implemented (folder emoji + label only)
-- Only tested on Win11, x86_64, single-user installs
 
 ## License
 
