@@ -47,11 +47,7 @@ impl DialogNavigator for KeybdDialogNavigator {
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
             KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
         };
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GUITHREADINFO, GetClassNameW, GetGUIThreadInfo, GetWindowThreadProcessId,
-            SetForegroundWindow, SetWindowTextW,
-        };
-        use windows::core::PCWSTR;
+        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
         use crate::error::ExbarError;
 
@@ -61,8 +57,9 @@ impl DialogNavigator for KeybdDialogNavigator {
         const VK_L: u16 = 0x4C;
         const VK_RETURN: u16 = 0x0D;
 
-        const FOCUS_SETTLE_MS: u64 = 50;
-        const AFTER_CTRL_L_MS: u64 = 40;
+        const FOCUS_SETTLE_MS: u64 = 80;
+        const KEY_HOLD_MS: u64 = 25;
+        const AFTER_CTRL_L_MS: u64 = 80;
 
         fn vk_input(vk: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
             INPUT {
@@ -102,37 +99,6 @@ impl DialogNavigator for KeybdDialogNavigator {
             Ok(())
         }
 
-        fn fast_set_focused_edit_text(dialog_hwnd: HWND, path: &str) -> bool {
-            let thread = unsafe { GetWindowThreadProcessId(dialog_hwnd, None) };
-            if thread == 0 {
-                return false;
-            }
-            let mut info = GUITHREADINFO {
-                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-                ..Default::default()
-            };
-            if unsafe { GetGUIThreadInfo(thread, &mut info) }.is_err() {
-                return false;
-            }
-            let focus = info.hwndFocus;
-            if focus.0.is_null() {
-                return false;
-            }
-            // Only touch an Edit — avoid clobbering unrelated controls if
-            // Ctrl+L didn't transition focus for some reason.
-            let mut buf = [0u16; 64];
-            let n = unsafe { GetClassNameW(focus, &mut buf) } as usize;
-            if n == 0 {
-                return false;
-            }
-            let class = String::from_utf16_lossy(&buf[..n]);
-            if class != "Edit" {
-                return false;
-            }
-            let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-            unsafe { SetWindowTextW(focus, PCWSTR(wide.as_ptr())) }.is_ok()
-        }
-
         let path_str = path.to_string_lossy().to_string();
 
         unsafe {
@@ -140,28 +106,28 @@ impl DialogNavigator for KeybdDialogNavigator {
         }
         std::thread::sleep(Duration::from_millis(FOCUS_SETTLE_MS));
 
-        // Ctrl+L: focus breadcrumb in edit mode.
-        let ctrl_l = [
-            vk_input(VK_CONTROL, KEYBD_EVENT_FLAGS(0)),
-            vk_input(VK_L, KEYBD_EVENT_FLAGS(0)),
-            vk_input(VK_L, KEYEVENTF_KEYUP),
-            vk_input(VK_CONTROL, KEYEVENTF_KEYUP),
-        ];
-        send(&ctrl_l)?;
+        // Ctrl+L: focus breadcrumb in edit mode. Sent as 4 separate SendInput
+        // calls with human-like hold/gap timing — the modern Shell dialog
+        // appears to filter out keystroke chords that arrive faster than
+        // real hardware can produce them. Batch-injected Ctrl+L was being
+        // silently ignored.
+        send(&[vk_input(VK_CONTROL, KEYBD_EVENT_FLAGS(0))])?;
+        std::thread::sleep(Duration::from_millis(KEY_HOLD_MS));
+        send(&[vk_input(VK_L, KEYBD_EVENT_FLAGS(0))])?;
+        std::thread::sleep(Duration::from_millis(KEY_HOLD_MS));
+        send(&[vk_input(VK_L, KEYEVENTF_KEYUP)])?;
+        std::thread::sleep(Duration::from_millis(KEY_HOLD_MS));
+        send(&[vk_input(VK_CONTROL, KEYEVENTF_KEYUP)])?;
         std::thread::sleep(Duration::from_millis(AFTER_CTRL_L_MS));
 
-        // Fast path: set the focused Edit's text directly — one WM_SETTEXT
-        // instead of N synthesized WM_CHARs, so the path appears instantly
-        // rather than across several frames of per-character repainting.
-        //
-        // Falls back to per-character Unicode typing below if:
-        // - the dialog's thread id can't be resolved
-        // - GetGUIThreadInfo fails (rare)
-        // - the focused HWND isn't an Edit (e.g. Ctrl+L didn't transition
-        //   focus as expected on some unusual dialog variant)
-        let fast_path_set = fast_set_focused_edit_text(dialog_hwnd, &path_str);
-
-        if !fast_path_set && !path_str.is_empty() {
+        // Type the path as Unicode code units. SetWindowTextW fast-path was
+        // tried and rejected — the breadcrumb's inner Edit is hosted by a
+        // ComboBoxEx32 / address-band composite that tracks its own committed
+        // state; a direct WM_SETTEXT updates the visible text but not the
+        // model, so the subsequent Enter submits empty and nothing navigates.
+        // Per-character WM_CHAR injection is slower (several frames on a long
+        // path) but reliably drives the control's text-change notifications.
+        if !path_str.is_empty() {
             let mut typing: Vec<INPUT> = Vec::with_capacity(path_str.len() * 2);
             for unit in path_str.encode_utf16() {
                 typing.push(unicode_input(unit, KEYBD_EVENT_FLAGS(0)));
