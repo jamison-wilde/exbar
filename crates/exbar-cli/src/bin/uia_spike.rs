@@ -15,7 +15,7 @@ use std::env;
 use std::time::Duration;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
 use windows::Win32::System::Variant::{
     VARENUM, VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4,
@@ -25,7 +25,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_ControlTypePropertyId, UIA_EditControlTypeId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_RETURN,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 use windows::core::BSTR;
@@ -94,11 +94,7 @@ fn main() -> windows::core::Result<()> {
     println!("\n=== Attempting navigate on each Edit ===");
     for i in 0..count {
         let edit = unsafe { edits.GetElement(i)? };
-        let aid = unsafe {
-            edit.CurrentAutomationId()
-                .unwrap_or_default()
-                .to_string()
-        };
+        let aid = unsafe { edit.CurrentAutomationId().unwrap_or_default().to_string() };
         let name = unsafe { edit.CurrentName().unwrap_or_default().to_string() };
         println!("\n--- Attempt [{i}] AutomationId={aid} Name={name} ---");
 

@@ -195,8 +195,6 @@ mod tests {
     fn mock_propagates_forced_error() {
         let m = MockDialogNavigator::default();
         *m.force_err.borrow_mut() = Some("simulated".into());
-        assert!(m
-            .navigate(HWND(42 as *mut _), Path::new("C:\\"))
-            .is_err());
+        assert!(m.navigate(HWND(42 as *mut _), Path::new("C:\\")).is_err());
     }
 }

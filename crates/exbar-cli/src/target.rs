@@ -24,10 +24,16 @@ pub struct ActiveTarget {
 
 impl ActiveTarget {
     pub fn explorer(hwnd: HWND) -> Self {
-        Self { hwnd, kind: TargetKind::Explorer }
+        Self {
+            hwnd,
+            kind: TargetKind::Explorer,
+        }
     }
     pub fn file_dialog(hwnd: HWND) -> Self {
-        Self { hwnd, kind: TargetKind::FileDialog }
+        Self {
+            hwnd,
+            kind: TargetKind::FileDialog,
+        }
     }
 }
 
