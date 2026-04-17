@@ -359,9 +359,51 @@ unsafe extern "system" fn foreground_event_proc(
         }
     } else if in_our_process {
         // Our own popup menu / rename edit / folder picker. Keep visible.
-    } else if let Some(tb) = tb_opt {
-        unsafe {
-            crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
+    } else {
+        // Not Explorer, not an explorer-process window, not our process.
+        // Last check: is it a Shell-hosted file dialog? If so, treat it like
+        // an Explorer for show/position purposes.
+        let dialog_enabled = tb_opt
+            .and_then(|tb| unsafe { crate::toolbar::toolbar_state(tb) })
+            .and_then(|s| s.config.as_ref())
+            .map(|c| c.enable_file_dialogs)
+            .unwrap_or(true);
+
+        match classify_hwnd(hwnd, &class, dialog_enabled, &Win32DefViewProbe) {
+            HwndRole::FileDialog => {
+                // Toolbar may not exist yet (first dialog ever).
+                if tb_opt.is_none() {
+                    let mut rect = windows::Win32::Foundation::RECT::default();
+                    unsafe {
+                        let _ =
+                            windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
+                    }
+                    let default_pos = windows::Win32::Foundation::RECT {
+                        left: rect.left + 40,
+                        top: rect.top + 120,
+                        right: rect.left + 440,
+                        bottom: rect.top + 160,
+                    };
+                    let hinst = crate::lifecycle::exe_hinstance();
+                    let _ = crate::lifecycle::create_toolbar(hwnd, &default_pos, hinst);
+                }
+                if let Some(tb) = get_global_toolbar_hwnd() {
+                    if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
+                        state.active_target = Some(crate::target::ActiveTarget::file_dialog(hwnd));
+                        // Force a reposition; last_explorer_origin was for explorer.
+                        state.last_explorer_origin = None;
+                    }
+                    reposition_and_show(tb, hwnd);
+                }
+            }
+            HwndRole::Unknown => {
+                // Different unrelated process — hide.
+                if let Some(tb) = tb_opt {
+                    unsafe {
+                        crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
+                    }
+                }
+            }
         }
     }
 }
@@ -410,9 +452,11 @@ pub(crate) fn reposition_and_show(toolbar: HWND, explorer: HWND) {
     let origin = crate::position::explorer_visible_origin(explorer);
     log::debug!("reposition_and_show: explorer={explorer:?} origin={origin:?}");
 
-    if let Some((off_x, off_y)) =
-        crate::position::load_saved_offset(crate::target::TargetKind::Explorer)
-    {
+    let kind = unsafe { crate::toolbar::toolbar_state(toolbar) }
+        .and_then(|s| s.active_target.map(|t| t.kind))
+        .unwrap_or(crate::target::TargetKind::Explorer);
+
+    if let Some((off_x, off_y)) = crate::position::load_saved_offset(kind) {
         let (tx, ty) = crate::position::apply_offset(off_x, off_y, origin.0, origin.1);
         log::debug!("reposition_and_show: offset=({off_x},{off_y}) target=({tx},{ty})");
         let mut tr = windows::Win32::Foundation::RECT::default();

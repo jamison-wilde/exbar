@@ -204,7 +204,11 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             {
                 let (ox, oy) = crate::position::explorer_visible_origin(explorer);
                 let (off_x, off_y) = crate::position::compute_offset(x, y, ox, oy);
-                crate::position::save_offset(crate::target::TargetKind::Explorer, off_x, off_y);
+                let kind = state
+                    .active_target
+                    .map(|t| t.kind)
+                    .unwrap_or(crate::target::TargetKind::Explorer);
+                crate::position::save_offset(kind, off_x, off_y);
             }
             LRESULT(0)
         }
