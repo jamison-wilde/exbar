@@ -10,9 +10,9 @@ use windows::Win32::Graphics::Gdi::{
     DEFAULT_GUI_FONT, GetDC, GetStockObject, InvalidateRect, ReleaseDC, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, LWA_ALPHA, RegisterClassExW, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowPos, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, IDC_ARROW, LWA_ALPHA, LoadCursorW, RegisterClassExW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowPos, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::config::Config;
@@ -123,6 +123,11 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
 pub fn create_toolbar(owner: HWND, screen_pos: &RECT, hinstance: HINSTANCE) -> Option<HWND> {
     CLASS_REGISTERED.call_once(|| {
         let class_wide: Vec<u16> = wide_null(CLASS_NAME);
+        // hCursor must be set so DefWindowProc handles WM_SETCURSOR cleanly.
+        // Without it, the cursor that was active when a child control (e.g.
+        // the inline-rename EDIT) released the cursor lingers — the toolbar
+        // appears to "lose" the cursor after a rename completes.
+        let hcursor = unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() };
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -130,6 +135,7 @@ pub fn create_toolbar(owner: HWND, screen_pos: &RECT, hinstance: HINSTANCE) -> O
             cbClsExtra: 0,
             cbWndExtra: std::mem::size_of::<*mut ToolbarState>() as i32,
             hInstance: hinstance,
+            hCursor: hcursor,
             lpszClassName: windows_core::PCWSTR(class_wide.as_ptr()),
             ..Default::default()
         };

@@ -2,6 +2,14 @@
 
 All notable changes to Exbar are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-04-17
+
+### Changed
+- **Persisted state moved to `~/.exbar/`.** Previously two files at the home root: `~/.exbar.json` (config) and `~/.exbar-pos.json` (position). Now one folder: `~/.exbar/config.json` and `~/.exbar/position.json`. The hook auto-migrates the legacy files on first run after upgrade — no manual intervention needed.
+
+### Fixed
+- Cursor no longer disappears over the toolbar after committing an inline rename. Root cause: the toolbar window class didn't set `hCursor`, so when the rename `EDIT` child released the cursor, `DefWindowProc` had no class cursor to fall back on. Now uses `IDC_ARROW` as the class cursor.
+
 ## [1.1.0] - 2026-04-17
 
 ### Added
@@ -33,6 +41,7 @@ First public release.
 - Configurable `repositionDelayMs` to tune the animation-aware reposition debounce (default 250 ms).
 - GitHub Actions CI: lint, test, doc-check, and MSI build on every push; automatic release creation on tag push.
 
-[Unreleased]: https://github.com/jamison-wilde/exbar/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/jamison-wilde/exbar/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/jamison-wilde/exbar/releases/tag/v1.2.0
 [1.1.0]: https://github.com/jamison-wilde/exbar/releases/tag/v1.1.0
 [1.0.0]: https://github.com/jamison-wilde/exbar/releases/tag/v1.0.0

@@ -190,6 +190,11 @@ fn run_hook() -> ExbarResult<()> {
         let _ = FreeConsole();
     }
 
+    // One-shot migration from the pre-1.2 layout (~/.exbar.json,
+    // ~/.exbar-pos.json) to the new ~/.exbar/ directory. Idempotent
+    // and best-effort; failures log a warning and we proceed.
+    exbar_cli::paths::migrate_legacy_files();
+
     // Declare per-monitor DPI awareness BEFORE any window is created.
     // Without this, Windows treats exbar.exe as a legacy DPI-unaware
     // app and applies bitmap upscaling on top of our layout — which

@@ -40,7 +40,8 @@ exbar/
 │       │   ├── picker.rs               # FolderPicker trait (IFileOpenDialog) (SP3)
 │       │   ├── clipboard.rs            # Clipboard trait (CF_UNICODETEXT) (SP3)
 │       │   ├── contextmenu.rs          # TrackPopupMenu wrapper
-│       │   ├── config.rs               # Config + ConfigStore trait (SP3) — ~/.exbar.json
+│       │   ├── config.rs               # Config + ConfigStore trait (SP3) — ~/.exbar/config.json
+│       │   ├── paths.rs                # Filesystem layout (~/.exbar/) + one-shot legacy migration
 │       │   ├── theme.rs                # DPI scale, dark-mode detection
 │       │   ├── error.rs                # ExbarError + ExbarResult (SP5)
 │       │   └── log.rs                  # FileLogger (log crate) → %TEMP%\exbar.log (SP5)
@@ -61,7 +62,7 @@ exbar/
 All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` in git-bash).
 
 - **Build:** `cargo build` (dev) or `cargo build --release`
-- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 184 tests across 27 modules
+- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 187 tests across 28 modules
 - **Build only the CLI:** `cargo build --release -p exbar-cli` (faster iteration)
 - **Run the CLI:** `./target/release/exbar.exe <install|uninstall|status|hook>`
 - **Build MSI:** `./scripts/build-msi.sh` (requires WiX v7 installed — see "MSI installer" section)
@@ -89,7 +90,7 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
   - Hides toolbar when a window in a different process becomes foreground
 - `WM_NCHITTEST` returns `HTCAPTION` for the grip area (dots on left/top edge) to make only the grip draggable; buttons get `HTCLIENT` for normal mouse handling
 - Auto-sized in `WM_CREATE` based on `compute_layout`; position is clamped to the work area of the monitor containing the triggering Explorer window
-- **Relative positioning**: toolbar position is stored as an offset from the active Explorer window's origin (`~/.exbar-pos.json`). `EVENT_OBJECT_LOCATIONCHANGE` (filtered to `OBJID_WINDOW`/`CHILDID_SELF` on `active_explorer`) detects Explorer maximize/restore/snap. The toolbar hides during the transition, then repositions after a configurable delay (`repositionDelayMs`, default 250ms) via `SetTimer`/`WM_TIMER`. `MOVESIZESTART`/`END` handle interactive drag (hide during, reposition after). `show_above` compares `last_explorer_origin` to detect changes from non-foreground events.
+- **Relative positioning**: toolbar position is stored as an offset from the active Explorer window's origin (`~/.exbar/position.json`). `EVENT_OBJECT_LOCATIONCHANGE` (filtered to `OBJID_WINDOW`/`CHILDID_SELF` on `active_explorer`) detects Explorer maximize/restore/snap. The toolbar hides during the transition, then repositions after a configurable delay (`repositionDelayMs`, default 250ms) via `SetTimer`/`WM_TIMER`. `MOVESIZESTART`/`END` handle interactive drag (hide during, reposition after). `show_above` compares `last_explorer_origin` to detect changes from non-foreground events.
 - On startup, `run_hook` checks if Explorer is already foreground and creates the toolbar immediately (fixes post-MSI-install appearance)
 
 ### Navigation
@@ -105,7 +106,7 @@ All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` i
 - Registered on the whole toolbar window; at drop time it uses the cursor position (converted to client coords) to determine which button the drop is over
 - Shell aliases (`shell:downloads`) are resolved to real paths via `SHParseDisplayName` + `SHGetPathFromIDListW` before comparing drive letters for the move/copy heuristic
 - Executes the drop via `IFileOperation` with `FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR`
-- Dispatches via `DropAction` enum: `MoveCopyTo(target)` for folder buttons, `AddFolder` for the `+` button (appends dropped directory to `~/.exbar.json`)
+- Dispatches via `DropAction` enum: `MoveCopyTo(target)` for folder buttons, `AddFolder` for the `+` button (appends dropped directory to `~/.exbar/config.json`)
 
 ### Pure controllers + Win32 adapters (SP2b, SP6)
 
@@ -127,7 +128,7 @@ All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` 
 | `picker::FolderPicker` | `Win32Picker` | `IFileOpenDialog` folder picker |
 | `dragdrop::FileOperator` | `Win32FileOp` | `IFileOperation` move/copy |
 | `clipboard::Clipboard` | `Win32Clipboard` | `OleClipboard` text writes |
-| `config::ConfigStore` | `JsonFileStore` | `~/.exbar.json` load/save |
+| `config::ConfigStore` | `JsonFileStore` | `~/.exbar/config.json` load/save |
 | `dialog_nav::DialogNavigator` | `KeybdDialogNavigator` | Ctrl+L keyboard injection into file dialogs |
 | `visibility::DefViewProbe` | `Win32DefViewProbe` | Detects `SHELLDLL_DefView` descendants to recognise file dialogs |
 
@@ -150,14 +151,14 @@ Beyond Explorer windows, the toolbar also activates over the Windows Common Item
 - **Detection**: `visibility::classify_hwnd` recognises a foreground window whose class is `#32770` AND contains a `SHELLDLL_DefView` descendant. `Win32DefViewProbe` does the child-window walk via `EnumChildWindows`. Gated by `Config.enable_file_dialogs` (default `true`).
 - **Target abstraction**: `ToolbarState.active_target: Option<ActiveTarget>` pairs a foreground HWND with a `TargetKind` (`Explorer` | `FileDialog`). Positioning, `LOCATIONCHANGE` filtering, `MOVESIZESTART/END` guards, and the reposition timer are all HWND-keyed and work unchanged across both kinds.
 - **Navigation**: `dialog_nav::KeybdDialogNavigator::navigate(hwnd, path)` does `SetForegroundWindow(hwnd)` → `SendInput(Ctrl+L)` (focuses the breadcrumb path bar in edit mode) → `SendInput` Unicode-typing the path → `SendInput(Enter)`. No UIA; `Ctrl+L` is the OS-level shortcut baked into every Shell-hosted dialog. Same `SendInput` rationale as `shell_windows::open_in_new_tab` — `PostMessageW` is unreliable across focus boundaries.
-- **Position persistence**: `~/.exbar-pos.json` stores per-kind offsets under `{"explorer": {offset_x, offset_y}, "file_dialog": {offset_x, offset_y}}`. Old flat `{offset_x, offset_y}` auto-migrates — value is promoted to `explorer` and copied to `file_dialog` so the user's tuned position applies on first dialog interaction.
+- **Position persistence**: `~/.exbar/position.json` stores per-kind offsets under `{"explorer": {offset_x, offset_y}, "file_dialog": {offset_x, offset_y}}`. Old flat `{offset_x, offset_y}` auto-migrates — value is promoted to `explorer` and copied to `file_dialog` so the user's tuned position applies on first dialog interaction.
 - **Degraded actions in FileDialog mode**: `FireFolderClick(ctrl=true)`, right-click **Open**, and right-click **Open in new tab** all call `ShellBrowser::open_in_new_window(path)` (ShellExecuteW of `explorer.exe "path"`) — dialogs have no tabs, so opening a fresh Explorer window is the most useful degradation. Drag-drop, Copy path, Rename, Remove, Add-folder, drag-reorder, and `+` config actions all work unchanged.
 
 ### Context menus and inline rename
 
 - The `+` button (first slot) has three interactions:
   - **Left-click** → `picker.rs` opens `IFileOpenDialog` with `FOS_PICKFOLDERS`, starting at `%SystemDrive%\`; selected folder appended via `Config::add_folder` + `save()`
-  - **Right-click** → `Edit config` (ShellExecute opens `~/.exbar.json` in default handler) / `Reload config` (posts `WM_USER_RELOAD`)
+  - **Right-click** → `Edit config` (ShellExecute opens `~/.exbar/config.json` in default handler) / `Reload config` (posts `WM_USER_RELOAD`)
   - **Drop a single directory** → same path as click-picker result
 - Folder buttons:
   - **Left-click** → navigate active Explorer via `IShellBrowser::BrowseObject`
@@ -189,7 +190,9 @@ Beyond Explorer windows, the toolbar also activates over the Windows Common Item
 - **Foreground hook must be installed before the first toolbar exists**: `install_foreground_hook()` is called from `run_hook()` (not from toolbar `WM_CREATE`) because the hook is what creates the toolbar on the first `CabinetWClass` foreground event. Chicken-and-egg if reversed. However, `run_hook` also checks if Explorer is already foreground and creates the toolbar immediately (handles post-MSI-install case).
 - **Why Ctrl+L for file-dialog navigation, not UIA**: the 2026-04-16 UIA spike found that the Common Item Dialog's breadcrumb is NOT a `ControlType.Edit` in the static UIA tree — it's a `Pane`/`Toolbar` composite with `Button` children that only becomes editable on click. The filename Edit (`AutomationId=1001`) does accept `SetValue` but clobbers user-typed filenames on Save As (hostile UX). Ctrl+L is the OS-level Shell shortcut that focuses the breadcrumb in edit mode directly — no selector required, no filename clobber. Full spike trace in `docs/superpowers/spikes/2026-04-16-uia-spike-results.md`. The `crates/exbar-cli/src/bin/uia_spike.rs` binary is retained for future diagnostic use.
 - **Foreground set before keyboard injection**: `SendInput` targets whichever window has the foreground at the moment of injection. `KeybdDialogNavigator::navigate` calls `SetForegroundWindow(dialog_hwnd)` + 50 ms sleep before injecting Ctrl+L, the Unicode path, and Enter. Without the focus step, keystrokes can land in the wrong window during rapid clicks. Same pattern as the Ctrl+T injection in `shell_windows::open_in_new_tab`.
-- **Position schema backward-compat**: `~/.exbar-pos.json` migrated from flat `{offset_x, offset_y}` to `{"explorer": ..., "file_dialog": ...}` in v1.1. `PositionStore::from_json_str` accepts both via a serde `untagged` enum — old flat shape loads as the `explorer` offset and copies the same value to `file_dialog` (better UX than defaulting dialog offset to zero).
+- **Position schema backward-compat**: `~/.exbar/position.json` migrated from flat `{offset_x, offset_y}` to `{"explorer": ..., "file_dialog": ...}` in v1.1. `PositionStore::from_json_str` accepts both via a serde `untagged` enum — old flat shape loads as the `explorer` offset and copies the same value to `file_dialog` (better UX than defaulting dialog offset to zero).
+- **State directory layout (v1.2)**: persisted state lives under `~/.exbar/` (`config.json`, `position.json`). Pre-1.2 versions used `~/.exbar.json` and `~/.exbar-pos.json` at the home root. `paths::migrate_legacy_files()` runs at hook startup, idempotent and best-effort, and renames the old files into the new directory. Don't add new state files outside `~/.exbar/` — keep the layout one folder.
+- **`hCursor` on the toolbar window class**: `WNDCLASSEXW.hCursor` MUST be set (we use `IDC_ARROW`). Without it, after the inline-rename `EDIT` child is destroyed the cursor "disappears" over the toolbar — `DefWindowProc::WM_SETCURSOR` falls back to the class cursor, which was null. Hover events still fire (highlights work), only the visible cursor is missing.
 
 ## Logging
 

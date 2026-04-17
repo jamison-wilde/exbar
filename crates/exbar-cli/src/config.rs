@@ -1,4 +1,4 @@
-//! Configuration: schema, persistence, and mutation API for `~/.exbar.json`.
+//! Configuration: schema, persistence, and mutation API for `~/.exbar/config.json`.
 //!
 //! The on-disk JSON shape is owned by [`Config`] and its nested types
 //! ([`FolderEntry`], [`Orientation`], [`LogLevel`]). Mutation helpers
@@ -6,14 +6,13 @@
 //! refuses to overwrite a folder with empty / whitespace-only text.
 //!
 //! The [`ConfigStore`] trait abstracts the file-IO boundary. Production
-//! wires [`JsonFileStore`] (which reads/writes `~/.exbar.json`); tests
+//! wires [`JsonFileStore`] (which reads/writes `~/.exbar/config.json`); tests
 //! inject a `MockConfigStore` that holds a `Config` in a `Mutex`. See
 //! `docs/adrs/ADR-0004-trait-seams-via-box-dyn.md` for why this seam
 //! exists.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
 
 /// Toolbar orientation — horizontal lays buttons left-to-right; vertical stacks top-to-bottom.
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq)]
@@ -58,7 +57,7 @@ where
     Ok(v.min(5000))
 }
 
-/// Top-level configuration loaded from `~/.exbar.json`. Mutations go through methods so
+/// Top-level configuration loaded from `~/.exbar/config.json`. Mutations go through methods so
 /// JSON-round-trip invariants stay in one place.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -109,7 +108,7 @@ impl Config {
         Self::from_str(&contents)
     }
 
-    /// Load config from the default path (`~/.exbar.json`). Returns `None` if missing or malformed.
+    /// Load config from the default path (`~/.exbar/config.json`). Returns `None` if missing or malformed.
     pub fn load() -> Option<Config> {
         let path = default_config_path();
         Self::load_from_path(&path)
@@ -164,25 +163,29 @@ impl Config {
     }
 
     /// Serialize the config to pretty JSON and write it to `path`.
+    /// Creates the parent directory if missing — needed because the default
+    /// path lives under `~/.exbar/`, which won't exist on a fresh install.
     pub fn save_to_path(&self, path: &str) -> std::io::Result<()> {
+        if let Some(parent) = std::path::Path::new(path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
         let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         fs::write(path, json)
     }
 
-    /// Serialize the config and write it to the default path (`~/.exbar.json`).
+    /// Serialize the config and write it to the default path
+    /// (`~/.exbar/config.json`).
     pub fn save(&self) -> std::io::Result<()> {
         self.save_to_path(&default_config_path())
     }
 }
 
-/// Returns the default config file path (`~/.exbar.json` on Windows). Does not verify the file exists.
+/// Returns the default config file path (`~/.exbar/config.json` on Windows).
+/// Does not verify the file exists.
 pub fn default_config_path() -> String {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| String::from("C:\\Users\\Default"));
-    let mut path = PathBuf::from(home);
-    path.push(".exbar.json");
-    path.to_string_lossy().into_owned()
+    crate::paths::config_path().to_string_lossy().into_owned()
 }
 
 /// Returns `true` if `path` looks like a shell alias such as `shell:downloads` or `shell:home`.
@@ -200,7 +203,7 @@ pub trait ConfigStore: Send + Sync {
     fn save(&self, config: &Config) -> ExbarResult<()>;
 }
 
-/// Production `ConfigStore` that reads/writes `~/.exbar.json`.
+/// Production `ConfigStore` that reads/writes `~/.exbar/config.json`.
 #[derive(Default)]
 pub struct JsonFileStore;
 
@@ -297,7 +300,14 @@ mod tests {
     #[test]
     fn config_path_resolves_home() {
         let path = default_config_path();
-        assert!(path.ends_with(".exbar.json"));
+        assert!(
+            path.ends_with("config.json"),
+            "expected config.json suffix: {path}"
+        );
+        assert!(
+            path.contains(".exbar"),
+            "expected .exbar component: {path}"
+        );
         assert!(path.starts_with("C:\\Users\\") || path.starts_with("/"));
     }
 
