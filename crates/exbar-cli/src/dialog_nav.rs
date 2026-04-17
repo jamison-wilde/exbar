@@ -47,7 +47,11 @@ impl DialogNavigator for KeybdDialogNavigator {
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
             KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
         };
-        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GUITHREADINFO, GetClassNameW, GetGUIThreadInfo, GetWindowThreadProcessId,
+            SetForegroundWindow, SetWindowTextW,
+        };
+        use windows::core::PCWSTR;
 
         use crate::error::ExbarError;
 
@@ -98,6 +102,37 @@ impl DialogNavigator for KeybdDialogNavigator {
             Ok(())
         }
 
+        fn fast_set_focused_edit_text(dialog_hwnd: HWND, path: &str) -> bool {
+            let thread = unsafe { GetWindowThreadProcessId(dialog_hwnd, None) };
+            if thread == 0 {
+                return false;
+            }
+            let mut info = GUITHREADINFO {
+                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                ..Default::default()
+            };
+            if unsafe { GetGUIThreadInfo(thread, &mut info) }.is_err() {
+                return false;
+            }
+            let focus = info.hwndFocus;
+            if focus.0.is_null() {
+                return false;
+            }
+            // Only touch an Edit — avoid clobbering unrelated controls if
+            // Ctrl+L didn't transition focus for some reason.
+            let mut buf = [0u16; 64];
+            let n = unsafe { GetClassNameW(focus, &mut buf) } as usize;
+            if n == 0 {
+                return false;
+            }
+            let class = String::from_utf16_lossy(&buf[..n]);
+            if class != "Edit" {
+                return false;
+            }
+            let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe { SetWindowTextW(focus, PCWSTR(wide.as_ptr())) }.is_ok()
+        }
+
         let path_str = path.to_string_lossy().to_string();
 
         unsafe {
@@ -115,8 +150,18 @@ impl DialogNavigator for KeybdDialogNavigator {
         send(&ctrl_l)?;
         std::thread::sleep(Duration::from_millis(AFTER_CTRL_L_MS));
 
-        // Type the path as Unicode code units.
-        if !path_str.is_empty() {
+        // Fast path: set the focused Edit's text directly — one WM_SETTEXT
+        // instead of N synthesized WM_CHARs, so the path appears instantly
+        // rather than across several frames of per-character repainting.
+        //
+        // Falls back to per-character Unicode typing below if:
+        // - the dialog's thread id can't be resolved
+        // - GetGUIThreadInfo fails (rare)
+        // - the focused HWND isn't an Edit (e.g. Ctrl+L didn't transition
+        //   focus as expected on some unusual dialog variant)
+        let fast_path_set = fast_set_focused_edit_text(dialog_hwnd, &path_str);
+
+        if !fast_path_set && !path_str.is_empty() {
             let mut typing: Vec<INPUT> = Vec::with_capacity(path_str.len() * 2);
             for unit in path_str.encode_utf16() {
                 typing.push(unicode_input(unit, KEYBD_EVENT_FLAGS(0)));
