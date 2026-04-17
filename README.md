@@ -3,22 +3,23 @@
 A configurable folder toolbar for Windows 11 File Explorer and Open/Save As dialogs. 
 
 
-![alt text](docs/images/main_demo.webm)
+![Main Explorer Demo](docs/images/main_demo_webm.mp4)
 
-![alt text](docs/images/dialog_demo.webm)
-
+![Save/Open Dialog Demo](docs/images/dialog_demo_webm.mp4)
 
 I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the early 2000's and then mostly have just used QTTabBar since for tabs and folder bars, but it is now bloated, unsupported ('[original](http://qttabbar.wikidot.com/)' version), and currently broken (including the newer [indiff](https://github.com/indiff/qttabbar) version, or needing deep workarounds) on Windows 11. I previously used it mostly for tabs and folder bars because 'Quick Access' is a terrible UX. This is my Rust-built version now that Windows 11's File Explorer has tab support.  
 
 ## Features
 * Works with tabs, changing the active tab when clicking a folder in exbar. Ctrl-click to open in new tab.
-* Works in Save As / Open file dialogs too — click a folder to retarget the dialog instead of Explorer. Drag a file out of the dialog onto a toolbar folder to move or copy it there.
+* Works in normal Save As / Open file dialogs too — click a folder to retarget the dialog instead of Explorer. Drag a file out of the dialog onto a toolbar folder to move or copy it there.
 * Drag-n-drop support for moving and copying files with native Windows semantics around ctrl/shift drop.
 * Drag-n-drop support for adding folders to Exbar.
 * Drag re-sort the order of the folders in Exbar.
-* Right click exbar folder for various options, like
+* Right click exbar folder for various options, like copy path or rename the shortcut.
 * Right click '+' for editing config.
-* Remembers relative position and adjusts after drag, resize and maximize events.
+* Remembers relative position and adjusts after drag, resize and maximize events. Vertical layout supported for those with odd tastes.
+
+![Save/Open Dialog Demo](docs/images/vertical_orientation.png)
 
 ## Install
 
@@ -53,8 +54,11 @@ Edit `~\.exbar\config.json` (in your user home folder):
     {"name": "Projects",  "path": "C:\\Users\\you\\projects"},
     {"name": "Work",      "path": "D:\\work"}
   ],
-  "layout": "horizontal",
-  "background_opacity": 0.8
+  "layout": "horizontal", // or "vertical"
+  "background_opacity": 0.8,
+  "log_level": "info", // exbar.log in %TEMP% usually in AppData\Local\Temp
+  "repositionDelayMs": 250, // dial in the time the exbar reappears after a max/unmax
+  "enableFileDialogs": true
 }
 ```
 
