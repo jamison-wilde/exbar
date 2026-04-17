@@ -6,6 +6,7 @@ I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the 
 
 ## Features
 * Works with tabs, changing the active tab when clicking a folder in exbar. Ctrl-click to open in new tab.
+* Works in Save As / Open file dialogs too — click a folder to retarget the dialog instead of Explorer. Drag a file out of the dialog onto a toolbar folder to move or copy it there.
 * Drag-n-drop support for moving and copying files with native Windows semantics around ctrl/shift drop.
 * Drag-n-drop support for adding folders to Exbar.
 * Drag re-sort the order of the folders in Exbar.
@@ -15,7 +16,7 @@ I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the 
 
 ## Install
 
-1. Download `exbar-1.0.0-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
+1. Download `exbar-1.1.0-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
 2. Double-click the MSI.
 3. Windows SmartScreen will warn you that the publisher is unrecognized (the installer is not yet signed). Click **More info** → **Run anyway**.
 4. Step through the installer dialogs — defaults are correct.
@@ -48,6 +49,7 @@ Edit `~\.exbar.json` (in your user home folder):
 - `folders[].path` — absolute path or `shell:` alias like `shell:downloads`, `shell:desktop`, `shell:personal` (required)
 - `layout` — `"horizontal"` (default) or `"vertical"`
 - `background_opacity` — 0.0 (transparent) to 1.0 (opaque). Default: 0.8
+- `enableFileDialogs` — `true` (default) to light up the toolbar over Save As / Open dialogs. Set to `false` for Explorer-only behavior.
 
 If the file doesn't exist, the installer created a stub for you with Downloads, Documents, and Desktop. Click the refresh button (⟳) on the toolbar after editing.
 
@@ -92,7 +94,7 @@ See `CLAUDE.md` for architecture notes and the live-iteration build loop.
 
 ## Status
 
-Current release: v1.0.0. Known caveats:
+Current release: v1.1.0. Known caveats:
 - Installer is unsigned (SmartScreen warning)
 - Icon support not yet implemented (folder emoji + label only)
 - Only tested on Win11, x86_64, single-user installs

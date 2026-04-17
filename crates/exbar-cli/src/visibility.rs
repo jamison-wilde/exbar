@@ -30,6 +30,92 @@ pub(crate) fn get_global_toolbar_hwnd() -> Option<HWND> {
     GLOBAL_TOOLBAR.lock().unwrap().map(|h| HWND(h as *mut _))
 }
 
+// ── File-dialog probe ─────────────────────────────────────────────────────────
+
+/// Can tell whether a given HWND is a Shell-hosted file dialog, i.e. whether
+/// it has a `SHELLDLL_DefView` descendant. Separated behind a trait so the
+/// pure classifier can be tested without touching Win32.
+pub trait DefViewProbe {
+    fn has_defview(&self, hwnd: HWND) -> bool;
+}
+
+/// Production probe: walks the window tree via `EnumChildWindows`, checking
+/// each child's class name for `SHELLDLL_DefView`.
+pub struct Win32DefViewProbe;
+
+impl DefViewProbe for Win32DefViewProbe {
+    /// Returns true if `hwnd` descends into a recognisable file-dialog shape.
+    ///
+    /// Two markers are accepted:
+    /// - `SHELLDLL_DefView` — modern Common Item Dialog (`IFileDialog`).
+    /// - `ComboBoxEx32` — legacy `GetOpenFileName` / `GetSaveFileName`
+    ///   Common Dialog's "Look in:" folder combo.
+    ///
+    /// Either marker is sufficient; both imply the dialog accepts path
+    /// input via Ctrl+L (modern) or typed-into-filename-and-Enter (legacy).
+    fn has_defview(&self, hwnd: HWND) -> bool {
+        use windows::Win32::Foundation::LPARAM;
+        use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
+        use windows_core::BOOL;
+
+        struct Ctx {
+            found: bool,
+        }
+        unsafe extern "system" fn cb(child: HWND, lparam: LPARAM) -> BOOL {
+            let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+            let mut buf = [0u16; 64];
+            let n = unsafe { GetClassNameW(child, &mut buf) } as usize;
+            if n > 0 {
+                let name = String::from_utf16_lossy(&buf[..n]);
+                if name == "SHELLDLL_DefView" || name == "ComboBoxEx32" {
+                    ctx.found = true;
+                    return BOOL(0); // stop enumeration
+                }
+            }
+            BOOL(1)
+        }
+        let mut ctx = Ctx { found: false };
+        unsafe {
+            let _ = EnumChildWindows(Some(hwnd), Some(cb), LPARAM(&mut ctx as *mut _ as isize));
+        }
+        ctx.found
+    }
+}
+
+/// Role a foreground HWND can play for the toolbar.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HwndRole {
+    /// A Shell-hosted file dialog (Save As / Open). Toolbar attaches to this.
+    FileDialog,
+    /// Not a role the toolbar cares about specifically.
+    Unknown,
+}
+
+/// Pure: decide whether an HWND represents a file dialog.
+///
+/// Gated on `dialog_enabled` so the `Config.enable_file_dialogs = false`
+/// escape hatch produces `Unknown`.
+///
+/// Recognises a file dialog by: class name `#32770` AND a known file-dialog
+/// descendant (`SHELLDLL_DefView` for modern `IFileDialog`, or `ComboBoxEx32`
+/// for the legacy `GetOpenFileName`/`GetSaveFileName` Common Dialog).
+/// Class name is passed in rather than queried here to keep this function
+/// fully pure and testable.
+pub fn classify_hwnd(
+    hwnd: HWND,
+    class_name: &str,
+    dialog_enabled: bool,
+    probe: &impl DefViewProbe,
+) -> HwndRole {
+    if !dialog_enabled {
+        return HwndRole::Unknown;
+    }
+    if class_name == "#32770" && probe.has_defview(hwnd) {
+        return HwndRole::FileDialog;
+    }
+    HwndRole::Unknown
+}
+
 // ── Foreground window tracking ───────────────────────────────────────────────
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
@@ -159,7 +245,7 @@ unsafe extern "system" fn foreground_event_proc(
         // different Explorer window is being moved.
         if let Some(tb) = tb_opt
             && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
-            && state.active_explorer == Some(hwnd)
+            && state.active_target.map(|t| t.hwnd) == Some(hwnd)
         {
             state.explorer_moving = true;
             unsafe {
@@ -173,7 +259,7 @@ unsafe extern "system" fn foreground_event_proc(
         // Explorer finished moving/resizing — clear flag, reposition and show.
         if let Some(tb) = tb_opt
             && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
-            && state.active_explorer == Some(hwnd)
+            && state.active_target.map(|t| t.hwnd) == Some(hwnd)
         {
             state.explorer_moving = false;
             reposition_and_show(tb, hwnd);
@@ -191,7 +277,7 @@ unsafe extern "system" fn foreground_event_proc(
         // repositioning from an async callback before geometry settles.
         if let Some(tb) = tb_opt
             && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
-            && state.active_explorer == Some(hwnd)
+            && state.active_target.map(|t| t.hwnd) == Some(hwnd)
             && !state.explorer_moving
         {
             let delay = state.config.as_ref().map_or(250, |c| c.reposition_delay_ms);
@@ -234,7 +320,7 @@ unsafe extern "system" fn foreground_event_proc(
             // installed SetWinEventHook — our message-pump thread. Same
             // single-threaded invariant `toolbar_state` relies on.
             if let Some(state) = unsafe { crate::toolbar::toolbar_state(toolbar_hwnd) } {
-                state.active_explorer = Some(hwnd);
+                state.active_target = Some(crate::target::ActiveTarget::explorer(hwnd));
             }
         }
         // First time we see an Explorer foreground, create the toolbar.
@@ -257,7 +343,7 @@ unsafe extern "system" fn foreground_event_proc(
         // allowing Explorer's own XAML islands and popups through.
         if let Some(tb) = tb_opt
             && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
-            && let Some(active) = state.active_explorer
+            && let Some(active) = state.active_target.map(|t| t.hwnd)
         {
             let root = unsafe {
                 windows::Win32::UI::WindowsAndMessaging::GetAncestor(
@@ -286,9 +372,51 @@ unsafe extern "system" fn foreground_event_proc(
         }
     } else if in_our_process {
         // Our own popup menu / rename edit / folder picker. Keep visible.
-    } else if let Some(tb) = tb_opt {
-        unsafe {
-            crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
+    } else {
+        // Not Explorer, not an explorer-process window, not our process.
+        // Last check: is it a Shell-hosted file dialog? If so, treat it like
+        // an Explorer for show/position purposes.
+        let dialog_enabled = tb_opt
+            .and_then(|tb| unsafe { crate::toolbar::toolbar_state(tb) })
+            .and_then(|s| s.config.as_ref())
+            .map(|c| c.enable_file_dialogs)
+            .unwrap_or(true);
+
+        match classify_hwnd(hwnd, &class, dialog_enabled, &Win32DefViewProbe) {
+            HwndRole::FileDialog => {
+                // Toolbar may not exist yet (first dialog ever).
+                if tb_opt.is_none() {
+                    let mut rect = windows::Win32::Foundation::RECT::default();
+                    unsafe {
+                        let _ =
+                            windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
+                    }
+                    let default_pos = windows::Win32::Foundation::RECT {
+                        left: rect.left + 40,
+                        top: rect.top + 120,
+                        right: rect.left + 440,
+                        bottom: rect.top + 160,
+                    };
+                    let hinst = crate::lifecycle::exe_hinstance();
+                    let _ = crate::lifecycle::create_toolbar(hwnd, &default_pos, hinst);
+                }
+                if let Some(tb) = get_global_toolbar_hwnd() {
+                    if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
+                        state.active_target = Some(crate::target::ActiveTarget::file_dialog(hwnd));
+                        // Force a reposition; last_explorer_origin was for explorer.
+                        state.last_explorer_origin = None;
+                    }
+                    reposition_and_show(tb, hwnd);
+                }
+            }
+            HwndRole::Unknown => {
+                // Different unrelated process — hide.
+                if let Some(tb) = tb_opt {
+                    unsafe {
+                        crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
+                    }
+                }
+            }
         }
     }
 }
@@ -299,7 +427,7 @@ unsafe extern "system" fn foreground_event_proc(
 /// check — NOT the event HWND, which may be an XAML island child.
 pub(crate) fn show_above(toolbar: HWND, _explorer: HWND) {
     if let Some(state) = unsafe { crate::toolbar::toolbar_state(toolbar) }
-        && let Some(active) = state.active_explorer
+        && let Some(active) = state.active_target.map(|t| t.hwnd)
     {
         let current_origin = crate::position::explorer_visible_origin(active);
         log::debug!(
@@ -337,7 +465,11 @@ pub(crate) fn reposition_and_show(toolbar: HWND, explorer: HWND) {
     let origin = crate::position::explorer_visible_origin(explorer);
     log::debug!("reposition_and_show: explorer={explorer:?} origin={origin:?}");
 
-    if let Some((off_x, off_y)) = crate::position::load_saved_offset() {
+    let kind = unsafe { crate::toolbar::toolbar_state(toolbar) }
+        .and_then(|s| s.active_target.map(|t| t.kind))
+        .unwrap_or(crate::target::TargetKind::Explorer);
+
+    if let Some((off_x, off_y)) = crate::position::load_saved_offset(kind) {
         let (tx, ty) = crate::position::apply_offset(off_x, off_y, origin.0, origin.1);
         log::debug!("reposition_and_show: offset=({off_x},{off_y}) target=({tx},{ty})");
         let mut tr = windows::Win32::Foundation::RECT::default();
@@ -488,6 +620,71 @@ mod tests {
         assert_eq!(
             classify_foreground(7, Some("C:/Windows/explorer.exe"), 1),
             Foreground::Explorer
+        );
+    }
+
+    struct MockDefView(bool);
+    impl super::DefViewProbe for MockDefView {
+        fn has_defview(&self, _hwnd: windows::Win32::Foundation::HWND) -> bool {
+            self.0
+        }
+    }
+
+    #[test]
+    fn mock_defview_true() {
+        let m = MockDefView(true);
+        assert!(m.has_defview(HWND(42 as *mut _)));
+    }
+
+    #[test]
+    fn mock_defview_false() {
+        let m = MockDefView(false);
+        assert!(!m.has_defview(HWND(42 as *mut _)));
+    }
+
+    #[test]
+    fn classify_hwnd_dialog_class_with_defview_is_file_dialog() {
+        let probe = MockDefView(true);
+        assert_eq!(
+            classify_hwnd(
+                HWND(42 as *mut _),
+                "#32770",
+                /* dialog_enabled */ true,
+                &probe
+            ),
+            HwndRole::FileDialog,
+        );
+    }
+
+    #[test]
+    fn classify_hwnd_dialog_class_without_defview_is_unknown() {
+        let probe = MockDefView(false);
+        assert_eq!(
+            classify_hwnd(HWND(42 as *mut _), "#32770", true, &probe),
+            HwndRole::Unknown,
+        );
+    }
+
+    #[test]
+    fn classify_hwnd_non_dialog_class_is_unknown_even_if_defview_exists() {
+        let probe = MockDefView(true);
+        assert_eq!(
+            classify_hwnd(HWND(42 as *mut _), "CabinetWClass", true, &probe),
+            HwndRole::Unknown,
+        );
+    }
+
+    #[test]
+    fn classify_hwnd_dialog_disabled_suppresses_file_dialog() {
+        let probe = MockDefView(true);
+        assert_eq!(
+            classify_hwnd(
+                HWND(42 as *mut _),
+                "#32770",
+                /* dialog_enabled */ false,
+                &probe
+            ),
+            HwndRole::Unknown,
         );
     }
 }

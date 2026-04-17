@@ -146,10 +146,10 @@ pub fn create_toolbar(owner: HWND, screen_pos: &RECT, hinstance: HINSTANCE) -> O
     log::info!("create_toolbar: dark_mode={is_dark}");
 
     let mut state = Box::new(ToolbarState::new(dpi, config));
-    // Seed active_explorer with the triggering cabinet HWND. WM_CREATE runs
+    // Seed active_target with the triggering cabinet HWND. WM_CREATE runs
     // synchronously inside CreateWindowExW, so we can't set this after creation;
     // seeding the Box before into_raw guarantees WM_CREATE observes it.
-    state.active_explorer = Some(owner);
+    state.active_target = Some(crate::target::ActiveTarget::explorer(owner));
     // SAFETY: Box::into_raw transfers ownership to the CreateWindowExW lpCreateParams
     // slot, which Win32 delivers to WM_CREATE as cs.lpCreateParams. If window
     // creation fails, the Err branch below reclaims the box via Box::from_raw.
@@ -159,10 +159,11 @@ pub fn create_toolbar(owner: HWND, screen_pos: &RECT, hinstance: HINSTANCE) -> O
 
     // Determine initial window position: saved offset > default pos
     let (origin_x, origin_y) = crate::position::explorer_visible_origin(owner);
-    let (mut x, mut y) = match crate::position::load_saved_offset() {
-        Some((ox, oy)) => crate::position::apply_offset(ox, oy, origin_x, origin_y),
-        None => (screen_pos.left, screen_pos.top),
-    };
+    let (mut x, mut y) =
+        match crate::position::load_saved_offset(crate::target::TargetKind::Explorer) {
+            Some((ox, oy)) => crate::position::apply_offset(ox, oy, origin_x, origin_y),
+            None => (screen_pos.left, screen_pos.top),
+        };
 
     // Rough placeholder size for clamping; resized in WM_CREATE.
     // Clamp using the monitor that contains the triggering Explorer window.

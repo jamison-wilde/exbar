@@ -4,6 +4,7 @@
 
 use crate::clipboard::{Clipboard, test_mocks::MockClipboard};
 use crate::config::{Config, ConfigStore, FolderEntry, test_mocks::MockConfigStore};
+use crate::dialog_nav::{DialogNavigator, test_mocks::MockDialogNavigator};
 use crate::dragdrop::{FileOperator, test_mocks::MockFileOp};
 use crate::error::ExbarResult;
 use crate::layout::{ButtonLayout, Rect};
@@ -11,6 +12,7 @@ use crate::picker::{FolderPicker, test_mocks::MockFolderPicker};
 use crate::shell_windows::test_mocks::MockShellBrowser;
 use crate::toolbar::ToolbarState;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 // Newtypes bridging Arc<Concrete> → Box<dyn Trait>.
@@ -36,23 +38,41 @@ impl ConfigStore for CfgArc {
     }
 }
 
+/// Rc-bridging newtype so `MockDialogNavigator` (with `RefCell` interior
+/// mutability, which is not `Sync`) can be shared between `TestDeps` and
+/// `Box<dyn DialogNavigator>`. All tests are single-threaded, so `Rc` is safe.
+pub struct DlgNavRc(pub Rc<MockDialogNavigator>);
+impl DialogNavigator for DlgNavRc {
+    fn navigate(
+        &self,
+        dialog_hwnd: windows::Win32::Foundation::HWND,
+        path: &std::path::Path,
+    ) -> ExbarResult<()> {
+        self.0.navigate(dialog_hwnd, path)
+    }
+}
+
 pub struct TestDeps {
     pub navigate_calls: Arc<Mutex<Vec<(isize, PathBuf)>>>,
     pub new_tab_calls: Arc<Mutex<Vec<(isize, PathBuf, u32)>>>,
+    pub new_window_calls: Arc<Mutex<Vec<PathBuf>>>,
     pub picker: Arc<MockFolderPicker>,
     pub file_op: Arc<MockFileOp>,
     pub clipboard: Arc<MockClipboard>,
     pub cfg_store: Arc<MockConfigStore>,
+    pub dialog_nav: Rc<MockDialogNavigator>,
 }
 
 pub fn mk_deps() -> TestDeps {
     TestDeps {
         navigate_calls: Arc::default(),
         new_tab_calls: Arc::default(),
+        new_window_calls: Arc::default(),
         picker: Arc::new(MockFolderPicker::default()),
         file_op: Arc::new(MockFileOp::default()),
         clipboard: Arc::new(MockClipboard::default()),
         cfg_store: Arc::new(MockConfigStore::default()),
+        dialog_nav: Rc::new(MockDialogNavigator::default()),
     }
 }
 
@@ -60,6 +80,7 @@ pub fn make_test_state(deps: &TestDeps, config: Option<Config>) -> ToolbarState 
     let shell = MockShellBrowser {
         navigate_calls: Arc::clone(&deps.navigate_calls),
         new_tab_calls: Arc::clone(&deps.new_tab_calls),
+        new_window_calls: Arc::clone(&deps.new_window_calls),
     };
     ToolbarState::with_deps(
         96,
@@ -69,6 +90,7 @@ pub fn make_test_state(deps: &TestDeps, config: Option<Config>) -> ToolbarState 
         deps.file_op.clone() as Arc<dyn FileOperator>,
         Box::new(ClipArc(deps.clipboard.clone())),
         Box::new(CfgArc(deps.cfg_store.clone())),
+        Box::new(DlgNavRc(Rc::clone(&deps.dialog_nav))),
     )
 }
 

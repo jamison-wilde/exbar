@@ -34,6 +34,8 @@ exbar/
 │       │   ├── drop_effect.rs          # Pure drag-drop effect determination (SP2a)
 │       │   ├── dragdrop.rs             # IDropTarget + FileOperator trait (SP3)
 │       │   ├── shell_windows.rs        # IShellWindows enum + ShellBrowser trait (SP3)
+│       │   ├── dialog_nav.rs           # DialogNavigator trait + KeybdDialogNavigator (Ctrl+L keyboard injection)
+│       │   ├── target.rs               # TargetKind + ActiveTarget (Explorer vs FileDialog)
 │       │   ├── explorer.rs             # check_explorer_ready, class-name walking
 │       │   ├── picker.rs               # FolderPicker trait (IFileOpenDialog) (SP3)
 │       │   ├── clipboard.rs            # Clipboard trait (CF_UNICODETEXT) (SP3)
@@ -42,6 +44,7 @@ exbar/
 │       │   ├── theme.rs                # DPI scale, dark-mode detection
 │       │   ├── error.rs                # ExbarError + ExbarResult (SP5)
 │       │   └── log.rs                  # FileLogger (log crate) → %TEMP%\exbar.log (SP5)
+│       │   └── bin/uia_spike.rs        # Diagnostic: dump UIA tree of a live file dialog (kept for future selector changes)
 │       ├── tests/                      # integration tests
 │       └── wix/
 │           └── main.wxs                # WiX v4 installer definition
@@ -58,7 +61,7 @@ exbar/
 All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` in git-bash).
 
 - **Build:** `cargo build` (dev) or `cargo build --release`
-- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 166 tests across 24 modules
+- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 184 tests across 27 modules
 - **Build only the CLI:** `cargo build --release -p exbar-cli` (faster iteration)
 - **Run the CLI:** `./target/release/exbar.exe <install|uninstall|status|hook>`
 - **Build MSI:** `./scripts/build-msi.sh` (requires WiX v7 installed — see "MSI installer" section)
@@ -120,13 +123,15 @@ All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` 
 
 | Trait | Production impl | Used for |
 |---|---|---|
-| `shell_windows::ShellBrowser` | `Win32Shell` | Explorer navigation (`BrowseObject`, `open_in_new_tab`) |
+| `shell_windows::ShellBrowser` | `Win32Shell` | Explorer navigation (`BrowseObject`, `open_in_new_tab`, `open_in_new_window`) |
 | `picker::FolderPicker` | `Win32Picker` | `IFileOpenDialog` folder picker |
 | `dragdrop::FileOperator` | `Win32FileOp` | `IFileOperation` move/copy |
 | `clipboard::Clipboard` | `Win32Clipboard` | `OleClipboard` text writes |
 | `config::ConfigStore` | `JsonFileStore` | `~/.exbar.json` load/save |
+| `dialog_nav::DialogNavigator` | `KeybdDialogNavigator` | Ctrl+L keyboard injection into file dialogs |
+| `visibility::DefViewProbe` | `Win32DefViewProbe` | Detects `SHELLDLL_DefView` descendants to recognise file dialogs |
 
-Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
+Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
 
 ### Error handling (SP5)
 
@@ -137,6 +142,16 @@ Logging goes through the `log` crate — `log::info!` / `warn!` / `error!` / `de
 ### State ownership (SP4)
 
 All runtime state lives on `ToolbarState`, owned by the wndproc via `GWLP_USERDATA`. The one surviving static is `GLOBAL_TOOLBAR: Mutex<Option<isize>>` — a thread-safe bootstrap entry for `WINEVENT_OUTOFCONTEXT` callbacks (which have no `&self`) to find the toolbar HWND; from there, `unsafe { toolbar_state(hwnd) }` recovers the pointer. The safety of that helper relies on the single-threaded message-pump invariant.
+
+### File dialog support
+
+Beyond Explorer windows, the toolbar also activates over the Windows Common Item Dialog — every app's Save As / Open dialog on Win10/11 (Fusion, VS Code, Chrome, Office, etc.).
+
+- **Detection**: `visibility::classify_hwnd` recognises a foreground window whose class is `#32770` AND contains a `SHELLDLL_DefView` descendant. `Win32DefViewProbe` does the child-window walk via `EnumChildWindows`. Gated by `Config.enable_file_dialogs` (default `true`).
+- **Target abstraction**: `ToolbarState.active_target: Option<ActiveTarget>` pairs a foreground HWND with a `TargetKind` (`Explorer` | `FileDialog`). Positioning, `LOCATIONCHANGE` filtering, `MOVESIZESTART/END` guards, and the reposition timer are all HWND-keyed and work unchanged across both kinds.
+- **Navigation**: `dialog_nav::KeybdDialogNavigator::navigate(hwnd, path)` does `SetForegroundWindow(hwnd)` → `SendInput(Ctrl+L)` (focuses the breadcrumb path bar in edit mode) → `SendInput` Unicode-typing the path → `SendInput(Enter)`. No UIA; `Ctrl+L` is the OS-level shortcut baked into every Shell-hosted dialog. Same `SendInput` rationale as `shell_windows::open_in_new_tab` — `PostMessageW` is unreliable across focus boundaries.
+- **Position persistence**: `~/.exbar-pos.json` stores per-kind offsets under `{"explorer": {offset_x, offset_y}, "file_dialog": {offset_x, offset_y}}`. Old flat `{offset_x, offset_y}` auto-migrates — value is promoted to `explorer` and copied to `file_dialog` so the user's tuned position applies on first dialog interaction.
+- **Degraded actions in FileDialog mode**: `FireFolderClick(ctrl=true)`, right-click **Open**, and right-click **Open in new tab** all call `ShellBrowser::open_in_new_window(path)` (ShellExecuteW of `explorer.exe "path"`) — dialogs have no tabs, so opening a fresh Explorer window is the most useful degradation. Drag-drop, Copy path, Rename, Remove, Add-folder, drag-reorder, and `+` config actions all work unchanged.
 
 ### Context menus and inline rename
 
@@ -172,6 +187,9 @@ All runtime state lives on `ToolbarState`, owned by the wndproc via `GWLP_USERDA
 - **Win11 new-tab detection**: `IShellWindows` entries for tabs in the same window share the same HWND. Detect a new tab by `IShellWindows.Count()` increase, not by new-HWND appearance. The new tab is the last entry in enumeration. `open_in_new_tab` uses `SendInput` (hardware-level Ctrl+T injection) rather than `PostMessageW` because PostMessage doesn't reach Explorer after a right-click context menu steals focus.
 - **`OleInitialize` required**: `RegisterDragDrop` requires `OleInitialize`, not just `CoInitializeEx(COINIT_APARTMENTTHREADED)`. Without it, drop target registration silently fails.
 - **Foreground hook must be installed before the first toolbar exists**: `install_foreground_hook()` is called from `run_hook()` (not from toolbar `WM_CREATE`) because the hook is what creates the toolbar on the first `CabinetWClass` foreground event. Chicken-and-egg if reversed. However, `run_hook` also checks if Explorer is already foreground and creates the toolbar immediately (handles post-MSI-install case).
+- **Why Ctrl+L for file-dialog navigation, not UIA**: the 2026-04-16 UIA spike found that the Common Item Dialog's breadcrumb is NOT a `ControlType.Edit` in the static UIA tree — it's a `Pane`/`Toolbar` composite with `Button` children that only becomes editable on click. The filename Edit (`AutomationId=1001`) does accept `SetValue` but clobbers user-typed filenames on Save As (hostile UX). Ctrl+L is the OS-level Shell shortcut that focuses the breadcrumb in edit mode directly — no selector required, no filename clobber. Full spike trace in `docs/superpowers/spikes/2026-04-16-uia-spike-results.md`. The `crates/exbar-cli/src/bin/uia_spike.rs` binary is retained for future diagnostic use.
+- **Foreground set before keyboard injection**: `SendInput` targets whichever window has the foreground at the moment of injection. `KeybdDialogNavigator::navigate` calls `SetForegroundWindow(dialog_hwnd)` + 50 ms sleep before injecting Ctrl+L, the Unicode path, and Enter. Without the focus step, keystrokes can land in the wrong window during rapid clicks. Same pattern as the Ctrl+T injection in `shell_windows::open_in_new_tab`.
+- **Position schema backward-compat**: `~/.exbar-pos.json` migrated from flat `{offset_x, offset_y}` to `{"explorer": ..., "file_dialog": ...}` in v1.1. `PositionStore::from_json_str` accepts both via a serde `untagged` enum — old flat shape loads as the `explorer` offset and copies the same value to `file_dialog` (better UX than defaulting dialog offset to zero).
 
 ## Logging
 

@@ -107,11 +107,12 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // Apply layered window transparency and register drop target.
             crate::lifecycle::setup_on_create(hwnd, state);
 
-            // active_explorer is seeded in create_toolbar before Box::into_raw,
+            // active_target is seeded in create_toolbar before Box::into_raw,
             // so it's always Some here. Fall back to GetForegroundWindow() only
             // as defence-in-depth in case that invariant is ever broken.
             let explorer_hwnd = state
-                .active_explorer
+                .active_target
+                .map(|t| t.hwnd)
                 .unwrap_or_else(|| unsafe { GetForegroundWindow() });
             let class = crate::explorer::get_class_name(explorer_hwnd);
             if class == "CabinetWClass" {
@@ -199,11 +200,15 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         WM_MOVE => {
             let (x, y) = lparam_point(lparam);
             if let Some(state) = unsafe { toolbar_state(hwnd) }
-                && let Some(explorer) = state.active_explorer
+                && let Some(explorer) = state.active_target.map(|t| t.hwnd)
             {
                 let (ox, oy) = crate::position::explorer_visible_origin(explorer);
                 let (off_x, off_y) = crate::position::compute_offset(x, y, ox, oy);
-                crate::position::save_offset(off_x, off_y);
+                let kind = state
+                    .active_target
+                    .map(|t| t.kind)
+                    .unwrap_or(crate::target::TargetKind::Explorer);
+                crate::position::save_offset(kind, off_x, off_y);
             }
             LRESULT(0)
         }
@@ -340,25 +345,37 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
                         let path = std::path::PathBuf::from(&state.buttons[idx].folder.path);
                         match chosen {
-                            MENU_ID_OPEN => {
-                                if let Some(explorer) = state.active_explorer {
-                                    crate::warn_on_err!(
-                                        state.shell_browser.navigate(explorer, &path)
-                                    );
+                            MENU_ID_OPEN => match state.active_target.map(|t| t.kind) {
+                                Some(crate::target::TargetKind::FileDialog) => {
+                                    state.shell_browser.open_in_new_window(&path);
                                 }
-                            }
-                            MENU_ID_OPEN_NEW_TAB => {
-                                let timeout = state
-                                    .config
-                                    .as_ref()
-                                    .map(|c| c.new_tab_timeout_ms_zero_disables)
-                                    .unwrap_or(500);
-                                if let Some(explorer) = state.active_explorer {
-                                    state
-                                        .shell_browser
-                                        .open_in_new_tab(explorer, &path, timeout);
+                                Some(crate::target::TargetKind::Explorer) => {
+                                    if let Some(explorer) = state.active_target.map(|t| t.hwnd) {
+                                        crate::warn_on_err!(
+                                            state.shell_browser.navigate(explorer, &path)
+                                        );
+                                    }
                                 }
-                            }
+                                None => {}
+                            },
+                            MENU_ID_OPEN_NEW_TAB => match state.active_target.map(|t| t.kind) {
+                                Some(crate::target::TargetKind::FileDialog) => {
+                                    state.shell_browser.open_in_new_window(&path);
+                                }
+                                Some(crate::target::TargetKind::Explorer) => {
+                                    let timeout = state
+                                        .config
+                                        .as_ref()
+                                        .map(|c| c.new_tab_timeout_ms_zero_disables)
+                                        .unwrap_or(500);
+                                    if let Some(explorer) = state.active_target.map(|t| t.hwnd) {
+                                        state
+                                            .shell_browser
+                                            .open_in_new_tab(explorer, &path, timeout);
+                                    }
+                                }
+                                None => {}
+                            },
                             MENU_ID_COPY_PATH => {
                                 let folder_button = idx - 1; // + button at index 0
                                 crate::actions::copy_folder_path_to_clipboard(state, folder_button);
@@ -397,7 +414,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_REPOSITION);
             }
             if let Some(state) = unsafe { toolbar_state(hwnd) }
-                && let Some(explorer) = state.active_explorer
+                && let Some(explorer) = state.active_target.map(|t| t.hwnd)
             {
                 log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
                 crate::visibility::reposition_and_show(hwnd, explorer);

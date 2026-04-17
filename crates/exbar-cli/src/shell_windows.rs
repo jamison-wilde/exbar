@@ -248,6 +248,12 @@ pub trait ShellBrowser: Send + Sync {
     /// `timeout_ms == 0`, fall back to ShellExecuteW opening a fresh Explorer
     /// window.
     fn open_in_new_tab(&self, explorer: HWND, path: &Path, timeout_ms: u32);
+
+    /// Open `path` in a fresh Explorer window via `ShellExecuteW`. Used as the
+    /// degraded fallback when Ctrl-click or the right-click menu's Open/"Open in
+    /// new tab" is invoked while the active target is a file dialog (dialogs have
+    /// no tabs, so we can't meaningfully "new-tab" there).
+    fn open_in_new_window(&self, path: &Path);
 }
 
 #[derive(Default)]
@@ -439,6 +445,11 @@ impl ShellBrowser for Win32Shell {
             }
         }
     }
+
+    fn open_in_new_window(&self, path: &Path) {
+        let s = path.to_string_lossy();
+        open_in_new_window(&s);
+    }
 }
 
 fn open_in_new_window(path: &str) {
@@ -473,6 +484,7 @@ pub(crate) mod test_mocks {
     pub struct MockShellBrowser {
         pub navigate_calls: Arc<Mutex<Vec<(isize, PathBuf)>>>,
         pub new_tab_calls: Arc<Mutex<Vec<(isize, PathBuf, u32)>>>,
+        pub new_window_calls: Arc<Mutex<Vec<PathBuf>>>,
     }
 
     impl ShellBrowser for MockShellBrowser {
@@ -489,6 +501,12 @@ pub(crate) mod test_mocks {
                 path.to_path_buf(),
                 timeout_ms,
             ));
+        }
+        fn open_in_new_window(&self, path: &Path) {
+            self.new_window_calls
+                .lock()
+                .unwrap()
+                .push(path.to_path_buf());
         }
     }
 }

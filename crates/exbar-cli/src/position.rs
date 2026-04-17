@@ -2,17 +2,111 @@
 //! work-area clamping. The pure `clamp_to_work_area` is the only
 //! testable surface; the rest is Win32 `SystemParametersInfoW` /
 //! filesystem I/O.
+//!
+//! The JSON file uses a per-kind schema (v1):
+//! ```json
+//! { "explorer": {"offset_x": 10, "offset_y": 20},
+//!   "file_dialog": {"offset_x": 30, "offset_y": 40} }
+//! ```
+//! Older flat files (`{"offset_x": 5, "offset_y": 7}`) are promoted on load:
+//! the flat value becomes both `explorer` and `file_dialog`.
 
+use crate::target::TargetKind;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
 };
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SavedPos {
-    offset_x: i32,
-    offset_y: i32,
+/// A single (offset_x, offset_y) pair stored per [`TargetKind`].
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SavedPos {
+    pub offset_x: i32,
+    pub offset_y: i32,
 }
+
+// ── JSON schema helpers ───────────────────────────────────────────────────────
+
+/// On-disk v1 shape: both kinds present.
+#[derive(serde::Serialize)]
+struct PositionOut {
+    explorer: SavedPos,
+    file_dialog: SavedPos,
+}
+
+/// Untagged union: accepts the legacy flat object OR the v1 per-kind object.
+///
+/// `Flat` is tried first: it requires both `offset_x` and `offset_y`, so the
+/// per-kind shape (`{"explorer": {...}}`) fails here and falls through to
+/// `PerKind`. The flat shape (`{"offset_x": N, "offset_y": N}`) won't parse
+/// as `PerKind` either direction, but we don't need it to — `Flat` catches it.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum PositionJson {
+    Flat(SavedPos),
+    PerKind {
+        #[serde(default)]
+        explorer: Option<SavedPos>,
+        #[serde(default)]
+        file_dialog: Option<SavedPos>,
+    },
+}
+
+// ── PositionStore ─────────────────────────────────────────────────────────────
+
+/// In-memory store of per-[`TargetKind`] offsets.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct PositionStore {
+    explorer: SavedPos,
+    file_dialog: SavedPos,
+}
+
+impl PositionStore {
+    /// Return the saved offset for `kind`.
+    pub(crate) fn offset(&self, kind: TargetKind) -> SavedPos {
+        match kind {
+            TargetKind::Explorer => self.explorer,
+            TargetKind::FileDialog => self.file_dialog,
+        }
+    }
+
+    /// Overwrite the saved offset for `kind`.
+    pub(crate) fn set_offset(&mut self, kind: TargetKind, pos: SavedPos) {
+        match kind {
+            TargetKind::Explorer => self.explorer = pos,
+            TargetKind::FileDialog => self.file_dialog = pos,
+        }
+    }
+
+    /// Parse from a JSON string, accepting both v1 (per-kind) and legacy (flat).
+    pub(crate) fn from_json_str(s: &str) -> Result<Self, serde_json::Error> {
+        match serde_json::from_str::<PositionJson>(s)? {
+            PositionJson::PerKind {
+                explorer,
+                file_dialog,
+            } => {
+                let ex = explorer.unwrap_or_default();
+                Ok(Self {
+                    explorer: ex,
+                    file_dialog: file_dialog.unwrap_or(ex),
+                })
+            }
+            PositionJson::Flat(p) => Ok(Self {
+                explorer: p,
+                file_dialog: p,
+            }),
+        }
+    }
+
+    /// Serialise to a pretty JSON string in the v1 per-kind schema.
+    pub(crate) fn to_json_string(self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(&PositionOut {
+            explorer: self.explorer,
+            file_dialog: self.file_dialog,
+        })
+    }
+}
+
+// ── Disk helpers ──────────────────────────────────────────────────────────────
 
 pub(crate) fn pos_file_path() -> std::path::PathBuf {
     let home = std::env::var("USERPROFILE")
@@ -23,15 +117,26 @@ pub(crate) fn pos_file_path() -> std::path::PathBuf {
     p
 }
 
-pub(crate) fn load_saved_offset() -> Option<(i32, i32)> {
+/// Load the saved offset for `kind` from disk. Returns `None` on missing file
+/// or parse error (callers fall back to a default position).
+pub(crate) fn load_saved_offset(kind: TargetKind) -> Option<(i32, i32)> {
     let bytes = std::fs::read(pos_file_path()).ok()?;
-    let saved: SavedPos = serde_json::from_slice(&bytes).ok()?;
-    Some((saved.offset_x, saved.offset_y))
+    let s = std::str::from_utf8(&bytes).ok()?;
+    let store = PositionStore::from_json_str(s).ok()?;
+    let pos = store.offset(kind);
+    Some((pos.offset_x, pos.offset_y))
 }
 
-pub(crate) fn save_offset(offset_x: i32, offset_y: i32) {
-    let saved = SavedPos { offset_x, offset_y };
-    if let Ok(json) = serde_json::to_string(&saved) {
+/// Persist `offset_x/offset_y` for `kind`, preserving the other kind's value.
+pub(crate) fn save_offset(kind: TargetKind, offset_x: i32, offset_y: i32) {
+    // Load existing store so we don't clobber the other kind's offset.
+    let mut store = std::fs::read(pos_file_path())
+        .ok()
+        .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(|s| s.to_owned()))
+        .and_then(|s| PositionStore::from_json_str(&s).ok())
+        .unwrap_or_default();
+    store.set_offset(kind, SavedPos { offset_x, offset_y });
+    if let Ok(json) = store.to_json_string() {
         let _ = std::fs::write(pos_file_path(), json);
     }
 }
@@ -197,5 +302,98 @@ mod tests {
         let (ox, oy) = compute_offset(-1500, 200, -1920, 0);
         assert_eq!((ox, oy), (420, 200));
         assert_eq!(apply_offset(ox, oy, -1920, 0), (-1500, 200));
+    }
+
+    // ── PositionStore tests ───────────────────────────────────────────────
+
+    #[test]
+    fn store_loads_new_schema_returns_per_kind() {
+        let json = r#"{
+            "explorer":    {"offset_x": 10, "offset_y": 20},
+            "file_dialog": {"offset_x": 30, "offset_y": 40}
+        }"#;
+        let store = PositionStore::from_json_str(json).unwrap();
+        assert_eq!(
+            store.offset(TargetKind::Explorer),
+            SavedPos {
+                offset_x: 10,
+                offset_y: 20
+            }
+        );
+        assert_eq!(
+            store.offset(TargetKind::FileDialog),
+            SavedPos {
+                offset_x: 30,
+                offset_y: 40
+            }
+        );
+    }
+
+    #[test]
+    fn store_loads_old_flat_schema_as_explorer_and_copies_to_dialog() {
+        let json = r#"{"offset_x": 5, "offset_y": 7}"#;
+        let store = PositionStore::from_json_str(json).unwrap();
+        assert_eq!(
+            store.offset(TargetKind::Explorer),
+            SavedPos {
+                offset_x: 5,
+                offset_y: 7
+            }
+        );
+        assert_eq!(
+            store.offset(TargetKind::FileDialog),
+            SavedPos {
+                offset_x: 5,
+                offset_y: 7
+            }
+        );
+    }
+
+    #[test]
+    fn store_missing_dialog_field_defaults_to_explorer_value() {
+        let json = r#"{"explorer":{"offset_x":1,"offset_y":2}}"#;
+        let store = PositionStore::from_json_str(json).unwrap();
+        assert_eq!(
+            store.offset(TargetKind::FileDialog),
+            SavedPos {
+                offset_x: 1,
+                offset_y: 2
+            }
+        );
+    }
+
+    #[test]
+    fn store_save_roundtrip_preserves_both_kinds() {
+        let mut store = PositionStore::default();
+        store.set_offset(
+            TargetKind::Explorer,
+            SavedPos {
+                offset_x: 11,
+                offset_y: 22,
+            },
+        );
+        store.set_offset(
+            TargetKind::FileDialog,
+            SavedPos {
+                offset_x: 33,
+                offset_y: 44,
+            },
+        );
+        let json = store.to_json_string().unwrap();
+        let reload = PositionStore::from_json_str(&json).unwrap();
+        assert_eq!(
+            reload.offset(TargetKind::Explorer),
+            SavedPos {
+                offset_x: 11,
+                offset_y: 22
+            }
+        );
+        assert_eq!(
+            reload.offset(TargetKind::FileDialog),
+            SavedPos {
+                offset_x: 33,
+                offset_y: 44
+            }
+        );
     }
 }
