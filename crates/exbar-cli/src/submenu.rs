@@ -9,7 +9,6 @@
 //! its folder path, `ancestor_mode` flag, and horizontal flow direction
 //! (which is locked at the chain level once the first right-overflow happens).
 
-#[allow(unused_imports)]
 use std::path::PathBuf;
 
 pub const MAX_CHAIN_DEPTH: usize = 5;
@@ -114,6 +113,425 @@ pub fn resolve_flow_direction(proposed_right_edge_x: i32, work: WorkArea) -> Flo
         FlowDir::Left
     } else {
         FlowDir::Right
+    }
+}
+
+/// One level in the open chain. Level 1 is root (opened from a toolbar
+/// button); level 2+ are nested. Indexing starts at 1.
+#[derive(Debug, Clone)]
+pub struct ChainLevel {
+    pub level: u8,                       // 1..=MAX_CHAIN_DEPTH
+    pub path: PathBuf,                   // folder whose contents are shown
+    pub ancestor_mode: bool,             // true iff "..",-only descent so far
+    pub highlighted_item: Option<usize>, // index into the rendered item list
+}
+
+/// Whole open chain + per-chain locked flow direction.
+#[derive(Debug, Default, Clone)]
+pub struct SubmenuChain {
+    pub levels: Vec<ChainLevel>,
+    pub flow: Option<FlowDir>,
+    pub dismiss_pending_ticks: u8, // countdown after cursor leaves all buffers
+}
+
+impl SubmenuChain {
+    pub fn is_open(&self) -> bool {
+        !self.levels.is_empty()
+    }
+    pub fn depth(&self) -> usize {
+        self.levels.len()
+    }
+    pub fn deepest(&self) -> Option<&ChainLevel> {
+        self.levels.last()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum SubmenuEvent {
+    /// User long-pressed / drag-hovered a toolbar folder button. Adapter
+    /// provides the button's folder path.
+    OpenRoot { path: PathBuf, button_center_y: i32 },
+    /// Cursor moved onto a concrete subfolder item inside an open popup.
+    /// Any deeper levels are discarded; a new deeper level is opened.
+    HoverChildItem {
+        level: u8,
+        index: usize,
+        child_path: PathBuf,
+        is_dotdot: bool,
+    },
+    /// Cursor moved onto a non-item spot (header, blank row), or onto the
+    /// padding buffer — keep last-highlighted item highlighted at that level.
+    HoverBufferAt { level: u8 },
+    /// Cursor left all open popups (and their buffers). Adapter starts a
+    /// short dismiss countdown.
+    CursorExit,
+    /// Safety timer tick (~30 ms) — re-checks cursor state; the adapter
+    /// decrements `dismiss_pending_ticks` on each tick and dispatches
+    /// `CloseAll` when it reaches 0.
+    SafetyTick,
+    /// Cursor re-entered any open popup (its paint or buffer). Cancel dismiss.
+    CursorReenter,
+    /// User committed by clicking / dropping on an item. Close the chain.
+    Commit,
+    /// User pressed Esc or clicked outside all popups.
+    Dismiss,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubmenuCommand {
+    OpenLevel {
+        level: u8,
+        path: PathBuf,
+        ancestor_mode: bool,
+    },
+    CloseDeeperThan {
+        level: u8,
+    },
+    CloseAll,
+    SetHighlight {
+        level: u8,
+        index: Option<usize>,
+    },
+}
+
+/// Pure transition. Mutates `chain`, returns a vec of commands.
+pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuCommand> {
+    use SubmenuCommand::*;
+    match ev {
+        SubmenuEvent::OpenRoot { path, .. } => {
+            // Discard any prior chain, start fresh.
+            chain.levels.clear();
+            chain.flow = None;
+            chain.dismiss_pending_ticks = 0;
+            chain.levels.push(ChainLevel {
+                level: 1,
+                path: path.clone(),
+                ancestor_mode: true,
+                highlighted_item: None,
+            });
+            vec![
+                CloseAll,
+                OpenLevel {
+                    level: 1,
+                    path,
+                    ancestor_mode: true,
+                },
+            ]
+        }
+        SubmenuEvent::HoverChildItem {
+            level,
+            index,
+            child_path,
+            is_dotdot,
+        } => {
+            // Find the level this hover is at.
+            let Some(idx) = chain.levels.iter().position(|l| l.level == level) else {
+                return vec![];
+            };
+            // Truncate deeper levels.
+            let mut cmds: Vec<SubmenuCommand> = Vec::new();
+            if chain.levels.len() > idx + 1 {
+                chain.levels.truncate(idx + 1);
+                cmds.push(CloseDeeperThan { level });
+            }
+            chain.levels[idx].highlighted_item = Some(index);
+            cmds.push(SetHighlight {
+                level,
+                index: Some(index),
+            });
+
+            if chain.depth() >= MAX_CHAIN_DEPTH {
+                return cmds;
+            }
+            let parent_mode = chain.levels[idx].ancestor_mode;
+            let new_level = level + 1;
+            let ancestor_mode = parent_mode && is_dotdot;
+            chain.levels.push(ChainLevel {
+                level: new_level,
+                path: child_path.clone(),
+                ancestor_mode,
+                highlighted_item: None,
+            });
+            cmds.push(OpenLevel {
+                level: new_level,
+                path: child_path,
+                ancestor_mode,
+            });
+            cmds
+        }
+        SubmenuEvent::HoverBufferAt { .. } => {
+            chain.dismiss_pending_ticks = 0;
+            vec![]
+        }
+        SubmenuEvent::CursorExit => {
+            chain.dismiss_pending_ticks = 5; // 5 * 30ms ≈ 150ms
+            vec![]
+        }
+        SubmenuEvent::CursorReenter => {
+            chain.dismiss_pending_ticks = 0;
+            vec![]
+        }
+        SubmenuEvent::SafetyTick => {
+            if chain.dismiss_pending_ticks == 0 {
+                return vec![];
+            }
+            chain.dismiss_pending_ticks -= 1;
+            if chain.dismiss_pending_ticks == 0 {
+                chain.levels.clear();
+                chain.flow = None;
+                return vec![CloseAll];
+            }
+            vec![]
+        }
+        SubmenuEvent::Commit | SubmenuEvent::Dismiss => {
+            chain.levels.clear();
+            chain.flow = None;
+            chain.dismiss_pending_ticks = 0;
+            vec![CloseAll]
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_chain {
+    use super::*;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn open_root_starts_chain_with_ancestor_mode() {
+        let mut chain = SubmenuChain::default();
+        let cmds = transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 500,
+            },
+        );
+        assert!(chain.is_open());
+        assert_eq!(chain.depth(), 1);
+        assert!(chain.levels[0].ancestor_mode);
+        assert!(matches!(&cmds[0], SubmenuCommand::CloseAll));
+        assert!(matches!(
+            &cmds[1],
+            SubmenuCommand::OpenLevel {
+                level: 1,
+                ancestor_mode: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn hover_child_opens_level2_descent_clears_ancestor_mode() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        let cmds = transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 2,
+                child_path: p("C:\\A\\B"),
+                is_dotdot: false,
+            },
+        );
+        assert_eq!(chain.depth(), 2);
+        assert!(!chain.levels[1].ancestor_mode);
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            SubmenuCommand::OpenLevel {
+                level: 2,
+                ancestor_mode: false,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn hover_dotdot_from_ancestor_keeps_ancestor_mode() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A\\B"),
+                button_center_y: 0,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: p("C:\\A"),
+                is_dotdot: true,
+            },
+        );
+        assert!(chain.levels[1].ancestor_mode);
+    }
+
+    #[test]
+    fn hover_dotdot_from_descendant_does_not_restore_ancestor_mode() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 2,
+                child_path: p("C:\\A\\B"),
+                is_dotdot: false,
+            },
+        );
+        // Now at level 2, descent mode. Even if adapter claims is_dotdot=true
+        // (shouldn't happen — no ".." item is shown in descent mode — but be
+        // defensive), ancestor_mode must remain false.
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 2,
+                index: 0,
+                child_path: p("C:\\A"),
+                is_dotdot: true,
+            },
+        );
+        assert!(!chain.levels[2].ancestor_mode);
+    }
+
+    #[test]
+    fn hover_at_shallower_level_truncates_deeper() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: p("C:\\A\\B"),
+                is_dotdot: false,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 2,
+                index: 0,
+                child_path: p("C:\\A\\B\\C"),
+                is_dotdot: false,
+            },
+        );
+        assert_eq!(chain.depth(), 3);
+        let cmds = transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 2,
+                child_path: p("C:\\A\\X"),
+                is_dotdot: false,
+            },
+        );
+        assert_eq!(chain.depth(), 2);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, SubmenuCommand::CloseDeeperThan { level: 1 }))
+        );
+    }
+
+    #[test]
+    fn max_depth_caps_at_5() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\"),
+                button_center_y: 0,
+            },
+        );
+        for l in 1..=10 {
+            transition(
+                &mut chain,
+                SubmenuEvent::HoverChildItem {
+                    level: l,
+                    index: 0,
+                    child_path: p(&format!("C:\\{l}")),
+                    is_dotdot: false,
+                },
+            );
+        }
+        assert_eq!(chain.depth(), MAX_CHAIN_DEPTH);
+    }
+
+    #[test]
+    fn cursor_exit_arms_dismiss_and_tick_closes() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        transition(&mut chain, SubmenuEvent::CursorExit);
+        for _ in 0..4 {
+            let cmds = transition(&mut chain, SubmenuEvent::SafetyTick);
+            assert!(cmds.is_empty());
+        }
+        let cmds = transition(&mut chain, SubmenuEvent::SafetyTick);
+        assert_eq!(cmds, vec![SubmenuCommand::CloseAll]);
+        assert!(!chain.is_open());
+    }
+
+    #[test]
+    fn cursor_reenter_cancels_dismiss() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        transition(&mut chain, SubmenuEvent::CursorExit);
+        transition(&mut chain, SubmenuEvent::CursorReenter);
+        for _ in 0..10 {
+            let cmds = transition(&mut chain, SubmenuEvent::SafetyTick);
+            assert!(cmds.is_empty());
+        }
+        assert!(chain.is_open());
+    }
+
+    #[test]
+    fn commit_closes_all() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        let cmds = transition(&mut chain, SubmenuEvent::Commit);
+        assert_eq!(cmds, vec![SubmenuCommand::CloseAll]);
+        assert!(!chain.is_open());
     }
 }
 
