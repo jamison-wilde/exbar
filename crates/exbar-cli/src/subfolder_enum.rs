@@ -1,15 +1,23 @@
 //! Subfolder enumeration for submenus: lists sorted subdirectories of a
 //! directory, with a shallow "has children" probe for the ▸ indicator.
 //!
-//! Budget semantics: a global 50 ms wall-clock budget across the probe pass
-//! (not per-item). On exhaustion, remaining items unconditionally set
-//! `has_children = true`.
+//! Budget semantics: the 50 ms wall-clock deadline is checked **before** each
+//! probe call. A single slow probe can exceed the budget — `probe_has_child_dir`
+//! itself has no internal timeout. Once the deadline passes, every subsequent
+//! item fast-paths to `has_children = true`. This is an accepted trade-off
+//! matching the `open_in_new_tab` poll: blocking the UI thread for up to the
+//! first probe's duration is preferable to the complexity of async I/O.
 //!
 //! UNC paths (`\\server\share\...`) skip the probe entirely — the cost of
 //! round-tripping to a slow network share is not worth the polish.
 
 use crate::error::ExbarResult;
 use std::path::{Path, PathBuf};
+
+/// Magic item name placed in the last slot by `SubfolderSource::list` when
+/// the directory has more children than `max_items`. Consumers compare
+/// against this constant to render the ellipsis row specially.
+pub const ELLIPSIS_SENTINEL: &str = "…(more)";
 
 /// One entry in a submenu listing (populated by `SubfolderSource::list`).
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +49,12 @@ use std::time::{Duration, Instant};
 /// System / reparse points (junctions, symlinks) are included.
 #[derive(Default)]
 pub struct Win32SubfolderSource;
+
+impl Win32SubfolderSource {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 const HAS_CHILDREN_BUDGET_MS: u64 = 50;
 
@@ -81,8 +95,11 @@ impl SubfolderSource for Win32SubfolderSource {
         let mut out: Vec<SubfolderEntry> =
             Vec::with_capacity(dirs.len() + if overflow { 1 } else { 0 });
         for (name, path) in dirs {
-            let has_children =
-                if is_unc || Instant::now() >= deadline { true } else { probe_has_child_dir(&path) };
+            let has_children = if is_unc || Instant::now() >= deadline {
+                true
+            } else {
+                probe_has_child_dir(&path)
+            };
             out.push(SubfolderEntry {
                 name,
                 path,
@@ -91,7 +108,7 @@ impl SubfolderSource for Win32SubfolderSource {
         }
         if overflow {
             out.push(SubfolderEntry {
-                name: "…(more)".to_string(),
+                name: ELLIPSIS_SENTINEL.to_string(),
                 path: parent.to_path_buf(),
                 has_children: false,
             });
@@ -155,7 +172,7 @@ pub(crate) mod test_mocks {
             if items.len() > max_items {
                 let mut capped = items[..max_items.saturating_sub(1)].to_vec();
                 capped.push(SubfolderEntry {
-                    name: "…(more)".to_string(),
+                    name: ELLIPSIS_SENTINEL.to_string(),
                     path: parent.to_path_buf(),
                     has_children: false,
                 });
@@ -208,7 +225,7 @@ mod tests {
         let src = Win32SubfolderSource;
         let items = src.list(tmp.path(), 3).unwrap();
         assert_eq!(items.len(), 3);
-        assert_eq!(items[2].name, "…(more)");
+        assert_eq!(items[2].name, ELLIPSIS_SENTINEL);
         assert!(!items[2].has_children);
     }
 
