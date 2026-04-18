@@ -296,6 +296,11 @@ impl ToolbarState {
             } => {
                 crate::actions::commit_reorder(self, hwnd, from_folder, to_folder);
             }
+            FireLongPress { folder_button } => {
+                // Placeholder: open submenu for folder_button.
+                // Full implementation wired in the submenu feature task.
+                log::debug!("FireLongPress: folder_button={folder_button}");
+            }
         }
     }
 
