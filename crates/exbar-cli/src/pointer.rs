@@ -1239,6 +1239,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn capture_lost_after_long_press_goes_to_idle_no_release_mouse() {
+        // Defensive test: if Windows revokes our capture while a long-press is
+        // in flight, we must NOT emit ReleaseMouse (capture is already gone).
+        // Protects against a future refactor accidentally adding ReleaseMouse
+        // to the CaptureLost arm.
+        let (state, _) = transition(
+            PointerState::Idle,
+            PointerEvent::Press {
+                x: 10,
+                y: 10,
+                hit: Some(hit(3, true)),
+            },
+        );
+        let (state, _) = transition(state, PointerEvent::LongPressTick { elapsed_ms: 600 });
+        let (next, cmds) = transition(state, PointerEvent::CaptureLost);
+        assert_eq!(next, PointerState::Idle);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PointerCommand::ReleaseMouse)),
+            "CaptureLost must not emit ReleaseMouse: got {cmds:?}"
+        );
+    }
+
     use proptest::prelude::*;
 
     /// Generator for arbitrary events.
