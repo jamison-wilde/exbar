@@ -340,6 +340,11 @@ pub fn build_display_list(
     entries: &[SubfolderEntry],
     reshow: ReshowPosition,
 ) -> Vec<DisplayItem> {
+    debug_assert!(
+        level == 1 || reshow == ReshowPosition::None,
+        "ReshowPosition::{{First|Last}} is only valid at level 1; level={level} reshow={reshow:?}"
+    );
+
     let path_s = folder_path.to_string_lossy().to_string();
     let mut out: Vec<DisplayItem> = Vec::new();
 
@@ -360,15 +365,20 @@ pub fn build_display_list(
         });
     }
 
-    if want_dotdot && let Some(parent) = crate::path_norm::parent_dir(&path_s) {
-        let parent_name = std::path::Path::new(&parent)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| parent.clone());
-        out.push(DisplayItem::Dotdot {
-            parent_path: std::path::PathBuf::from(&parent),
-            parent_name,
-        });
+    // Two-guard form kept intentionally: want_dotdot is a named predicate
+    // (ancestor_mode && !drive_root); a collapse loses that structure.
+    #[allow(clippy::collapsible_if)]
+    if want_dotdot {
+        if let Some(parent) = crate::path_norm::parent_dir(&path_s) {
+            let parent_name = std::path::Path::new(&parent)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| parent.clone());
+            out.push(DisplayItem::Dotdot {
+                parent_path: std::path::PathBuf::from(&parent),
+                parent_name,
+            });
+        }
     }
 
     for e in entries {
@@ -482,6 +492,23 @@ mod tests_display {
         );
         assert_eq!(items.len(), 1);
         assert!(matches!(&items[0], DisplayItem::Empty { .. }));
+    }
+
+    #[test]
+    fn level1_empty_entries_with_reshow_first_produces_only_reshow() {
+        // Non-ancestor level-1 with nothing to list but a reshow at First:
+        // empty-state guard must suppress the "(empty)" sentinel, and the
+        // reshow item itself must be the only rendered entry.
+        let items = build_display_list(
+            1,
+            std::path::Path::new("C:\\Users\\Alice\\Docs"),
+            "Docs",
+            false,
+            &[],
+            ReshowPosition::First,
+        );
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], DisplayItem::ParentReshow { .. }));
     }
 }
 
