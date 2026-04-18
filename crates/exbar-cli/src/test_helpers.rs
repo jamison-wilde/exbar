@@ -10,8 +10,9 @@ use crate::error::ExbarResult;
 use crate::layout::{ButtonLayout, Rect};
 use crate::picker::{FolderPicker, test_mocks::MockFolderPicker};
 use crate::shell_windows::test_mocks::MockShellBrowser;
+use crate::subfolder_enum::{SubfolderEntry, SubfolderSource, test_mocks::MockSubfolderSource};
 use crate::toolbar::ToolbarState;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -35,6 +36,14 @@ impl ConfigStore for CfgArc {
     }
     fn save(&self, c: &Config) -> ExbarResult<()> {
         self.0.save(c)
+    }
+}
+
+#[allow(dead_code)]
+pub struct SubfolderArc(pub Arc<MockSubfolderSource>);
+impl SubfolderSource for SubfolderArc {
+    fn list(&self, parent: &Path, max_items: usize) -> ExbarResult<Vec<SubfolderEntry>> {
+        self.0.list(parent, max_items)
     }
 }
 
