@@ -352,3 +352,27 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
         let _ = EndPaint(hwnd, &ps);
     }
 }
+
+use crate::submenu::DisplayItem;
+
+/// Render a submenu popup. Called from the popup wndproc's `WM_PAINT` handler.
+///
+/// Not unit-tested (pure GDI) — covered by manual smoke in Task 17.
+///
+/// Design (implemented in Task 9): fills the popup with bg_color under the
+/// layered-window alpha set at popup creation. Iterates `display_items` in
+/// parallel with `layout.item_rects`, drawing each row; the
+/// `highlighted_index` row gets an opaque accent bar. Rows with
+/// `has_children` paint a right-aligned `▸` glyph. Parent-reshow and Dotdot
+/// items get distinctive markers. `Ellipsis` / `Empty` rows render disabled.
+#[allow(unused_variables, dead_code)]
+pub fn paint_submenu_popup(
+    hdc: HDC,
+    layout: &crate::layout::SubmenuLayout,
+    display_items: &[DisplayItem],
+    highlighted_index: Option<usize>,
+    dpi: u32,
+) {
+    // Stub. Task 9 wires the popup HWND and implements this body using the
+    // existing GDI helpers in this module (paint primitives, theme palette).
+}
