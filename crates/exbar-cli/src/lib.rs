@@ -97,6 +97,7 @@ pub mod layout;
 pub mod lifecycle;
 pub mod log;
 pub mod paint;
+pub mod path_norm;
 pub mod paths;
 pub mod picker;
 pub mod pointer;
