@@ -159,9 +159,11 @@ pub enum SubmenuEvent {
         child_path: PathBuf,
         is_dotdot: bool,
     },
-    /// Cursor moved onto a non-item spot (header, blank row), or onto the
-    /// padding buffer — keep last-highlighted item highlighted at that level.
-    HoverBufferAt { level: u8 },
+    /// Cursor moved into a popup's translucent padding buffer OR a non-item
+    /// spot inside a painted popup. Cancels any pending dismiss countdown;
+    /// does not mutate highlights (the last highlighted item stays set by
+    /// whichever level it belongs to). Chain-wide — no level parameter.
+    HoverBufferAt,
     /// Cursor left all open popups (and their buffers). Adapter starts a
     /// short dismiss countdown.
     CursorExit,
@@ -259,7 +261,7 @@ pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuComm
             });
             cmds
         }
-        SubmenuEvent::HoverBufferAt { .. } => {
+        SubmenuEvent::HoverBufferAt => {
             chain.dismiss_pending_ticks = 0;
             vec![]
         }
@@ -532,6 +534,71 @@ mod tests_chain {
         let cmds = transition(&mut chain, SubmenuEvent::Commit);
         assert_eq!(cmds, vec![SubmenuCommand::CloseAll]);
         assert!(!chain.is_open());
+    }
+
+    #[test]
+    fn dismiss_closes_all_same_as_commit() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: p("C:\\A\\B"),
+                is_dotdot: false,
+            },
+        );
+        let cmds = transition(&mut chain, SubmenuEvent::Dismiss);
+        assert_eq!(cmds, vec![SubmenuCommand::CloseAll]);
+        assert!(!chain.is_open());
+        assert!(chain.flow.is_none());
+    }
+
+    #[test]
+    fn hover_at_unknown_level_is_noop() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        // Level 7 does not exist — expect safe no-op returning empty vec.
+        let cmds = transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 7,
+                index: 0,
+                child_path: p("C:\\A\\Z"),
+                is_dotdot: false,
+            },
+        );
+        assert!(cmds.is_empty());
+        assert_eq!(chain.depth(), 1);
+    }
+
+    #[test]
+    fn buffer_hover_cancels_dismiss_countdown() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        transition(&mut chain, SubmenuEvent::CursorExit);
+        assert_eq!(chain.dismiss_pending_ticks, 5);
+        transition(&mut chain, SubmenuEvent::HoverBufferAt);
+        assert_eq!(chain.dismiss_pending_ticks, 0);
     }
 }
 
