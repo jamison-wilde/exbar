@@ -42,7 +42,9 @@ pub fn is_excluded(path: &str, excluded: &[String]) -> bool {
         }
         // Prefix with boundary: "c:\\private" should match "c:\\private\\x"
         // but not "c:\\private-stuff".
-        if n_path.starts_with(&n_excl) && n_path.as_bytes().get(n_excl.len()) == Some(&b'\\') {
+        if n_path.starts_with(&n_excl)
+            && (n_excl.ends_with('\\') || n_path.as_bytes().get(n_excl.len()) == Some(&b'\\'))
+        {
             return true;
         }
     }
@@ -128,5 +130,24 @@ mod tests {
         assert_eq!(parent_dir("C:\\Users"), Some("C:\\".to_string()));
         assert_eq!(parent_dir("C:\\"), None);
         assert_eq!(parent_dir("\\\\server\\share"), None);
+    }
+
+    #[test]
+    fn is_excluded_drive_root_matches_children() {
+        let excl = vec!["C:\\".to_string()];
+        assert!(is_excluded("C:\\Users\\Alice", &excl));
+        assert!(is_excluded("c:\\users", &excl));
+        assert!(is_excluded("C:\\", &excl));
+        // A different drive root does not match.
+        assert!(!is_excluded("D:\\Users", &excl));
+    }
+
+    #[test]
+    fn is_excluded_exclusion_with_trailing_slash_is_boundary_safe() {
+        // User typed "C:\\private\\" (with trailing slash). Normalize strips it,
+        // so behavior should match the no-slash case.
+        let excl = vec!["C:\\private\\".to_string()];
+        assert!(is_excluded("C:\\private\\docs", &excl));
+        assert!(!is_excluded("C:\\private-stuff", &excl));
     }
 }
