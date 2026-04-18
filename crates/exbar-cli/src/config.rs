@@ -117,9 +117,9 @@ pub struct SubmenuConfig {
 impl Default for SubmenuConfig {
     fn default() -> Self {
         Self {
-            spring_open_delay_ms: 500,
-            hover_buffer_px: 10,
-            non_chain_item_opacity: 0.5,
+            spring_open_delay_ms: default_spring_open_delay_ms(),
+            hover_buffer_px: default_hover_buffer_px(),
+            non_chain_item_opacity: default_non_chain_item_opacity(),
         }
     }
 }
@@ -645,5 +645,8 @@ mod tests {
             cfg2.submenu.spring_open_delay_ms
         );
         assert_eq!(cfg.submenu.hover_buffer_px, cfg2.submenu.hover_buffer_px);
+        assert!(
+            (cfg.submenu.non_chain_item_opacity - cfg2.submenu.non_chain_item_opacity).abs() < 1e-6
+        );
     }
 }
