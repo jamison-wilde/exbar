@@ -9,6 +9,7 @@
 //! its folder path, `ancestor_mode` flag, and horizontal flow direction
 //! (which is locked at the chain level once the first right-overflow happens).
 
+use crate::subfolder_enum::SubfolderEntry;
 use std::path::PathBuf;
 
 pub const MAX_CHAIN_DEPTH: usize = 5;
@@ -291,6 +292,196 @@ pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuComm
             chain.dismiss_pending_ticks = 0;
             vec![CloseAll]
         }
+    }
+}
+
+/// One entry in a popup's rendered list. Either a real subfolder, a ".."
+/// ancestor hop, the parent-reshow item (level 1 only), or the "…(more)"
+/// ellipsis sentinel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DisplayItem {
+    Dotdot {
+        parent_path: PathBuf,
+        parent_name: String,
+    },
+    ParentReshow {
+        path: PathBuf,
+        name: String,
+    },
+    Subfolder {
+        entry: SubfolderEntry,
+    },
+    Ellipsis,
+    Empty {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReshowPosition {
+    First,
+    Last,
+    None, // levels 2+ don't get a reshow
+}
+
+/// Build the display list for a popup.
+///
+/// - `level`: 1..=5
+/// - `folder_path`: absolute path of the folder whose contents we're showing
+/// - `ancestor_mode`: should ".." be included (if not at drive root)
+/// - `entries`: output of `SubfolderSource::list`
+/// - `reshow`: where to place the parent-reshow item (First/Last/None)
+/// - `parent_name`: display name for the ".." row (e.g. "Users")
+pub fn build_display_list(
+    level: u8,
+    folder_path: &std::path::Path,
+    folder_display_name: &str,
+    ancestor_mode: bool,
+    entries: &[SubfolderEntry],
+    reshow: ReshowPosition,
+) -> Vec<DisplayItem> {
+    let path_s = folder_path.to_string_lossy().to_string();
+    let mut out: Vec<DisplayItem> = Vec::new();
+
+    // Empty-state (no subfolders AND no ".." applicable AND no reshow).
+    let want_dotdot = ancestor_mode && !crate::path_norm::is_drive_root(&path_s);
+    if entries.is_empty() && !want_dotdot && reshow == ReshowPosition::None {
+        out.push(DisplayItem::Empty {
+            message: "(empty)".to_string(),
+        });
+        return out;
+    }
+
+    // Reshown parent at "First" goes at the very top (popup opened downward).
+    if reshow == ReshowPosition::First && level == 1 {
+        out.push(DisplayItem::ParentReshow {
+            path: folder_path.to_path_buf(),
+            name: folder_display_name.to_string(),
+        });
+    }
+
+    if want_dotdot && let Some(parent) = crate::path_norm::parent_dir(&path_s) {
+        let parent_name = std::path::Path::new(&parent)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| parent.clone());
+        out.push(DisplayItem::Dotdot {
+            parent_path: std::path::PathBuf::from(&parent),
+            parent_name,
+        });
+    }
+
+    for e in entries {
+        if e.name == crate::subfolder_enum::ELLIPSIS_SENTINEL {
+            out.push(DisplayItem::Ellipsis);
+        } else {
+            out.push(DisplayItem::Subfolder { entry: e.clone() });
+        }
+    }
+
+    if reshow == ReshowPosition::Last && level == 1 {
+        out.push(DisplayItem::ParentReshow {
+            path: folder_path.to_path_buf(),
+            name: folder_display_name.to_string(),
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests_display {
+    use super::*;
+    use crate::subfolder_enum::SubfolderEntry;
+
+    fn sf(name: &str) -> SubfolderEntry {
+        SubfolderEntry {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            has_children: false,
+        }
+    }
+
+    #[test]
+    fn level1_ancestor_mode_includes_dotdot_and_reshow_first() {
+        let items = build_display_list(
+            1,
+            std::path::Path::new("C:\\Users\\Alice"),
+            "Alice",
+            true,
+            &[sf("Docs"), sf("Pictures")],
+            ReshowPosition::First,
+        );
+        assert!(matches!(&items[0], DisplayItem::ParentReshow { .. }));
+        assert!(matches!(&items[1], DisplayItem::Dotdot { .. }));
+        assert!(matches!(&items[2], DisplayItem::Subfolder { .. }));
+    }
+
+    #[test]
+    fn level1_ancestor_mode_includes_dotdot_and_reshow_last() {
+        let items = build_display_list(
+            1,
+            std::path::Path::new("C:\\Users\\Alice"),
+            "Alice",
+            true,
+            &[sf("Docs")],
+            ReshowPosition::Last,
+        );
+        assert!(matches!(&items[0], DisplayItem::Dotdot { .. }));
+        assert!(matches!(&items[1], DisplayItem::Subfolder { .. }));
+        assert!(matches!(&items[2], DisplayItem::ParentReshow { .. }));
+    }
+
+    #[test]
+    fn drive_root_omits_dotdot_even_in_ancestor_mode() {
+        let items = build_display_list(
+            1,
+            std::path::Path::new("C:\\"),
+            "C:",
+            true,
+            &[sf("Windows")],
+            ReshowPosition::First,
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i, DisplayItem::Dotdot { .. }))
+        );
+    }
+
+    #[test]
+    fn non_ancestor_level_omits_dotdot() {
+        let items = build_display_list(
+            2,
+            std::path::Path::new("C:\\Users\\Alice"),
+            "Alice",
+            false,
+            &[sf("Docs")],
+            ReshowPosition::None,
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i, DisplayItem::Dotdot { .. }))
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i, DisplayItem::ParentReshow { .. }))
+        );
+    }
+
+    #[test]
+    fn empty_list_gets_empty_item_at_level2() {
+        let items = build_display_list(
+            2,
+            std::path::Path::new("C:\\Users\\Alice\\Docs"),
+            "Docs",
+            false,
+            &[],
+            ReshowPosition::None,
+        );
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], DisplayItem::Empty { .. }));
     }
 }
 
