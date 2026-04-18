@@ -12,6 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 use crate::config::{FolderEntry, Orientation};
 use crate::layout::{self, ButtonLayout, LayoutInput};
+use crate::submenu::DisplayItem;
 use crate::theme;
 use crate::toolbar::{BTN_PAD_H, GRIP_SIZE, ToolbarState};
 
@@ -353,8 +354,6 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     }
 }
 
-use crate::submenu::DisplayItem;
-
 /// Render a submenu popup. Called from the popup wndproc's `WM_PAINT` handler.
 ///
 /// Not unit-tested (pure GDI) — covered by manual smoke in Task 17.
@@ -365,7 +364,7 @@ use crate::submenu::DisplayItem;
 /// `highlighted_index` row gets an opaque accent bar. Rows with
 /// `has_children` paint a right-aligned `▸` glyph. Parent-reshow and Dotdot
 /// items get distinctive markers. `Ellipsis` / `Empty` rows render disabled.
-#[allow(unused_variables, dead_code)]
+#[allow(unused_variables)]
 pub fn paint_submenu_popup(
     hdc: HDC,
     layout: &crate::layout::SubmenuLayout,

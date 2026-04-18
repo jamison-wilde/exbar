@@ -917,6 +917,9 @@ mod tests {
         assert_eq!(layout.item_rects[0].width(), 200);
         assert_eq!(layout.item_rects[0].height(), 28);
         assert_eq!(layout.item_rects[1].top, 10 + 28);
+        assert_eq!(layout.item_rects[1].left, 10);
+        assert_eq!(layout.item_rects[1].width(), 200);
+        assert_eq!(layout.item_rects[1].bottom, 10 + 28 + 28);
         // Total popup size includes buffer on both sides.
         assert_eq!(layout.popup_w, 200 + 2 * 10);
         assert_eq!(layout.popup_h, 3 * 28 + 2 * 10);
