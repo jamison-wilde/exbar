@@ -30,6 +30,19 @@ use crate::toolbar::{GRIP_SIZE, ToolbarState, WM_USER_RELOAD, toolbar_state};
 const WM_DPICHANGED: u32 = 0x02E0;
 const REORDER_THRESHOLD: i32 = 5;
 
+// ── Submenu WM_USER messages ──────────────────────────────────────────────────
+
+/// Posted to the toolbar HWND when the cursor enters a submenu item.
+/// `WPARAM` = level (u8), `LPARAM` = item index (usize).
+pub const WM_USER_SUBMENU_HOVER: u32 = 0x040A; // WM_USER + 10
+/// Posted to the toolbar HWND when the user clicks a submenu item.
+/// `WPARAM` = level (u8), `LPARAM` = item index (usize).
+pub const WM_USER_SUBMENU_CLICK: u32 = 0x040B; // WM_USER + 11
+/// Posted to the toolbar HWND to dismiss the entire submenu chain.
+pub const WM_USER_SUBMENU_DISMISS: u32 = 0x040C; // WM_USER + 12
+/// Safety timer tick for the submenu dismiss countdown (~30 ms period).
+pub const WM_USER_SUBMENU_SAFETY_TICK: u32 = 0x040D; // WM_USER + 13
+
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
 const MENU_ID_OPEN: u32 = 201;
