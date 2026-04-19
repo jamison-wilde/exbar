@@ -419,11 +419,13 @@ impl ToolbarState {
                 self.last_cursor_y_on_open = pt.y;
                 self.last_button_screen_rect = self.button_screen_rect(hwnd, folder_button);
 
+                let is_recent = matches!(folder.kind, crate::config::FolderKind::Recent);
                 self.execute_submenu_event(
                     hwnd,
                     crate::submenu::SubmenuEvent::OpenRoot {
                         path: std::path::PathBuf::from(resolved),
                         button_center_y,
+                        is_recent,
                     },
                 );
             }
@@ -689,8 +691,9 @@ impl ToolbarState {
                 level,
                 path,
                 ancestor_mode,
+                is_recent,
             } => {
-                self.open_popup_level(toolbar, level, path, ancestor_mode);
+                self.open_popup_level(toolbar, level, path, ancestor_mode, is_recent);
             }
             crate::submenu::SubmenuCommand::CloseDeeperThan { level } => {
                 self.close_popups_deeper_than(toolbar, level);
@@ -710,68 +713,102 @@ impl ToolbarState {
         level: u8,
         folder_path: std::path::PathBuf,
         ancestor_mode: bool,
+        is_recent: bool,
     ) {
         use crate::submenu::{
             ReshowPosition, VertOrient, build_display_list, resolve_level1_orientation,
         };
 
-        let max_items = 200;
-        let entries = match self.subfolder_source.list(&folder_path, max_items) {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("subfolder list failed for {folder_path:?}: {e:?}");
-                Vec::new()
-            }
-        };
-
-        // Fix 3: refuse to open an empty popup for a shell alias — path
-        // resolution is a Task 15 follow-up.
-        if entries.is_empty()
-            && crate::config::is_shell_alias(folder_path.to_string_lossy().as_ref())
-        {
-            log::warn!(
-                "submenu: refusing to open empty popup for shell alias {folder_path:?}; \
-                 path resolution is a Task 15 follow-up"
-            );
-            return;
-        }
-
         let work = self.submenu_work_area();
         let cursor_y = self.last_cursor_y_on_open;
         let btn_center_y = self.last_button_center_y_on_open;
-
         let item_px = self.submenu_item_px();
         let buffer_px = self.submenu_cfg.hover_buffer_px as i32;
 
-        let reshow = if level == 1 {
-            let orient = resolve_level1_orientation(
-                btn_center_y,
-                entries.len() as i32,
-                item_px,
-                cursor_y,
-                work,
-            );
-            match orient {
-                VertOrient::Upward => ReshowPosition::Last,
-                VertOrient::Downward => ReshowPosition::First,
-            }
+        // Level-1 Recent button: build from the tracked recent list, not from
+        // subfolder enumeration. No ".." and no parent-reshow.
+        let (display_items, reshow) = if level == 1 && is_recent {
+            let (pinned, include_pinned) = self
+                .config
+                .as_ref()
+                .map(|c| {
+                    let pinned: Vec<String> = c
+                        .folders
+                        .iter()
+                        .filter(|f| f.kind == crate::config::FolderKind::Folder)
+                        .map(|f| f.path.clone())
+                        .collect();
+                    (pinned, c.recent.include_pinned)
+                })
+                .unwrap_or_default();
+            let filtered =
+                crate::recent_list::for_display(&self.recent_list, &pinned, include_pinned);
+            // Recent has no parent to reshow; orient upward/downward from btn position.
+            let reshow = {
+                let item_count = filtered.len().max(1) as i32; // at least 1 (placeholder)
+                let orient =
+                    resolve_level1_orientation(btn_center_y, item_count, item_px, cursor_y, work);
+                match orient {
+                    VertOrient::Upward => ReshowPosition::Last,
+                    VertOrient::Downward => ReshowPosition::First,
+                }
+            };
+            (crate::submenu::build_recent_display_list(&filtered), reshow)
         } else {
-            ReshowPosition::None
+            let max_items = 200;
+            let entries = match self.subfolder_source.list(&folder_path, max_items) {
+                Ok(e) => e,
+                Err(e) => {
+                    log::warn!("subfolder list failed for {folder_path:?}: {e:?}");
+                    Vec::new()
+                }
+            };
+
+            // Fix 3: refuse to open an empty popup for a shell alias — path
+            // resolution is a Task 15 follow-up.
+            if entries.is_empty()
+                && crate::config::is_shell_alias(folder_path.to_string_lossy().as_ref())
+            {
+                log::warn!(
+                    "submenu: refusing to open empty popup for shell alias {folder_path:?}; \
+                     path resolution is a Task 15 follow-up"
+                );
+                return;
+            }
+
+            let reshow = if level == 1 {
+                let orient = resolve_level1_orientation(
+                    btn_center_y,
+                    entries.len() as i32,
+                    item_px,
+                    cursor_y,
+                    work,
+                );
+                match orient {
+                    VertOrient::Upward => ReshowPosition::Last,
+                    VertOrient::Downward => ReshowPosition::First,
+                }
+            } else {
+                ReshowPosition::None
+            };
+
+            let folder_display_name = folder_path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| folder_path.to_string_lossy().to_string());
+
+            (
+                build_display_list(
+                    level,
+                    &folder_path,
+                    &folder_display_name,
+                    ancestor_mode,
+                    &entries,
+                    reshow,
+                ),
+                reshow,
+            )
         };
-
-        let folder_display_name = folder_path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| folder_path.to_string_lossy().to_string());
-
-        let display_items = build_display_list(
-            level,
-            &folder_path,
-            &folder_display_name,
-            ancestor_mode,
-            &entries,
-            reshow,
-        );
 
         let measured_w = crate::paint::measure_display_items_width(&display_items, self.dpi, level);
         let max_width_px = (measured_w + crate::theme::scale(32, self.dpi))
