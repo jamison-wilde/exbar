@@ -16,7 +16,7 @@ use crate::submenu::DisplayItem;
 use crate::theme;
 use crate::toolbar::{BTN_PAD_H, GRIP_SIZE, ToolbarState};
 
-/// Measure the rendered-pixel width of each folder's label ("📁 Name" — the
+/// Measure the rendered-pixel width of each folder's label ("📁 Name" or "🕘 Recent" — the
 /// same format used in paint) using the currently-selected font in `hdc`.
 ///
 /// Caller must `SelectObject(hdc, font)` first. Returns a Vec the same
@@ -25,8 +25,11 @@ pub(crate) fn measure_folder_text_widths(hdc: HDC, folders: &[FolderEntry]) -> V
     folders
         .iter()
         .map(|f| {
-            // Match the label format used in paint: "📁 Name".
-            let label = format!("\u{1F4C1} {}", f.name);
+            // Match the label format used in paint: "🕘 Recent" for kind=Recent, "📁 Name" for kind=Folder.
+            let label = match f.kind {
+                crate::config::FolderKind::Recent => "🕘 Recent".to_string(),
+                crate::config::FolderKind::Folder => format!("\u{1F4C1} {}", f.name),
+            };
             let wide: Vec<u16> = label.encode_utf16().collect();
             let mut size = SIZE::default();
             let ok = unsafe { GetTextExtentPoint32W(hdc, &wide, &mut size) };
@@ -276,7 +279,10 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
         let label = if btn.is_add {
             "+".to_string()
         } else {
-            format!("\u{1F4C1} {}", btn.folder.name)
+            match btn.folder.kind {
+                crate::config::FolderKind::Recent => "🕘 Recent".to_string(),
+                crate::config::FolderKind::Folder => format!("\u{1F4C1} {}", btn.folder.name),
+            }
         };
 
         // Dim text for the button being dragged.
