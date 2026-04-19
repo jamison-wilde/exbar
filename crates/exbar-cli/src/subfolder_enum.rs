@@ -79,7 +79,7 @@ impl SubfolderSource for Win32SubfolderSource {
             }
             dirs.push((name, entry.path()));
         }
-        dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        dirs.sort_by_key(|a| a.0.to_lowercase());
 
         // Apply cap + ellipsis sentinel.
         let overflow = dirs.len() > max_items;
