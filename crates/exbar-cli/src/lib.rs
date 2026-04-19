@@ -103,6 +103,7 @@ pub mod picker;
 pub mod pointer;
 pub mod position;
 pub mod recent_list;
+pub mod recent_tracker;
 pub mod rename;
 pub mod rename_edit;
 pub mod shell_windows;
