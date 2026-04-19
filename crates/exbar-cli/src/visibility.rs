@@ -9,8 +9,8 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetWindowPos, ShowWindow,
+    GetForegroundWindow, IsIconic, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SetWindowPos, ShowWindow,
 };
 
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -280,6 +280,15 @@ unsafe extern "system" fn foreground_event_proc(
             && state.active_target.map(|t| t.hwnd) == Some(hwnd)
             && !state.explorer_moving
         {
+            // If Explorer is minimized, its GetWindowRect origin is (-32000, -32000).
+            // Scheduling a reposition now would race with the hide triggered by
+            // MINIMIZESTART and re-show the toolbar at the work-area corner.
+            if unsafe { IsIconic(hwnd).as_bool() } {
+                log::debug!(
+                    "LOCATIONCHANGE: explorer={hwnd:?} is iconic — skipping timer schedule"
+                );
+                return;
+            }
             let delay = state.config.as_ref().map_or(250, |c| c.reposition_delay_ms);
             log::debug!(
                 "LOCATIONCHANGE: explorer={hwnd:?}, hiding + scheduling reposition ({delay}ms)"
@@ -480,8 +489,28 @@ pub(crate) fn show_above(toolbar: HWND, _explorer: HWND) {
 pub(crate) fn reposition_and_show(toolbar: HWND, explorer: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
 
+    // Guard: skip if Explorer is minimized. GetWindowRect on a minimized window
+    // returns origin (-32000, -32000) — the Windows iconic sentinel. Repositioning
+    // to that origin would clamp to the work-area corner and show the toolbar
+    // there. It also corrupts any subsequent offset re-measurement.
+    if unsafe { IsIconic(explorer).as_bool() } {
+        log::debug!("reposition_and_show: explorer={explorer:?} is iconic — skipping show");
+        return;
+    }
+
     let origin = crate::position::explorer_visible_origin(explorer);
     log::debug!("reposition_and_show: explorer={explorer:?} origin={origin:?}");
+
+    // Defence-in-depth: reject the iconic sentinel even if IsIconic missed it
+    // (e.g., a race between the animation start and our callback).
+    if origin.0 < -30_000 || origin.1 < -30_000 {
+        log::debug!(
+            "reposition_and_show: explorer={explorer:?} origin=({},{}) looks minimized — skipping",
+            origin.0,
+            origin.1
+        );
+        return;
+    }
 
     let kind = unsafe { crate::toolbar::toolbar_state(toolbar) }
         .and_then(|s| s.active_target.map(|t| t.kind))
