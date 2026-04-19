@@ -228,7 +228,7 @@ fn run_hook() -> ExbarResult<()> {
     //
     // The first CabinetWClass foreground event triggers toolbar creation
     // inside foreground_event_proc.
-    let (system_hook, location_hook) = visibility::install_foreground_hook();
+    let (system_hook, location_hook, show_hide_hook) = visibility::install_foreground_hook(); // TEMP-DIAG: show_hide_hook
     log::info!("run_hook: foreground hook installed; entering message pump");
 
     // SetWinEventHook only fires for future events. If Explorer is already
@@ -267,6 +267,7 @@ fn run_hook() -> ExbarResult<()> {
         use windows::Win32::UI::Accessibility::UnhookWinEvent;
         let _ = UnhookWinEvent(system_hook);
         let _ = UnhookWinEvent(location_hook);
+        let _ = UnhookWinEvent(show_hide_hook); // TEMP-DIAG
     }
     unsafe {
         CoUninitialize();

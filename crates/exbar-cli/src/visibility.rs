@@ -127,6 +127,8 @@ const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 const EVENT_SYSTEM_MOVESIZESTART: u32 = 0x000A;
 const EVENT_SYSTEM_MOVESIZEEND: u32 = 0x000B;
 const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
+const EVENT_OBJECT_SHOW: u32 = 0x8002; // TEMP-DIAG
+const EVENT_OBJECT_HIDE: u32 = 0x8003; // TEMP-DIAG
 const OBJID_WINDOW: i32 = 0;
 const CHILDID_SELF: i32 = 0;
 
@@ -675,13 +677,48 @@ fn update_toolbar_visibility(toolbar: HWND) {
     }
 }
 
-/// Install WinEvent hooks. Callers must invoke exactly once (from `run_hook`).
-/// Returns both hook handles so the caller can `UnhookWinEvent` them at exit.
+/// Diagnostic: log every `EVENT_OBJECT_SHOW` / `EVENT_OBJECT_HIDE` from
+/// `explorer.exe`, capturing the class name so we can identify Win11 shell
+/// context-menu windows (which don't fire `EVENT_SYSTEM_FOREGROUND`).
+/// Tagged TEMP-DIAG — remove once the class name is confirmed.
 ///
-/// Two hooks:
+/// # Safety
+/// Registered as a `WinEvent` callback — Win32 guarantees the signature.
+// TEMP-DIAG
+unsafe extern "system" fn object_show_hide_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    // Ignore non-window objects (menu items, list items, etc.).
+    if id_object != OBJID_WINDOW {
+        return;
+    }
+    // Only log events from explorer.exe to avoid drowning in app noise.
+    if !hwnd_in_explorer_process(hwnd) {
+        return;
+    }
+    let class = crate::explorer::get_class_name(hwnd);
+    let tag = if event == EVENT_OBJECT_SHOW {
+        "SHOW"
+    } else {
+        "HIDE"
+    };
+    log::info!("[TEMP-DIAG] OBJECT_{tag} hwnd={hwnd:?} class={class:?}");
+}
+
+/// Install WinEvent hooks. Callers must invoke exactly once (from `run_hook`).
+/// Returns hook handles so the caller can `UnhookWinEvent` them at exit.
+///
+/// Three hooks:
 /// 1. System events (0x0003–0x0017): FOREGROUND, MOVESIZESTART/END, MINIMIZESTART/END
 /// 2. LOCATIONCHANGE (0x800B): detects Explorer maximize/restore/snap
-pub fn install_foreground_hook() -> (HWINEVENTHOOK, HWINEVENTHOOK) {
+/// 3. OBJECT_SHOW/HIDE (0x8002–0x8003): TEMP-DIAG — captures Win11 context-menu class names
+pub fn install_foreground_hook() -> (HWINEVENTHOOK, HWINEVENTHOOK, HWINEVENTHOOK) {
     // SAFETY: SetWinEventHook registers our extern "system" callback and
     // returns a handle we own; single call from run_hook is the sole user.
     let system_hook = unsafe {
@@ -706,8 +743,21 @@ pub fn install_foreground_hook() -> (HWINEVENTHOOK, HWINEVENTHOOK) {
             WINEVENT_OUTOFCONTEXT,
         )
     };
-    log::info!("Installed foreground + location-change event hooks");
-    (system_hook, location_hook)
+    // TEMP-DIAG: catch OBJECT_SHOW/HIDE from all processes; filter to
+    // explorer.exe inside the callback to identify Win11 context-menu classes.
+    let show_hide_hook = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_HIDE,
+            None,
+            Some(object_show_hide_proc),
+            0, // idProcess = 0: all processes (filter in callback)
+            0, // idThread
+            WINEVENT_OUTOFCONTEXT,
+        )
+    }; // TEMP-DIAG
+    log::info!("Installed foreground + location-change + TEMP-DIAG show/hide event hooks");
+    (system_hook, location_hook, show_hide_hook)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
