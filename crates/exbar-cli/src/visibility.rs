@@ -119,6 +119,8 @@ pub fn classify_hwnd(
 // ── Foreground window tracking ───────────────────────────────────────────────
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+const EVENT_SYSTEM_MENUPOPUPSTART: u32 = 0x0006;
+const EVENT_SYSTEM_MENUPOPUPEND: u32 = 0x0007;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
 const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
@@ -207,6 +209,33 @@ fn hwnd_in_explorer_process(hwnd: HWND) -> bool {
     classify_foreground(pid, exe_path_for_pid(pid).as_deref(), our_pid) == Foreground::Explorer
 }
 
+// ── Topmost helpers ───────────────────────────────────────────────────────────
+
+/// Set or clear the toolbar's `HWND_TOPMOST` flag.
+///
+/// Called when a shell context menu opens (drop to `HWND_NOTOPMOST` so the
+/// menu renders above the toolbar) and when it closes / Explorer retakes
+/// foreground (restore `HWND_TOPMOST` so Explorer's own XAML content stays below).
+fn set_toolbar_topmost(toolbar: HWND, topmost: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{HWND_NOTOPMOST, HWND_TOPMOST};
+    let target = if topmost {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
+    unsafe {
+        crate::warn_on_err!(SetWindowPos(
+            toolbar,
+            Some(target),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        ));
+    }
+}
+
 // ── WinEvent callback ─────────────────────────────────────────────────────────
 
 unsafe extern "system" fn foreground_event_proc(
@@ -223,6 +252,31 @@ unsafe extern "system" fn foreground_event_proc(
     let class = crate::explorer::get_class_name(hwnd);
     let is_explorer = class == "CabinetWClass";
     let in_our_process = hwnd_in_our_process(hwnd);
+
+    // Classic Win32 popup menus (including shell context menus on Win10 and
+    // legacy Win11 style). Drop topmost so the menu renders above the toolbar,
+    // then restore on MENUPOPUPEND. These events are in the system-hook range
+    // (0x0003..=0x0017) so no extra hook registration is needed.
+    if event == EVENT_SYSTEM_MENUPOPUPSTART {
+        if let Some(tb) = tb_opt {
+            log::debug!("MENUPOPUPSTART hwnd={hwnd:?} class={class:?} — toolbar → non-topmost");
+            set_toolbar_topmost(tb, false);
+            if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
+                state.topmost_dropped = true;
+            }
+        }
+        return;
+    }
+    if event == EVENT_SYSTEM_MENUPOPUPEND {
+        if let Some(tb) = tb_opt {
+            log::debug!("MENUPOPUPEND — toolbar → topmost");
+            set_toolbar_topmost(tb, true);
+            if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
+                state.topmost_dropped = false;
+            }
+        }
+        return;
+    }
 
     if event == EVENT_SYSTEM_MINIMIZESTART {
         // Only hide if NOT our process (avoid hiding on Explorer's internal popups)
@@ -323,6 +377,34 @@ unsafe extern "system" fn foreground_event_proc(
     //   - OUR process (rename edit, folder picker, popup menu — all transient)
     // Hide only when a window in a DIFFERENT unrelated process takes foreground.
     let in_explorer = hwnd_in_explorer_process(hwnd);
+
+    // Modern Win11 shell context menus appear as Xaml_WindowedPopupClass (or
+    // XamlWindowedPopupClass) windows that briefly take foreground. They live
+    // in explorer.exe (in_explorer = true) so the generic restore-topmost path
+    // below would wrongly re-raise our toolbar over them. Detect them by class
+    // name first and drop topmost instead. MENUPOPUPEND / CabinetWClass-back
+    // will restore topmost when the menu dismisses.
+    //
+    // We also catch "#32768" here as a belt-and-suspenders for classic popup
+    // menus that somehow fire a FOREGROUND event rather than MENUPOPUPSTART.
+    if in_explorer
+        && (class.contains("XamlWindowedPopupClass")
+            || class.contains("Xaml_WindowedPopupClass")
+            || class == "#32768")
+    {
+        if let Some(tb) = tb_opt
+            && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
+            && !state.topmost_dropped
+        {
+            log::debug!(
+                "foreground: shell popup class={class:?} hwnd={hwnd:?} — toolbar → non-topmost"
+            );
+            set_toolbar_topmost(tb, false);
+            state.topmost_dropped = true;
+        }
+        return;
+    }
+
     if is_explorer {
         if let Some(toolbar_hwnd) = get_global_toolbar_hwnd() {
             // SAFETY: Win32 dispatches WinEvent callbacks on the thread that
@@ -330,6 +412,16 @@ unsafe extern "system" fn foreground_event_proc(
             // single-threaded invariant `toolbar_state` relies on.
             if let Some(state) = unsafe { crate::toolbar::toolbar_state(toolbar_hwnd) } {
                 state.active_target = Some(crate::target::ActiveTarget::explorer(hwnd));
+                // A CabinetWClass foreground means any shell context menu
+                // (classic or XAML) has been dismissed. Restore topmost if
+                // we dropped it for a popup. MENUPOPUPEND already handles
+                // classic menus; this covers modern Xaml popups that don't
+                // fire MENUPOPUPEND.
+                if state.topmost_dropped {
+                    log::debug!("foreground: CabinetWClass hwnd={hwnd:?} — restoring topmost");
+                    set_toolbar_topmost(toolbar_hwnd, true);
+                    state.topmost_dropped = false;
+                }
             }
         }
         // First time we see an Explorer foreground, create the toolbar.

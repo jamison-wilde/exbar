@@ -146,6 +146,10 @@ pub(crate) struct ToolbarState {
     /// MOVESIZESTART and MOVESIZEEND). Used to suppress CAPTUREEND
     /// repositioning during drag — MOVESIZEEND handles that instead.
     pub(crate) explorer_moving: bool,
+    /// Tracks whether the toolbar is currently demoted from `HWND_TOPMOST`
+    /// because a shell context menu is showing above it. Cleared when
+    /// Explorer (CabinetWClass) retakes foreground.
+    pub(crate) topmost_dropped: bool,
     pub(crate) rename_state: Option<rename::RenameState>,
     // Submenu subsystem (SP-submenu Task 10):
     pub(crate) submenu_chain: crate::submenu::SubmenuChain,
@@ -247,6 +251,7 @@ impl ToolbarState {
             active_target: None,
             last_explorer_origin: None,
             explorer_moving: false,
+            topmost_dropped: false,
             rename_state: None,
             submenu_chain: crate::submenu::SubmenuChain::default(),
             submenu_popups: Vec::new(),
