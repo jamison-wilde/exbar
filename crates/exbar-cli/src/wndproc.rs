@@ -958,6 +958,11 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                             None,
                                             false,
                                         );
+                                        // Recompute highlight at current cursor
+                                        // position — scroll moved items under it.
+                                        crate::submenu_wnd::refresh_highlight_from_cursor(
+                                            popup_hwnd,
+                                        );
                                     }
                                     new_offset == 0 || new_offset == max_offset
                                 }

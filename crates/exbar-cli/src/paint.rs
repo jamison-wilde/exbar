@@ -597,9 +597,11 @@ pub fn paint_submenu_popup(
 
     if can_scroll_up {
         let mut up_glyph: Vec<u16> = "\u{25B2}".encode_utf16().collect(); // ▲
+        // Glyph paints in the inner trigger band only (adjacent to items),
+        // not the full buffer — keeps the outer forgiveness zone visually clean.
         let mut tr = RECT {
             left: 0,
-            top: 0,
+            top: layout.buffer_px - layout.scroll_trigger_px,
             right: layout.popup_w,
             bottom: layout.buffer_px,
         };
@@ -618,7 +620,7 @@ pub fn paint_submenu_popup(
             left: 0,
             top: layout.popup_h - layout.buffer_px,
             right: layout.popup_w,
-            bottom: layout.popup_h,
+            bottom: layout.popup_h - layout.buffer_px + layout.scroll_trigger_px,
         };
         unsafe {
             DrawTextW(

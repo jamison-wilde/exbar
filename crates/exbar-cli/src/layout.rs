@@ -240,6 +240,12 @@ pub struct SubmenuLayout {
     pub popup_w: i32,
     pub popup_h: i32,
     pub buffer_px: i32,
+    /// Height of the scroll-trigger band adjacent to items (at the inner
+    /// edge of the buffer). Cursor in [popup.top + buffer - trigger_px,
+    /// popup.top + buffer) triggers auto-scroll up; similar at the bottom.
+    /// The outer portion of the buffer (closer to the popup edge) stays
+    /// pure forgiveness — no scroll trigger.
+    pub scroll_trigger_px: i32,
     /// Number of items visible in the popup's painted area (≤ `total_count`).
     pub visible_count: usize,
     /// Total items the caller wanted to show (pre-scroll).
@@ -277,11 +283,18 @@ pub fn compute_submenu_layout(
             bottom: buffer_px + (i as i32) * item_px + item_px,
         });
     }
+    // Scroll trigger band: inner min(buffer_px, 16) px adjacent to items.
+    // When buffer is very small (< 16), the whole buffer is the trigger zone.
+    // The outer portion (buffer_px - scroll_trigger_px px) stays pure
+    // forgiveness — cursor can drift past ▲/▼ without triggering scroll.
+    let scroll_trigger_px = buffer_px.min(16);
+
     SubmenuLayout {
         item_rects: rects,
         popup_w: max_width_px + 2 * buffer_px,
         popup_h,
         buffer_px,
+        scroll_trigger_px,
         visible_count,
         total_count: item_count,
     }
@@ -1014,5 +1027,19 @@ mod tests {
         let layout = compute_submenu_layout(3, 30, 200, 10, 10_000);
         assert_eq!(layout.visible_count, 3);
         assert_eq!(layout.total_count, 3);
+    }
+
+    #[test]
+    fn submenu_layout_scroll_trigger_px_reasonable() {
+        // buffer_px=30 >= 16 → trigger clamps to 16.
+        let layout = compute_submenu_layout(5, 30, 200, 30, 10_000);
+        assert_eq!(layout.scroll_trigger_px, 16);
+    }
+
+    #[test]
+    fn submenu_layout_scroll_trigger_clamps_to_small_buffer() {
+        // buffer_px=5 < 16 → trigger equals buffer.
+        let layout = compute_submenu_layout(5, 30, 200, 5, 10_000);
+        assert_eq!(layout.scroll_trigger_px, 5);
     }
 }
