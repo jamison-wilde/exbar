@@ -86,6 +86,8 @@ pub(crate) const TIMER_REPOSITION: usize = 1;
 pub(crate) const TIMER_LONGPRESS: usize = 2;
 /// Timer ID for submenu cursor-tracking + dismiss countdown (30 ms tick while any popup is open).
 pub(crate) const TIMER_SUBMENU_SAFETY: usize = 3;
+/// Timer ID for the 2-second debounced write of recents.json.
+pub(crate) const TIMER_RECENT_DEBOUNCE: usize = 4;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -163,6 +165,15 @@ pub(crate) struct ToolbarState {
     /// Tracks whether any mouse button was pressed on the PREVIOUS safety-timer tick.
     /// Used to detect a fresh button-down for the click-outside-dismiss path.
     pub(crate) prev_mouse_button_down: bool,
+    // Recent Folders (Plan B):
+    pub(crate) recent_tracker: crate::recent_tracker::TrackerState,
+    pub(crate) recent_list: Vec<crate::recent_list::RecentEntry>,
+    pub(crate) recent_store: Box<dyn crate::recent_store::RecentStore>,
+    pub(crate) clock: Box<dyn crate::clock::Clock>,
+    /// Set when recent_list has been mutated since last successful save.
+    pub(crate) recent_dirty: bool,
+    /// Set when SetTimer(TIMER_RECENT_DEBOUNCE) is armed but not yet fired.
+    pub(crate) recent_debounce_pending: bool,
 }
 
 impl ToolbarState {
@@ -177,6 +188,8 @@ impl ToolbarState {
             Box::new(JsonFileStore::new()),
             Box::new(KeybdDialogNavigator::new()),
             Box::new(Win32SubfolderSource::new()),
+            Box::new(crate::recent_store::JsonRecentStore::new()),
+            Box::new(crate::clock::SystemClock::new()),
         )
     }
 
@@ -191,11 +204,14 @@ impl ToolbarState {
         config_store: Box<dyn ConfigStore>,
         dialog_nav: Box<dyn DialogNavigator>,
         subfolder_source: Box<dyn SubfolderSource>,
+        recent_store: Box<dyn crate::recent_store::RecentStore>,
+        clock: Box<dyn crate::clock::Clock>,
     ) -> Self {
         let layout = config
             .as_ref()
             .map_or(Orientation::Horizontal, |c| c.layout);
         let submenu_cfg = config.as_ref().map(|c| c.submenu).unwrap_or_default();
+        let recent_list = recent_store.load();
         ToolbarState {
             buttons: Vec::new(),
             dpi,
@@ -233,6 +249,12 @@ impl ToolbarState {
             submenu_timer_active: false,
             cursor_was_inside_popup: true,
             prev_mouse_button_down: false,
+            recent_tracker: crate::recent_tracker::TrackerState::default(),
+            recent_list,
+            recent_store,
+            clock,
+            recent_dirty: false,
+            recent_debounce_pending: false,
         }
     }
 }
@@ -435,6 +457,107 @@ impl ToolbarState {
                         LPARAM(0)
                     ));
                 },
+            }
+        }
+    }
+}
+
+// ── Recent Folders adapter methods ───────────────────────────────────────────
+
+#[allow(dead_code)] // callers land in Tasks 8+9
+impl ToolbarState {
+    /// Feed a `TrackerEvent` through the pure state machine and apply returned commands.
+    /// No-op if Recent is disabled in config.
+    pub(crate) fn execute_tracker_event(
+        &mut self,
+        toolbar: HWND,
+        event: crate::recent_tracker::TrackerEvent,
+    ) {
+        let Some(cfg) = self.config.as_ref() else {
+            return;
+        };
+        if !cfg.recent.enabled {
+            return;
+        }
+        let ctx = crate::recent_tracker::TrackerContext {
+            dwell_threshold_seconds: cfg.recent.dwell_seconds_to_track,
+            excluded_paths: &cfg.recent.excluded_paths,
+        };
+        let cmds = crate::recent_tracker::transition(&mut self.recent_tracker, event, &ctx);
+        for cmd in cmds {
+            self.dispatch_tracker_command(toolbar, cmd);
+        }
+    }
+
+    fn dispatch_tracker_command(
+        &mut self,
+        toolbar: HWND,
+        cmd: crate::recent_tracker::TrackerCommand,
+    ) {
+        match cmd {
+            crate::recent_tracker::TrackerCommand::CommitRecent(path) => {
+                // Extract config values into locals first to avoid borrow conflict.
+                let (max_count, excluded_paths) = match self.config.as_ref() {
+                    Some(cfg) => (
+                        cfg.recent.max_count as usize,
+                        cfg.recent.excluded_paths.clone(),
+                    ),
+                    None => return,
+                };
+                let now = self.clock.now_unix_ms();
+                crate::recent_list::push(
+                    &mut self.recent_list,
+                    &path,
+                    now,
+                    max_count,
+                    &excluded_paths,
+                );
+                self.recent_dirty = true;
+                self.schedule_recent_debounce(toolbar);
+            }
+            crate::recent_tracker::TrackerCommand::ClearDwell => {
+                // State already cleared inside transition; nothing to apply here.
+            }
+        }
+    }
+
+    /// Arm a 2-second debounce timer if not already armed. Idempotent.
+    fn schedule_recent_debounce(&mut self, toolbar: HWND) {
+        if self.recent_debounce_pending {
+            return;
+        }
+        self.recent_debounce_pending = true;
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                Some(toolbar),
+                TIMER_RECENT_DEBOUNCE,
+                2000,
+                None,
+            );
+        }
+    }
+
+    /// Called on `WM_TIMER(TIMER_RECENT_DEBOUNCE)` or on hook shutdown. Persists
+    /// the list and clears dirty+pending flags. Safe to call when nothing is dirty.
+    pub(crate) fn flush_recent(&mut self, toolbar: HWND) {
+        if self.recent_debounce_pending {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                    Some(toolbar),
+                    TIMER_RECENT_DEBOUNCE,
+                );
+            }
+            self.recent_debounce_pending = false;
+        }
+        if !self.recent_dirty {
+            return;
+        }
+        match self.recent_store.save(&self.recent_list) {
+            Ok(()) => {
+                self.recent_dirty = false;
+            }
+            Err(e) => {
+                log::warn!("recents.json save failed: {e:?}");
             }
         }
     }

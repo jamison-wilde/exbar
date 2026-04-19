@@ -174,6 +174,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 // SAFETY: ptr is non-null and state is still live at this point;
                 // we zero the USERDATA slot and drop state below.
                 crate::toolbar::cancel_inline_rename(unsafe { &mut *ptr }, hwnd);
+                // Flush any pending recent-folders write before teardown.
+                unsafe { &mut *ptr }.flush_recent(hwnd);
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
                 // SAFETY: The pointer was produced by Box::into_raw in WM_CREATE;
                 // Box::from_raw reclaims it so the Drop runs and state is freed.
@@ -697,6 +699,11 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         }
                         state.submenu_timer_active = false;
                     }
+                }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_RECENT_DEBOUNCE {
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    state.flush_recent(hwnd);
                 }
                 LRESULT(0)
             } else {

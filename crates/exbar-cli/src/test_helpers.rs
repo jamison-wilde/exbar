@@ -127,6 +127,12 @@ pub fn make_test_state(deps: &TestDeps, config: Option<Config>) -> ToolbarState 
         Box::new(SubfolderArc(Arc::new(
             crate::subfolder_enum::test_mocks::MockSubfolderSource::default(),
         ))),
+        Box::new(RecentStoreArc(Arc::new(
+            crate::recent_store::test_mocks::MockRecentStore::default(),
+        ))),
+        Box::new(ClockArc(Arc::new(
+            crate::clock::test_mocks::MockClock::new(1_000_000_000),
+        ))),
     )
 }
 
