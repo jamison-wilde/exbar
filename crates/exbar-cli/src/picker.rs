@@ -12,8 +12,9 @@ use windows::Win32::UI::Shell::{
 use windows_core::PCWSTR;
 
 /// Show a folder picker. Returns `Some(path)` on OK, `None` on cancel or any failure.
-/// Starts at `%SystemDrive%\` (typically `C:\`).
-pub fn pick_folder() -> Option<PathBuf> {
+/// `start_folder` — if provided AND points to a valid path, opens there. Otherwise
+/// falls back to `%SystemDrive%\` (typically `C:\`).
+pub fn pick_folder(start_folder: Option<&std::path::Path>) -> Option<PathBuf> {
     unsafe {
         // Idempotent if COM was already initialised on this thread.
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -26,7 +27,12 @@ pub fn pick_folder() -> Option<PathBuf> {
             .SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
             .ok()?;
 
-        let start = system_drive_root();
+        // Prefer the caller's start path (typically the active Explorer tab);
+        // fall back to the system drive root if not provided or invalid.
+        let start: String = start_folder
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(system_drive_root);
         let start_wide: Vec<u16> = start.encode_utf16().chain(std::iter::once(0)).collect();
         if let Ok(item) =
             SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(start_wide.as_ptr()), None)
@@ -59,7 +65,9 @@ fn system_drive_root() -> String {
 pub trait FolderPicker: Send + Sync {
     /// Show a modal folder picker. Returns the selected path or `None`
     /// if the user cancelled or the dialog failed to open.
-    fn pick_folder(&self) -> Option<std::path::PathBuf>;
+    /// `start_folder` is the preferred initial location; if `None` or
+    /// invalid, implementations fall back to a sensible default.
+    fn pick_folder(&self, start_folder: Option<&std::path::Path>) -> Option<std::path::PathBuf>;
 }
 
 #[derive(Default)]
@@ -72,8 +80,8 @@ impl Win32Picker {
 }
 
 impl FolderPicker for Win32Picker {
-    fn pick_folder(&self) -> Option<std::path::PathBuf> {
-        pick_folder()
+    fn pick_folder(&self, start_folder: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+        pick_folder(start_folder)
     }
 }
 
@@ -89,7 +97,7 @@ pub(crate) mod test_mocks {
         pub calls: Mutex<u32>,
     }
     impl FolderPicker for MockFolderPicker {
-        fn pick_folder(&self) -> Option<PathBuf> {
+        fn pick_folder(&self, _start_folder: Option<&std::path::Path>) -> Option<PathBuf> {
             *self.calls.lock().unwrap() += 1;
             self.next_result.lock().unwrap().clone()
         }
