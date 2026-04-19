@@ -226,6 +226,68 @@ pub unsafe fn enumerate_shell_browsers() -> Vec<(isize, IShellBrowser)> {
     out
 }
 
+// ── Active folder path helper ────────────────────────────────────────────────
+
+/// Returns the current folder's filesystem path from the given `IShellBrowser`.
+///
+/// Query chain:
+/// 1. `IShellBrowser::QueryActiveShellView` → `IShellView`
+/// 2. QI `IShellView` → `IFolderView`
+/// 3. `IFolderView::GetFolder::<IPersistFolder2>()` → `IPersistFolder2`
+/// 4. `IPersistFolder2::GetCurFolder()` → PIDL
+/// 5. `SHGetPathFromIDListW` → filesystem path string
+///
+/// Returns `None` if any step fails or the current location is not a
+/// filesystem path (e.g. the Recycle Bin or a virtual namespace).
+///
+/// # Safety
+///
+/// Must be called on the toolbar's COM/STA thread.
+pub unsafe fn active_folder_path(browser: &IShellBrowser) -> Option<std::path::PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{IFolderView, IPersistFolder2, SHGetPathFromIDListW};
+
+    // Step 1: get the active shell view.
+    let view = unsafe { browser.QueryActiveShellView().ok()? };
+
+    // Step 2: QI IShellView → IFolderView.
+    // IShellView does not inherit IPersistFolder2 directly; IFolderView provides
+    // GetFolder<T>() which returns the folder object that *does* implement it.
+    let folder_view: IFolderView = view.cast().ok()?;
+
+    // Step 3: get the IPersistFolder2 for the folder currently displayed.
+    let persist: IPersistFolder2 = unsafe { folder_view.GetFolder().ok()? };
+
+    // Step 4: get the PIDL for the current folder.
+    let pidl = unsafe { persist.GetCurFolder().ok()? };
+    if pidl.is_null() {
+        return None;
+    }
+
+    // Step 5: resolve PIDL to a filesystem path.
+    let mut buf = [0u16; 260]; // MAX_PATH
+    // SAFETY: SHGetPathFromIDListW takes a *const ITEMIDLIST; pidl points to
+    // memory allocated by the shell — we free it below regardless of outcome.
+    let got = unsafe { SHGetPathFromIDListW(pidl, &mut buf) };
+
+    // Free the PIDL allocated by GetCurFolder.
+    unsafe {
+        CoTaskMemFree(Some(pidl as *const core::ffi::c_void));
+    }
+
+    // SHGetPathFromIDListW returns BOOL (windows_core::BOOL in windows 0.61).
+    if !got.as_bool() {
+        return None;
+    }
+
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    if len == 0 {
+        return None;
+    }
+    let s = String::from_utf16_lossy(&buf[..len]);
+    Some(std::path::PathBuf::from(s))
+}
+
 // ── SP3: ShellBrowser trait ─────────────────────────────────────────────────
 
 use crate::error::{ExbarError, ExbarResult};

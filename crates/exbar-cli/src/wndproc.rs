@@ -46,6 +46,7 @@ pub const WM_USER_SUBMENU_SAFETY_TICK: u32 = 0x040D; // WM_USER + 13
 
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
+const MENU_ID_TOGGLE_RECENT: u32 = 103;
 const MENU_ID_OPEN: u32 = 201;
 const MENU_ID_OPEN_NEW_TAB: u32 = 202;
 const MENU_ID_COPY_PATH: u32 = 203;
@@ -174,6 +175,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 // SAFETY: ptr is non-null and state is still live at this point;
                 // we zero the USERDATA slot and drop state below.
                 crate::toolbar::cancel_inline_rename(unsafe { &mut *ptr }, hwnd);
+                // Flush any pending recent-folders write before teardown.
+                unsafe { &mut *ptr }.flush_recent(hwnd);
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
                 // SAFETY: The pointer was produced by Box::into_raw in WM_CREATE;
                 // Box::from_raw reclaims it so the Drop runs and state is freed.
@@ -276,6 +279,49 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         insertion_if_reordering,
                     },
                 );
+
+                // Hover-open: arm a one-shot timer when the cursor rests on a folder button.
+                // If already waiting on the same button, do nothing. If on a different button,
+                // reset. If not on any button, cancel.
+                match state.pointer {
+                    pointer::PointerState::Hovering { button } if button >= 1 => {
+                        // button 0 is the '+' button — only fire for folder buttons.
+                        if state.hover_open_pending_button != Some(button) {
+                            // Kill any previous timer.
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                                    Some(hwnd),
+                                    crate::toolbar::TIMER_HOVER_OPEN,
+                                );
+                            }
+                            state.hover_open_pending_button = Some(button);
+                            // Don't arm if a submenu chain is already open (avoid re-opening on hover drift).
+                            if !state.submenu_chain.is_open() {
+                                let delay = state.submenu_cfg.spring_open_delay_ms;
+                                unsafe {
+                                    let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                                        Some(hwnd),
+                                        crate::toolbar::TIMER_HOVER_OPEN,
+                                        delay,
+                                        None,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // Cursor no longer on a folder button — cancel pending hover-open.
+                        if state.hover_open_pending_button.is_some() {
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                                    Some(hwnd),
+                                    crate::toolbar::TIMER_HOVER_OPEN,
+                                );
+                            }
+                            state.hover_open_pending_button = None;
+                        }
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -284,6 +330,16 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
                 state.mouse_tracking_started = false; // next hover will need to re-arm.
                 state.apply_pointer_event(hwnd, pointer::PointerEvent::Leave);
+                // Cancel pending hover-open.
+                if state.hover_open_pending_button.is_some() {
+                    unsafe {
+                        let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                            Some(hwnd),
+                            crate::toolbar::TIMER_HOVER_OPEN,
+                        );
+                    }
+                    state.hover_open_pending_button = None;
+                }
             }
             LRESULT(0)
         }
@@ -361,6 +417,16 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         let _ = ClientToScreen(hwnd, &mut pt);
                     }
                     if state.buttons[idx].is_add {
+                        let recent_enabled = state
+                            .config
+                            .as_ref()
+                            .map(|c| c.recent.enabled)
+                            .unwrap_or(false);
+                        let toggle_label = if recent_enabled {
+                            "Disable Recent Folders"
+                        } else {
+                            "Enable Recent Folders"
+                        };
                         let items = [
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_EDIT_CONFIG,
@@ -370,6 +436,11 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 id: MENU_ID_RELOAD_CONFIG,
                                 label: "Reload config",
                             },
+                            crate::contextmenu::SEPARATOR,
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_TOGGLE_RECENT,
+                                label: toggle_label,
+                            },
                         ];
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
                         match chosen {
@@ -378,7 +449,20 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 let _ =
                                     PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
                             },
+                            MENU_ID_TOGGLE_RECENT => {
+                                handle_toggle_recent(state, hwnd);
+                            }
                             _ => {}
+                        }
+                    } else if state.buttons[idx].folder.kind == crate::config::FolderKind::Recent {
+                        // Recent button: trimmed menu — only Remove (= disable Recent).
+                        let items = [crate::contextmenu::MenuItem {
+                            id: MENU_ID_REMOVE,
+                            label: "Remove",
+                        }];
+                        let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
+                        if chosen == MENU_ID_REMOVE {
+                            handle_toggle_recent(state, hwnd);
                         }
                     } else {
                         let items = [
@@ -495,12 +579,26 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
                 match display_item {
                     Some(crate::submenu::DisplayItem::Subfolder { entry }) => {
+                        // Mark as toolbar-initiated before navigating so dwell
+                        // tracker skips our own submenu clicks.
+                        state.execute_tracker_event(
+                            hwnd,
+                            crate::recent_tracker::TrackerEvent::SelfInitiated,
+                        );
                         state.navigate_or_new_window_or_tab(&entry.path.to_string_lossy(), ctrl);
                     }
                     Some(crate::submenu::DisplayItem::Dotdot { parent_path, .. }) => {
+                        state.execute_tracker_event(
+                            hwnd,
+                            crate::recent_tracker::TrackerEvent::SelfInitiated,
+                        );
                         state.navigate_or_new_window_or_tab(&parent_path.to_string_lossy(), ctrl);
                     }
                     Some(crate::submenu::DisplayItem::ParentReshow { path, .. }) => {
+                        state.execute_tracker_event(
+                            hwnd,
+                            crate::recent_tracker::TrackerEvent::SelfInitiated,
+                        );
                         state.navigate_or_new_window_or_tab(&path.to_string_lossy(), ctrl);
                     }
                     _ => {
@@ -699,6 +797,100 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     }
                 }
                 LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_RECENT_DEBOUNCE {
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    state.flush_recent(hwnd);
+                }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_HOVER_OPEN {
+                // Kill the one-shot timer regardless.
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_HOVER_OPEN);
+                }
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    let pending = state.hover_open_pending_button.take();
+                    // Verify cursor is still on the same button we were waiting for.
+                    let still_same = match state.pointer {
+                        pointer::PointerState::Hovering { button } => Some(button) == pending,
+                        _ => false,
+                    };
+                    if !still_same {
+                        return LRESULT(0);
+                    }
+                    let Some(button_idx) = pending else {
+                        return LRESULT(0);
+                    };
+                    // Don't open if chain already open or user is pressing.
+                    if state.submenu_chain.is_open() {
+                        return LRESULT(0);
+                    }
+                    // Translate button index → folder index (button 0 is '+').
+                    let folder_button = button_idx.saturating_sub(1);
+                    let Some(cfg) = state.config.as_ref() else {
+                        return LRESULT(0);
+                    };
+                    let Some(folder) = cfg.folders.get(folder_button) else {
+                        return LRESULT(0);
+                    };
+                    let is_recent = matches!(folder.kind, crate::config::FolderKind::Recent);
+                    let raw_path = folder.path.clone();
+
+                    // Record trigger context (same as FireLongPress arm in execute_pointer_command).
+                    let btn_rect = state.button_screen_rect(hwnd, folder_button);
+                    state.last_button_screen_rect = btn_rect;
+                    state.last_button_center_y_on_open = (btn_rect.top + btn_rect.bottom) / 2;
+                    let mut cursor = POINT::default();
+                    unsafe {
+                        let _ = GetCursorPos(&mut cursor);
+                    }
+                    state.last_cursor_x_on_open = cursor.x;
+                    state.last_cursor_y_on_open = cursor.y;
+
+                    state.execute_submenu_event(
+                        hwnd,
+                        crate::submenu::SubmenuEvent::OpenRoot {
+                            path: std::path::PathBuf::from(raw_path),
+                            button_center_y: state.last_button_center_y_on_open,
+                            is_recent,
+                        },
+                    );
+                }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_DWELL_TICK {
+                // 1 Hz poll: detect active-tab navigation + drive dwell tracking.
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    // Resolve borrow: clone path before calling mutable execute_tracker_event.
+                    let active_path = state.current_active_tab_path();
+                    let prev_path = state.recent_tracker.current_path.clone();
+
+                    match (active_path, prev_path) {
+                        (Some(new), Some(ref old)) if &new != old => {
+                            state.execute_tracker_event(
+                                hwnd,
+                                crate::recent_tracker::TrackerEvent::NavigationTo(new),
+                            );
+                        }
+                        (Some(new), None) => {
+                            state.execute_tracker_event(
+                                hwnd,
+                                crate::recent_tracker::TrackerEvent::NavigationTo(new),
+                            );
+                        }
+                        (None, Some(_)) => {
+                            state.execute_tracker_event(
+                                hwnd,
+                                crate::recent_tracker::TrackerEvent::ForegroundLost,
+                            );
+                        }
+                        _ => { /* same path or both None — no navigation event */ }
+                    }
+                    // DwellTick every tick regardless of path changes.
+                    state.execute_tracker_event(
+                        hwnd,
+                        crate::recent_tracker::TrackerEvent::DwellTick,
+                    );
+                }
+                LRESULT(0)
             } else {
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
@@ -737,6 +929,38 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+/// Toggle `config.recent.enabled`: enable adds the Recent pseudo-entry to `folders[]`,
+/// disable removes it, deletes `recents.json`, clears in-memory state, and
+/// disarms the 1 Hz dwell tick. Either branch saves config and refreshes the toolbar.
+fn handle_toggle_recent(state: &mut crate::toolbar::ToolbarState, toolbar: HWND) {
+    let now_enabled = match crate::actions::toggle_recent_in_state(state) {
+        Ok(enabled) => enabled,
+        Err(()) => return, // config unavailable or save failed; already logged
+    };
+
+    if now_enabled {
+        // Hydrate recent_list from disk in case recents.json survived a prior disable.
+        state.recent_list = state.recent_store.load();
+        state.arm_dwell_tick(toolbar);
+    } else {
+        // Privacy-critical: delete recents.json.
+        if let Err(e) = state.recent_store.delete() {
+            log::warn!("toggle recent: recents.json delete failed: {e:?}");
+        }
+        state.recent_list.clear();
+        state.recent_dirty = false;
+        state.recent_debounce_pending = false;
+        unsafe {
+            let _ = KillTimer(Some(toolbar), crate::toolbar::TIMER_RECENT_DEBOUNCE);
+        }
+        state.disarm_dwell_tick(toolbar);
+        // Dismiss any open submenu that may reference the Recent button.
+        state.execute_submenu_event(toolbar, crate::submenu::SubmenuEvent::Dismiss);
+    }
+
+    crate::lifecycle::refresh_toolbar(toolbar);
 }
 
 pub(crate) unsafe extern "system" fn toolbar_wndproc_safe(

@@ -261,9 +261,19 @@ pub fn refresh_toolbar(hwnd: HWND) {
 }
 
 /// Apply `apply_opacity` and `register_drop_targets` to the toolbar window.
+/// Arms the dwell-tick timer if `config.recent.enabled`.
 ///
 /// Called from `WM_CREATE` via `crate::toolbar::toolbar_wndproc`.
 pub(crate) fn setup_on_create(hwnd: HWND, state: &mut ToolbarState) {
     apply_opacity(hwnd, state);
     register_drop_targets(hwnd, state);
+    // Arm the 1 Hz dwell-tick timer for Recent Folders polling if enabled.
+    let recent_enabled = state
+        .config
+        .as_ref()
+        .map(|c| c.recent.enabled)
+        .unwrap_or(false);
+    if recent_enabled {
+        state.arm_dwell_tick(hwnd);
+    }
 }

@@ -125,6 +125,9 @@ pub struct ChainLevel {
     pub path: PathBuf,                   // folder whose contents are shown
     pub ancestor_mode: bool,             // true iff "..",-only descent so far
     pub highlighted_item: Option<usize>, // index into the rendered item list
+    /// True only at level 1 when opened from a `FolderKind::Recent` button.
+    /// Levels 2+ are always false — they browse real subfolders from there on.
+    pub is_recent: bool,
 }
 
 /// Whole open chain + per-chain locked flow direction.
@@ -151,7 +154,11 @@ impl SubmenuChain {
 pub enum SubmenuEvent {
     /// User long-pressed / drag-hovered a toolbar folder button. Adapter
     /// provides the button's folder path.
-    OpenRoot { path: PathBuf, button_center_y: i32 },
+    OpenRoot {
+        path: PathBuf,
+        button_center_y: i32,
+        is_recent: bool,
+    },
     /// Cursor moved onto a concrete subfolder item inside an open popup.
     /// Any deeper levels are discarded; a new deeper level is opened.
     HoverChildItem {
@@ -186,6 +193,8 @@ pub enum SubmenuCommand {
         level: u8,
         path: PathBuf,
         ancestor_mode: bool,
+        /// Forwarded from `SubmenuEvent::OpenRoot`; false for all levels 2+.
+        is_recent: bool,
     },
     CloseDeeperThan {
         level: u8,
@@ -201,7 +210,9 @@ pub enum SubmenuCommand {
 pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuCommand> {
     use SubmenuCommand::*;
     match ev {
-        SubmenuEvent::OpenRoot { path, .. } => {
+        SubmenuEvent::OpenRoot {
+            path, is_recent, ..
+        } => {
             // Discard any prior chain, start fresh.
             chain.levels.clear();
             chain.flow = None;
@@ -211,6 +222,7 @@ pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuComm
                 path: path.clone(),
                 ancestor_mode: true,
                 highlighted_item: None,
+                is_recent,
             });
             vec![
                 CloseAll,
@@ -218,6 +230,7 @@ pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuComm
                     level: 1,
                     path,
                     ancestor_mode: true,
+                    is_recent,
                 },
             ]
         }
@@ -263,18 +276,27 @@ pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuComm
                 return cmds;
             }
             let parent_mode = chain.levels[idx].ancestor_mode;
+            let parent_is_recent = chain.levels[idx].is_recent;
             let new_level = level + 1;
-            let ancestor_mode = parent_mode && is_dotdot;
+            let ancestor_mode = if parent_is_recent {
+                // Recent's children are fresh browsing roots: each item is a real
+                // filesystem folder, and ".." into its parent is meaningful.
+                true
+            } else {
+                parent_mode && is_dotdot
+            };
             chain.levels.push(ChainLevel {
                 level: new_level,
                 path: child_path.clone(),
                 ancestor_mode,
                 highlighted_item: None,
+                is_recent: false, // levels 2+ always browse real folders
             });
             cmds.push(OpenLevel {
                 level: new_level,
                 path: child_path,
                 ancestor_mode,
+                is_recent: false,
             });
             cmds
         }
@@ -414,6 +436,39 @@ pub fn build_display_list(
     out
 }
 
+/// Build the display list for the Recent button's level-1 submenu.
+///
+/// Differences from [`build_display_list`]:
+/// - No `".."` (Recent is a pseudo-entry with no real parent path).
+/// - No parent-reshow row.
+/// - Items come from the `RecentList` directly (pre-filtered by
+///   `include_pinned` at the caller).
+/// - Empty state: single disabled `"(no recent folders yet)"` item.
+pub fn build_recent_display_list(entries: &[crate::recent_list::RecentEntry]) -> Vec<DisplayItem> {
+    if entries.is_empty() {
+        return vec![DisplayItem::Empty {
+            message: "(no recent folders yet)".to_string(),
+        }];
+    }
+    entries
+        .iter()
+        .map(|e| {
+            let name = e
+                .path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| e.path.to_string_lossy().to_string());
+            DisplayItem::Subfolder {
+                entry: crate::subfolder_enum::SubfolderEntry {
+                    name,
+                    path: e.path.clone(),
+                    has_children: true, // users can spring into subfolder browsing
+                },
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests_display {
     use super::*;
@@ -544,6 +599,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 500,
+                is_recent: false,
             },
         );
         assert!(chain.is_open());
@@ -568,6 +624,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         let cmds = transition(
@@ -599,6 +656,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A\\B"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         transition(
@@ -621,6 +679,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         transition(
@@ -655,6 +714,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         transition(
@@ -700,6 +760,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         for l in 1..=(MAX_CHAIN_DEPTH as u8 + 5) {
@@ -724,6 +785,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         transition(&mut chain, SubmenuEvent::CursorExit);
@@ -744,6 +806,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         transition(&mut chain, SubmenuEvent::CursorExit);
@@ -763,6 +826,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         let cmds = transition(&mut chain, SubmenuEvent::Commit);
@@ -778,6 +842,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         transition(
@@ -803,6 +868,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         // Level 7 does not exist — expect safe no-op returning empty vec.
@@ -827,6 +893,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         transition(&mut chain, SubmenuEvent::CursorExit);
@@ -843,6 +910,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         // First hover opens level 2.
@@ -883,6 +951,57 @@ mod tests_chain {
     }
 
     #[test]
+    fn hover_from_recent_root_enables_ancestor_mode_on_child() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: std::path::PathBuf::new(),
+                button_center_y: 0,
+                is_recent: true,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: std::path::PathBuf::from("C:\\Users\\wix"),
+                is_dotdot: false,
+            },
+        );
+        assert_eq!(chain.depth(), 2);
+        assert!(
+            chain.levels[1].ancestor_mode,
+            "child of recent root should be in ancestor mode"
+        );
+    }
+
+    #[test]
+    fn hover_from_non_recent_root_clears_ancestor_mode_on_concrete_descent() {
+        // Regression: regular folder path still works.
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: std::path::PathBuf::from("C:\\A"),
+                button_center_y: 0,
+                is_recent: false,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: std::path::PathBuf::from("C:\\A\\B"),
+                is_dotdot: false,
+            },
+        );
+        assert!(!chain.levels[1].ancestor_mode);
+    }
+
+    #[test]
     fn hover_different_child_path_closes_and_reopens() {
         let mut chain = SubmenuChain::default();
         transition(
@@ -890,6 +1009,7 @@ mod tests_chain {
             SubmenuEvent::OpenRoot {
                 path: p("C:\\A"),
                 button_center_y: 0,
+                is_recent: false,
             },
         );
         transition(
@@ -993,5 +1113,70 @@ mod tests_direction {
         assert_eq!(second, FlowDir::Right);
         // This test documents that the one-way lock is the CALLER's responsibility,
         // not this function's. The caller preserves FlowDir::Left once set.
+    }
+}
+
+#[cfg(test)]
+mod tests_recent_display {
+    use super::*;
+    use crate::recent_list::RecentEntry;
+
+    #[test]
+    fn empty_list_produces_placeholder() {
+        let out = build_recent_display_list(&[]);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], DisplayItem::Empty { .. }));
+    }
+
+    #[test]
+    fn each_entry_becomes_subfolder_with_has_children_true() {
+        let entries = vec![
+            RecentEntry {
+                path: PathBuf::from("C:\\A\\B"),
+                last_accessed_unix_ms: 100,
+            },
+            RecentEntry {
+                path: PathBuf::from("C:\\X"),
+                last_accessed_unix_ms: 200,
+            },
+        ];
+        let out = build_recent_display_list(&entries);
+        assert_eq!(out.len(), 2);
+        match &out[0] {
+            DisplayItem::Subfolder { entry } => {
+                assert_eq!(entry.name, "B");
+                assert!(entry.has_children);
+            }
+            _ => panic!("expected Subfolder"),
+        }
+    }
+
+    #[test]
+    fn no_dotdot_or_parent_reshow_items() {
+        let entries = vec![RecentEntry {
+            path: PathBuf::from("C:\\Users\\Alice\\Projects"),
+            last_accessed_unix_ms: 100,
+        }];
+        let out = build_recent_display_list(&entries);
+        assert!(!out.iter().any(|i| matches!(
+            i,
+            DisplayItem::Dotdot { .. } | DisplayItem::ParentReshow { .. }
+        )));
+    }
+
+    #[test]
+    fn drive_root_entry_uses_full_path_as_name() {
+        // When file_name() returns None (e.g. "C:\\"), fall back to the full path string.
+        let entries = vec![RecentEntry {
+            path: PathBuf::from("C:\\"),
+            last_accessed_unix_ms: 100,
+        }];
+        let out = build_recent_display_list(&entries);
+        match &out[0] {
+            DisplayItem::Subfolder { entry } => {
+                assert!(!entry.name.is_empty());
+            }
+            _ => panic!("expected Subfolder"),
+        }
     }
 }

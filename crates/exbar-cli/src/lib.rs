@@ -85,6 +85,7 @@
 
 pub mod actions;
 pub mod clipboard;
+pub mod clock;
 pub mod config;
 pub mod contextmenu;
 pub mod dialog_nav;
@@ -102,6 +103,9 @@ pub mod paths;
 pub mod picker;
 pub mod pointer;
 pub mod position;
+pub mod recent_list;
+pub mod recent_store;
+pub mod recent_tracker;
 pub mod rename;
 pub mod rename_edit;
 pub mod shell_windows;

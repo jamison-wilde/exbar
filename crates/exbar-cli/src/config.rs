@@ -91,6 +91,62 @@ where
     Ok(v.clamp(0.2, 1.0))
 }
 
+fn default_recent_max_count() -> u32 {
+    5
+}
+fn default_recent_dwell_seconds() -> u32 {
+    10
+}
+
+fn deserialize_recent_max_count<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(u32::deserialize(d)?.clamp(1, 20))
+}
+
+fn deserialize_recent_dwell<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(u32::deserialize(d)?.clamp(1, 300))
+}
+
+/// Recent Folders tracking config. All fields optional with sensible defaults.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RecentConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(
+        rename = "maxCount",
+        default = "default_recent_max_count",
+        deserialize_with = "deserialize_recent_max_count"
+    )]
+    pub max_count: u32,
+    #[serde(rename = "includePinned", default)]
+    pub include_pinned: bool,
+    #[serde(
+        rename = "dwellSecondsToTrack",
+        default = "default_recent_dwell_seconds",
+        deserialize_with = "deserialize_recent_dwell"
+    )]
+    pub dwell_seconds_to_track: u32,
+    #[serde(rename = "excludedPaths", default)]
+    pub excluded_paths: Vec<String>,
+}
+
+impl Default for RecentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_count: default_recent_max_count(),
+            include_pinned: false,
+            dwell_seconds_to_track: default_recent_dwell_seconds(),
+            excluded_paths: Vec::new(),
+        }
+    }
+}
+
 /// Submenu/spring-open UX knobs. All fields have defaults and clamps.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 pub struct SubmenuConfig {
@@ -153,15 +209,34 @@ pub struct Config {
     pub enable_file_dialogs: bool,
     #[serde(default)]
     pub submenu: SubmenuConfig,
+    #[serde(default)]
+    pub recent: RecentConfig,
+}
+
+/// Discriminator for toolbar button kinds. Omitted in JSON = `Folder` (backward compat).
+/// Unknown values deserialize to `Folder` (forward compat via `serde(other)`).
+///
+/// Note: `#[serde(other)]` must appear on the **last** variant; `Folder` is placed last
+/// so it acts as the catch-all for unknown future kinds.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FolderKind {
+    Recent,
+    #[default]
+    #[serde(other)]
+    Folder,
 }
 
 /// One folder shortcut. Persists to JSON as `{"name": "...", "path": "..."}` plus an optional cached icon.
+/// `path` is empty for `kind = Recent` pseudo-entries (no fixed path).
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct FolderEntry {
     pub name: String,
+    #[serde(default)]
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    #[serde(default)]
+    pub kind: FolderKind,
 }
 
 impl Config {
@@ -192,6 +267,7 @@ impl Config {
             name,
             path,
             icon: None,
+            kind: FolderKind::Folder,
         });
     }
 
@@ -651,5 +727,84 @@ mod tests {
         assert!(
             (cfg.submenu.non_chain_item_opacity - cfg2.submenu.non_chain_item_opacity).abs() < 1e-6
         );
+    }
+
+    #[test]
+    fn folder_entry_kind_defaults_to_folder_when_missing() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[{"name":"Downloads","path":"C:\\Downloads"}]}"#)
+                .unwrap();
+        assert_eq!(cfg.folders[0].kind, FolderKind::Folder);
+    }
+
+    #[test]
+    fn folder_entry_kind_deserializes_recent() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[{"name":"Recent","kind":"Recent"}]}"#).unwrap();
+        assert_eq!(cfg.folders[0].kind, FolderKind::Recent);
+    }
+
+    #[test]
+    fn folder_entry_unknown_kind_falls_back_to_folder() {
+        // Forward-compat: unknown kinds should NOT fail deserialization.
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[{"name":"X","path":"C:\\x","kind":"Mystery"}]}"#)
+                .unwrap();
+        assert_eq!(cfg.folders[0].kind, FolderKind::Folder);
+    }
+
+    #[test]
+    fn folder_kind_round_trips() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[{"name":"Recent","kind":"Recent"}]}"#).unwrap();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let cfg2 = Config::from_str(&json).unwrap();
+        assert_eq!(cfg2.folders[0].kind, FolderKind::Recent);
+    }
+
+    #[test]
+    fn recent_config_defaults_when_missing() {
+        let cfg: Config = Config::from_str(r#"{"folders":[]}"#).unwrap();
+        assert!(!cfg.recent.enabled);
+        assert_eq!(cfg.recent.max_count, 5);
+        assert!(!cfg.recent.include_pinned);
+        assert_eq!(cfg.recent.dwell_seconds_to_track, 10);
+        assert!(cfg.recent.excluded_paths.is_empty());
+    }
+
+    #[test]
+    fn recent_max_count_clamped_low() {
+        let cfg: Config = Config::from_str(r#"{"folders":[],"recent":{"maxCount":0}}"#).unwrap();
+        assert_eq!(cfg.recent.max_count, 1);
+    }
+
+    #[test]
+    fn recent_max_count_clamped_high() {
+        let cfg: Config = Config::from_str(r#"{"folders":[],"recent":{"maxCount":99}}"#).unwrap();
+        assert_eq!(cfg.recent.max_count, 20);
+    }
+
+    #[test]
+    fn recent_dwell_seconds_clamped() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[],"recent":{"dwellSecondsToTrack":500}}"#).unwrap();
+        assert_eq!(cfg.recent.dwell_seconds_to_track, 300);
+    }
+
+    #[test]
+    fn recent_round_trips() {
+        let cfg: Config = Config::from_str(
+            r#"{"folders":[],"recent":{"enabled":true,"maxCount":10,"includePinned":true,"dwellSecondsToTrack":30,"excludedPaths":["C:\\private"]}}"#,
+        ).unwrap();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let cfg2 = Config::from_str(&json).unwrap();
+        assert_eq!(cfg.recent.enabled, cfg2.recent.enabled);
+        assert_eq!(cfg.recent.max_count, cfg2.recent.max_count);
+        assert_eq!(cfg.recent.include_pinned, cfg2.recent.include_pinned);
+        assert_eq!(
+            cfg.recent.dwell_seconds_to_track,
+            cfg2.recent.dwell_seconds_to_track
+        );
+        assert_eq!(cfg.recent.excluded_paths, cfg2.recent.excluded_paths);
     }
 }

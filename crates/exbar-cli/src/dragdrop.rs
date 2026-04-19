@@ -354,7 +354,18 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
                 log::info!("drop: target={target_path:?} effect={effect:?}");
                 // SAFETY: data_obj is live for the Drop callback duration.
                 let sources = unsafe { extract_paths_from_data_object(data_obj) };
-                execute_drop_via(&*self.file_operator, effect, &sources, target_path).map_err(|e| {
+                let op_result =
+                    execute_drop_via(&*self.file_operator, effect, &sources, target_path);
+                if op_result.is_ok() {
+                    // Emit ActionInFolder event after successful drop.
+                    let dest_path = target_path.to_path_buf();
+                    unsafe {
+                        if let Some(state) = crate::toolbar::toolbar_state(self.hwnd) {
+                            state.on_drop_committed(self.hwnd, dest_path);
+                        }
+                    }
+                }
+                op_result.map_err(|e| {
                     log::error!("Drop: file operation failed: {e}");
                     windows_core::Error::from_win32()
                 })
@@ -788,8 +799,18 @@ impl IDropTarget_Impl for SubmenuDropTarget_Impl {
                 "submenu drop: dest={dest:?} effect={effect:?} sources={}",
                 sources.len()
             );
-            if let Err(e) = execute_drop_via(&*self.file_operator, effect, &sources, &dest) {
-                log::error!("submenu drop: file operation failed: {e}");
+            match execute_drop_via(&*self.file_operator, effect, &sources, &dest) {
+                Ok(()) => {
+                    // Emit ActionInFolder event after successful drop.
+                    unsafe {
+                        if let Some(state) = crate::toolbar::toolbar_state(self.toolbar_hwnd) {
+                            state.on_drop_committed(self.toolbar_hwnd, dest.clone());
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("submenu drop: file operation failed: {e}");
+                }
             }
         }
 

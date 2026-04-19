@@ -86,6 +86,14 @@ pub(crate) const TIMER_REPOSITION: usize = 1;
 pub(crate) const TIMER_LONGPRESS: usize = 2;
 /// Timer ID for submenu cursor-tracking + dismiss countdown (30 ms tick while any popup is open).
 pub(crate) const TIMER_SUBMENU_SAFETY: usize = 3;
+/// Timer ID for the 2-second debounced write of recents.json.
+pub(crate) const TIMER_RECENT_DEBOUNCE: usize = 4;
+/// Timer ID for the 1-second dwell + active-tab-path polling tick.
+/// Armed when Recent is enabled; disarmed when disabled.
+pub(crate) const TIMER_DWELL_TICK: usize = 5;
+/// One-shot timer that fires after springOpenDelayMs ms of cursor rest on a
+/// folder button, opening its submenu without requiring a mouse press.
+pub(crate) const TIMER_HOVER_OPEN: usize = 6;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -163,6 +171,17 @@ pub(crate) struct ToolbarState {
     /// Tracks whether any mouse button was pressed on the PREVIOUS safety-timer tick.
     /// Used to detect a fresh button-down for the click-outside-dismiss path.
     pub(crate) prev_mouse_button_down: bool,
+    // Recent Folders (Plan B):
+    pub(crate) recent_tracker: crate::recent_tracker::TrackerState,
+    pub(crate) recent_list: Vec<crate::recent_list::RecentEntry>,
+    pub(crate) recent_store: Box<dyn crate::recent_store::RecentStore>,
+    pub(crate) clock: Box<dyn crate::clock::Clock>,
+    /// Set when recent_list has been mutated since last successful save.
+    pub(crate) recent_dirty: bool,
+    /// Set when SetTimer(TIMER_RECENT_DEBOUNCE) is armed but not yet fired.
+    pub(crate) recent_debounce_pending: bool,
+    /// Button index the hover-open timer is waiting on. `None` when no wait is active.
+    pub(crate) hover_open_pending_button: Option<usize>,
 }
 
 impl ToolbarState {
@@ -177,6 +196,8 @@ impl ToolbarState {
             Box::new(JsonFileStore::new()),
             Box::new(KeybdDialogNavigator::new()),
             Box::new(Win32SubfolderSource::new()),
+            Box::new(crate::recent_store::JsonRecentStore::new()),
+            Box::new(crate::clock::SystemClock::new()),
         )
     }
 
@@ -191,11 +212,14 @@ impl ToolbarState {
         config_store: Box<dyn ConfigStore>,
         dialog_nav: Box<dyn DialogNavigator>,
         subfolder_source: Box<dyn SubfolderSource>,
+        recent_store: Box<dyn crate::recent_store::RecentStore>,
+        clock: Box<dyn crate::clock::Clock>,
     ) -> Self {
         let layout = config
             .as_ref()
             .map_or(Orientation::Horizontal, |c| c.layout);
         let submenu_cfg = config.as_ref().map(|c| c.submenu).unwrap_or_default();
+        let recent_list = recent_store.load();
         ToolbarState {
             buttons: Vec::new(),
             dpi,
@@ -233,6 +257,13 @@ impl ToolbarState {
             submenu_timer_active: false,
             cursor_was_inside_popup: true,
             prev_mouse_button_down: false,
+            recent_tracker: crate::recent_tracker::TrackerState::default(),
+            recent_list,
+            recent_store,
+            clock,
+            recent_dirty: false,
+            recent_debounce_pending: false,
+            hover_open_pending_button: None,
         }
     }
 }
@@ -308,6 +339,12 @@ impl ToolbarState {
                 let btn_slot = folder_button + 1;
                 if btn_slot < self.buttons.len() {
                     let path = std::path::PathBuf::from(&self.buttons[btn_slot].folder.path);
+                    // Mark as toolbar-initiated so the dwell tracker skips counting
+                    // our own navigation as a user-discovered folder.
+                    self.execute_tracker_event(
+                        hwnd,
+                        crate::recent_tracker::TrackerEvent::SelfInitiated,
+                    );
                     if ctrl {
                         match self.active_target.map(|t| t.kind) {
                             Some(crate::target::TargetKind::FileDialog) => {
@@ -388,11 +425,13 @@ impl ToolbarState {
                 self.last_cursor_y_on_open = pt.y;
                 self.last_button_screen_rect = self.button_screen_rect(hwnd, folder_button);
 
+                let is_recent = matches!(folder.kind, crate::config::FolderKind::Recent);
                 self.execute_submenu_event(
                     hwnd,
                     crate::submenu::SubmenuEvent::OpenRoot {
                         path: std::path::PathBuf::from(resolved),
                         button_center_y,
+                        is_recent,
                     },
                 );
             }
@@ -435,6 +474,164 @@ impl ToolbarState {
                         LPARAM(0)
                     ));
                 },
+            }
+        }
+    }
+}
+
+// ── Recent Folders adapter methods ───────────────────────────────────────────
+
+impl ToolbarState {
+    /// Returns the filesystem path of the active Explorer tab's current folder,
+    /// or `None` if no Explorer is active, the target is a file dialog, or the
+    /// path can't be resolved.
+    ///
+    /// Uses `IShellBrowser::QueryActiveShellView` → `IFolderView::GetFolder::<IPersistFolder2>`
+    /// → `GetCurFolder` → `SHGetPathFromIDListW`.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the toolbar's COM/STA thread.
+    pub(crate) fn current_active_tab_path(&self) -> Option<std::path::PathBuf> {
+        use crate::target::TargetKind;
+        let target = self.active_target.as_ref()?;
+        if target.kind != TargetKind::Explorer {
+            return None;
+        }
+        // SAFETY: get_shell_browser_for requires STA + COM init; the wndproc
+        // message-pump thread owns both.
+        let browser = unsafe { crate::shell_windows::get_shell_browser_for(target.hwnd) }?;
+        unsafe { crate::shell_windows::active_folder_path(&browser) }
+    }
+
+    /// Arm the 1 Hz dwell-tick timer. Idempotent — `SetTimer` with the same
+    /// ID replaces an existing timer, so calling this when it's already armed
+    /// is harmless.
+    pub(crate) fn arm_dwell_tick(&mut self, toolbar: HWND) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                Some(toolbar),
+                TIMER_DWELL_TICK,
+                1000,
+                None,
+            );
+        }
+    }
+
+    /// Disarm the 1 Hz dwell-tick timer. No-op if already disarmed.
+    #[allow(dead_code)]
+    pub(crate) fn disarm_dwell_tick(&mut self, toolbar: HWND) {
+        unsafe {
+            let _ =
+                windows::Win32::UI::WindowsAndMessaging::KillTimer(Some(toolbar), TIMER_DWELL_TICK);
+        }
+    }
+}
+
+#[allow(dead_code)] // callers land in Tasks 8+9
+impl ToolbarState {
+    /// Feed a `TrackerEvent` through the pure state machine and apply returned commands.
+    /// No-op if Recent is disabled in config.
+    pub(crate) fn execute_tracker_event(
+        &mut self,
+        toolbar: HWND,
+        event: crate::recent_tracker::TrackerEvent,
+    ) {
+        let Some(cfg) = self.config.as_ref() else {
+            return;
+        };
+        if !cfg.recent.enabled {
+            return;
+        }
+        let ctx = crate::recent_tracker::TrackerContext {
+            dwell_threshold_seconds: cfg.recent.dwell_seconds_to_track,
+            excluded_paths: &cfg.recent.excluded_paths,
+        };
+        let cmds = crate::recent_tracker::transition(&mut self.recent_tracker, event, &ctx);
+        for cmd in cmds {
+            self.dispatch_tracker_command(toolbar, cmd);
+        }
+    }
+
+    /// Hook called by drop targets after a successful file operation into `dest`.
+    /// Emits `ActionInFolder` through the tracker adapter, which commits the
+    /// destination to the recent list immediately (regardless of dwell).
+    pub(crate) fn on_drop_committed(&mut self, toolbar: HWND, dest: std::path::PathBuf) {
+        self.execute_tracker_event(
+            toolbar,
+            crate::recent_tracker::TrackerEvent::ActionInFolder(dest),
+        );
+    }
+
+    fn dispatch_tracker_command(
+        &mut self,
+        toolbar: HWND,
+        cmd: crate::recent_tracker::TrackerCommand,
+    ) {
+        match cmd {
+            crate::recent_tracker::TrackerCommand::CommitRecent(path) => {
+                // Extract config values into locals first to avoid borrow conflict.
+                let (max_count, excluded_paths) = match self.config.as_ref() {
+                    Some(cfg) => (
+                        cfg.recent.max_count as usize,
+                        cfg.recent.excluded_paths.clone(),
+                    ),
+                    None => return,
+                };
+                let now = self.clock.now_unix_ms();
+                crate::recent_list::push(
+                    &mut self.recent_list,
+                    &path,
+                    now,
+                    max_count,
+                    &excluded_paths,
+                );
+                self.recent_dirty = true;
+                self.schedule_recent_debounce(toolbar);
+            }
+            crate::recent_tracker::TrackerCommand::ClearDwell => {
+                // State already cleared inside transition; nothing to apply here.
+            }
+        }
+    }
+
+    /// Arm a 2-second debounce timer if not already armed. Idempotent.
+    fn schedule_recent_debounce(&mut self, toolbar: HWND) {
+        if self.recent_debounce_pending {
+            return;
+        }
+        self.recent_debounce_pending = true;
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                Some(toolbar),
+                TIMER_RECENT_DEBOUNCE,
+                2000,
+                None,
+            );
+        }
+    }
+
+    /// Called on `WM_TIMER(TIMER_RECENT_DEBOUNCE)` or on hook shutdown. Persists
+    /// the list and clears dirty+pending flags. Safe to call when nothing is dirty.
+    pub(crate) fn flush_recent(&mut self, toolbar: HWND) {
+        if self.recent_debounce_pending {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                    Some(toolbar),
+                    TIMER_RECENT_DEBOUNCE,
+                );
+            }
+            self.recent_debounce_pending = false;
+        }
+        if !self.recent_dirty {
+            return;
+        }
+        match self.recent_store.save(&self.recent_list) {
+            Ok(()) => {
+                self.recent_dirty = false;
+            }
+            Err(e) => {
+                log::warn!("recents.json save failed: {e:?}");
             }
         }
     }
@@ -500,8 +697,9 @@ impl ToolbarState {
                 level,
                 path,
                 ancestor_mode,
+                is_recent,
             } => {
-                self.open_popup_level(toolbar, level, path, ancestor_mode);
+                self.open_popup_level(toolbar, level, path, ancestor_mode, is_recent);
             }
             crate::submenu::SubmenuCommand::CloseDeeperThan { level } => {
                 self.close_popups_deeper_than(toolbar, level);
@@ -521,68 +719,102 @@ impl ToolbarState {
         level: u8,
         folder_path: std::path::PathBuf,
         ancestor_mode: bool,
+        is_recent: bool,
     ) {
         use crate::submenu::{
             ReshowPosition, VertOrient, build_display_list, resolve_level1_orientation,
         };
 
-        let max_items = 200;
-        let entries = match self.subfolder_source.list(&folder_path, max_items) {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("subfolder list failed for {folder_path:?}: {e:?}");
-                Vec::new()
-            }
-        };
-
-        // Fix 3: refuse to open an empty popup for a shell alias — path
-        // resolution is a Task 15 follow-up.
-        if entries.is_empty()
-            && crate::config::is_shell_alias(folder_path.to_string_lossy().as_ref())
-        {
-            log::warn!(
-                "submenu: refusing to open empty popup for shell alias {folder_path:?}; \
-                 path resolution is a Task 15 follow-up"
-            );
-            return;
-        }
-
         let work = self.submenu_work_area();
         let cursor_y = self.last_cursor_y_on_open;
         let btn_center_y = self.last_button_center_y_on_open;
-
         let item_px = self.submenu_item_px();
         let buffer_px = self.submenu_cfg.hover_buffer_px as i32;
 
-        let reshow = if level == 1 {
-            let orient = resolve_level1_orientation(
-                btn_center_y,
-                entries.len() as i32,
-                item_px,
-                cursor_y,
-                work,
-            );
-            match orient {
-                VertOrient::Upward => ReshowPosition::Last,
-                VertOrient::Downward => ReshowPosition::First,
-            }
+        // Level-1 Recent button: build from the tracked recent list, not from
+        // subfolder enumeration. No ".." and no parent-reshow.
+        let (display_items, reshow) = if level == 1 && is_recent {
+            let (pinned, include_pinned) = self
+                .config
+                .as_ref()
+                .map(|c| {
+                    let pinned: Vec<String> = c
+                        .folders
+                        .iter()
+                        .filter(|f| f.kind == crate::config::FolderKind::Folder)
+                        .map(|f| f.path.clone())
+                        .collect();
+                    (pinned, c.recent.include_pinned)
+                })
+                .unwrap_or_default();
+            let filtered =
+                crate::recent_list::for_display(&self.recent_list, &pinned, include_pinned);
+            // Recent has no parent to reshow; orient upward/downward from btn position.
+            let reshow = {
+                let item_count = filtered.len().max(1) as i32; // at least 1 (placeholder)
+                let orient =
+                    resolve_level1_orientation(btn_center_y, item_count, item_px, cursor_y, work);
+                match orient {
+                    VertOrient::Upward => ReshowPosition::Last,
+                    VertOrient::Downward => ReshowPosition::First,
+                }
+            };
+            (crate::submenu::build_recent_display_list(&filtered), reshow)
         } else {
-            ReshowPosition::None
+            let max_items = 200;
+            let entries = match self.subfolder_source.list(&folder_path, max_items) {
+                Ok(e) => e,
+                Err(e) => {
+                    log::warn!("subfolder list failed for {folder_path:?}: {e:?}");
+                    Vec::new()
+                }
+            };
+
+            // Fix 3: refuse to open an empty popup for a shell alias — path
+            // resolution is a Task 15 follow-up.
+            if entries.is_empty()
+                && crate::config::is_shell_alias(folder_path.to_string_lossy().as_ref())
+            {
+                log::warn!(
+                    "submenu: refusing to open empty popup for shell alias {folder_path:?}; \
+                     path resolution is a Task 15 follow-up"
+                );
+                return;
+            }
+
+            let reshow = if level == 1 {
+                let orient = resolve_level1_orientation(
+                    btn_center_y,
+                    entries.len() as i32,
+                    item_px,
+                    cursor_y,
+                    work,
+                );
+                match orient {
+                    VertOrient::Upward => ReshowPosition::Last,
+                    VertOrient::Downward => ReshowPosition::First,
+                }
+            } else {
+                ReshowPosition::None
+            };
+
+            let folder_display_name = folder_path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| folder_path.to_string_lossy().to_string());
+
+            (
+                build_display_list(
+                    level,
+                    &folder_path,
+                    &folder_display_name,
+                    ancestor_mode,
+                    &entries,
+                    reshow,
+                ),
+                reshow,
+            )
         };
-
-        let folder_display_name = folder_path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| folder_path.to_string_lossy().to_string());
-
-        let display_items = build_display_list(
-            level,
-            &folder_path,
-            &folder_display_name,
-            ancestor_mode,
-            &entries,
-            reshow,
-        );
 
         let measured_w = crate::paint::measure_display_items_width(&display_items, self.dpi, level);
         let max_width_px = (measured_w + crate::theme::scale(32, self.dpi))
@@ -821,7 +1053,11 @@ impl ToolbarState {
 
     /// Convert the toolbar-client-coord button rect at `folder_button` (folder index,
     /// 0-based) to screen coordinates. Returns a zero rect if the index is out of range.
-    fn button_screen_rect(&self, toolbar: HWND, folder_button: usize) -> crate::layout::Rect {
+    pub(crate) fn button_screen_rect(
+        &self,
+        toolbar: HWND,
+        folder_button: usize,
+    ) -> crate::layout::Rect {
         use windows::Win32::Graphics::Gdi::ClientToScreen;
         let Some(btn) = self.buttons.get(folder_button + 1) else {
             return crate::layout::Rect {

@@ -3,12 +3,15 @@
 //! only under `#[cfg(test)]`.
 
 use crate::clipboard::{Clipboard, test_mocks::MockClipboard};
-use crate::config::{Config, ConfigStore, FolderEntry, test_mocks::MockConfigStore};
+use crate::clock::{Clock, test_mocks::MockClock};
+use crate::config::{Config, ConfigStore, FolderEntry, FolderKind, test_mocks::MockConfigStore};
 use crate::dialog_nav::{DialogNavigator, test_mocks::MockDialogNavigator};
 use crate::dragdrop::{FileOperator, test_mocks::MockFileOp};
 use crate::error::ExbarResult;
 use crate::layout::{ButtonLayout, Rect};
 use crate::picker::{FolderPicker, test_mocks::MockFolderPicker};
+use crate::recent_list::RecentEntry;
+use crate::recent_store::{RecentStore, test_mocks::MockRecentStore};
 use crate::shell_windows::test_mocks::MockShellBrowser;
 use crate::subfolder_enum::{SubfolderEntry, SubfolderSource, test_mocks::MockSubfolderSource};
 use crate::toolbar::ToolbarState;
@@ -29,6 +32,13 @@ impl Clipboard for ClipArc {
         self.0.set_text(t)
     }
 }
+#[allow(dead_code)]
+pub struct ClockArc(pub Arc<MockClock>);
+impl Clock for ClockArc {
+    fn now_unix_ms(&self) -> u64 {
+        self.0.now_unix_ms()
+    }
+}
 pub struct CfgArc(pub Arc<MockConfigStore>);
 impl ConfigStore for CfgArc {
     fn load(&self) -> Option<Config> {
@@ -44,6 +54,20 @@ pub struct SubfolderArc(pub Arc<MockSubfolderSource>);
 impl SubfolderSource for SubfolderArc {
     fn list(&self, parent: &Path, max_items: usize) -> ExbarResult<Vec<SubfolderEntry>> {
         self.0.list(parent, max_items)
+    }
+}
+
+#[allow(dead_code)]
+pub struct RecentStoreArc(pub Arc<MockRecentStore>);
+impl RecentStore for RecentStoreArc {
+    fn load(&self) -> Vec<RecentEntry> {
+        self.0.load()
+    }
+    fn save(&self, entries: &[RecentEntry]) -> ExbarResult<()> {
+        self.0.save(entries)
+    }
+    fn delete(&self) -> ExbarResult<()> {
+        self.0.delete()
     }
 }
 
@@ -103,6 +127,12 @@ pub fn make_test_state(deps: &TestDeps, config: Option<Config>) -> ToolbarState 
         Box::new(SubfolderArc(Arc::new(
             crate::subfolder_enum::test_mocks::MockSubfolderSource::default(),
         ))),
+        Box::new(RecentStoreArc(Arc::new(
+            crate::recent_store::test_mocks::MockRecentStore::default(),
+        ))),
+        Box::new(ClockArc(Arc::new(
+            crate::clock::test_mocks::MockClock::new(1_000_000_000),
+        ))),
     )
 }
 
@@ -118,6 +148,7 @@ pub fn mk_add_button() -> ButtonLayout {
             name: "+".into(),
             path: String::new(),
             icon: None,
+            kind: FolderKind::Folder,
         },
         is_add: true,
     }
@@ -135,6 +166,7 @@ pub fn mk_folder_button(name: &str, path: &str, left: i32) -> ButtonLayout {
             name: name.into(),
             path: path.into(),
             icon: None,
+            kind: FolderKind::Folder,
         },
         is_add: false,
     }
