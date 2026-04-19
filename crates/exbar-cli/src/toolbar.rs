@@ -591,7 +591,7 @@ impl ToolbarState {
         let (sx, sy) = if level == 1 {
             let btn = self.last_button_screen_rect;
             let buffer = buffer_px;
-            let x = btn.left;
+            let x = btn.left - buffer; // shift so inner items align with button.left
             let y = match reshow {
                 // Popup opens downward: reshow row (first) should align with button top.
                 ReshowPosition::First => btn.top - buffer,

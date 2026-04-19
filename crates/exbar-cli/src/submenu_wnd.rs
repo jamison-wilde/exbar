@@ -367,7 +367,19 @@ unsafe extern "system" fn submenu_wndproc(
             let y = ((lparam.0 >> 16) as i16) as i32;
             let item_idx = hit_test_inner(&popup.layout, x, y);
             if item_idx < 0 {
-                // Click outside any item — ignore; toolbar's click-outside handler fires separately.
+                // Click landed in the translucent buffer band (not on any item). Treat
+                // as a dismissal signal — user clicked "near but not on" any folder.
+                let Some(popup) = (unsafe { popup_state(hwnd) }) else {
+                    return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+                };
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(popup.toolbar_hwnd),
+                        crate::wndproc::WM_USER_SUBMENU_DISMISS,
+                        windows::Win32::Foundation::WPARAM(0),
+                        windows::Win32::Foundation::LPARAM(0),
+                    );
+                }
                 return windows::Win32::Foundation::LRESULT(0);
             }
             // Ctrl detection: bit 15 of GetKeyState is 1 when the key is down.

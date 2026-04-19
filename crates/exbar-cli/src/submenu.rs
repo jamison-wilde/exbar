@@ -231,17 +231,33 @@ pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuComm
             let Some(idx) = chain.levels.iter().position(|l| l.level == level) else {
                 return vec![];
             };
-            // Truncate deeper levels.
             let mut cmds: Vec<SubmenuCommand> = Vec::new();
+
+            // If a deeper level is already open with the same child_path, this is a
+            // no-op on the chain — just update highlight if it changed.
+            if chain.levels.len() > idx + 1 && chain.levels[idx + 1].path == child_path {
+                if chain.levels[idx].highlighted_item != Some(index) {
+                    chain.levels[idx].highlighted_item = Some(index);
+                    cmds.push(SetHighlight {
+                        level,
+                        index: Some(index),
+                    });
+                }
+                return cmds;
+            }
+
+            // Different deeper path (or no deeper level): truncate and open fresh.
             if chain.levels.len() > idx + 1 {
                 chain.levels.truncate(idx + 1);
                 cmds.push(CloseDeeperThan { level });
             }
-            chain.levels[idx].highlighted_item = Some(index);
-            cmds.push(SetHighlight {
-                level,
-                index: Some(index),
-            });
+            if chain.levels[idx].highlighted_item != Some(index) {
+                chain.levels[idx].highlighted_item = Some(index);
+                cmds.push(SetHighlight {
+                    level,
+                    index: Some(index),
+                });
+            }
 
             if chain.depth() >= MAX_CHAIN_DEPTH {
                 return cmds;
@@ -817,6 +833,96 @@ mod tests_chain {
         assert_eq!(chain.dismiss_pending_ticks, 5);
         transition(&mut chain, SubmenuEvent::HoverBufferAt);
         assert_eq!(chain.dismiss_pending_ticks, 0);
+    }
+
+    #[test]
+    fn hover_same_child_twice_does_not_reopen_deeper() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        // First hover opens level 2.
+        let cmds1 = transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: p("C:\\A\\B"),
+                is_dotdot: false,
+            },
+        );
+        assert!(
+            cmds1
+                .iter()
+                .any(|c| matches!(c, SubmenuCommand::OpenLevel { level: 2, .. }))
+        );
+        // Second hover at same level/index/path — already open with same path, so no-op.
+        let cmds2 = transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: p("C:\\A\\B"),
+                is_dotdot: false,
+            },
+        );
+        assert!(
+            cmds2
+                .iter()
+                .all(|c| !matches!(c, SubmenuCommand::OpenLevel { .. }))
+        );
+        assert!(
+            cmds2
+                .iter()
+                .all(|c| !matches!(c, SubmenuCommand::CloseDeeperThan { .. }))
+        );
+    }
+
+    #[test]
+    fn hover_different_child_path_closes_and_reopens() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: p("C:\\A\\B"),
+                is_dotdot: false,
+            },
+        );
+        // Hover a different sibling — should close level 2 and reopen with new path.
+        let cmds = transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 2,
+                child_path: p("C:\\A\\C"),
+                is_dotdot: false,
+            },
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, SubmenuCommand::CloseDeeperThan { level: 1 }))
+        );
+        let opened = cmds.iter().find_map(|c| match c {
+            SubmenuCommand::OpenLevel { level: 2, path, .. } => Some(path),
+            _ => None,
+        });
+        assert_eq!(
+            opened.map(|p| p.to_string_lossy().to_string()),
+            Some("C:\\A\\C".to_string())
+        );
     }
 }
 

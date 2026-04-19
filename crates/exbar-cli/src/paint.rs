@@ -360,9 +360,9 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
 /// two code paths stay in sync.
 fn display_item_label(item: &DisplayItem) -> String {
     match item {
-        DisplayItem::Subfolder { entry } => format!("\u{1F4C1}  {}", entry.name),
-        DisplayItem::Dotdot { parent_name, .. } => format!("\u{2B06}  {}", parent_name),
-        DisplayItem::ParentReshow { name, .. } => format!("\u{1F4C1}  {}", name),
+        DisplayItem::Subfolder { entry } => format!("\u{1F4C1} {}", entry.name),
+        DisplayItem::Dotdot { parent_name, .. } => format!("\u{2B06} {}", parent_name),
+        DisplayItem::ParentReshow { name, .. } => format!("\u{1F4C1} {}", name),
         DisplayItem::Ellipsis => "\u{2026}(more)".to_string(),
         DisplayItem::Empty { message } => message.clone(),
     }
