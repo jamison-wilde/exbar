@@ -4,9 +4,10 @@
 
 use windows::Win32::Foundation::{COLORREF, HWND, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DEFAULT_GUI_FONT, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
-    DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject, GetTextExtentPoint32W, HDC,
-    PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DEFAULT_GUI_FONT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT,
+    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect,
+    GetStockObject, GetTextExtentPoint32W, HDC, PAINTSTRUCT, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
@@ -354,6 +355,67 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     }
 }
 
+/// Build the display label string for a `DisplayItem`, consistent with paint rendering.
+///
+/// Called by both [`paint_submenu_popup`] and [`measure_display_items_width`] so the
+/// two code paths stay in sync.
+fn display_item_label(item: &DisplayItem) -> String {
+    match item {
+        DisplayItem::Subfolder { entry } => format!("\u{1F4C1}  {}", entry.name),
+        DisplayItem::Dotdot { parent_name, .. } => format!("\u{2B06}  {}", parent_name),
+        DisplayItem::ParentReshow { name, .. } => format!("\u{2022}  \u{1F4C1}  {}", name),
+        DisplayItem::Ellipsis => "\u{2026}(more)".to_string(),
+        DisplayItem::Empty { message } => message.clone(),
+    }
+}
+
+/// Measure the maximum rendered pixel width of the given `display_items` list
+/// using `DrawTextW` with `DT_CALCRECT`. Used to compute a dynamic popup width.
+///
+/// Returns the measured max text width in physical pixels (without padding).
+/// Caller must add left/right padding before using this as `max_width_px`.
+pub fn measure_display_items_width(display_items: &[DisplayItem], dpi: u32) -> i32 {
+    use windows::Win32::Graphics::Gdi::{
+        DT_CALCRECT, DT_SINGLELINE, GetDC, GetStockObject, ReleaseDC, SelectObject,
+    };
+    use windows::Win32::Foundation::RECT as WinRect;
+
+    let hdc = unsafe { GetDC(None) };
+    if hdc.is_invalid() {
+        return theme::scale(200, dpi);
+    }
+    let font = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+    let old = unsafe { SelectObject(hdc, font) };
+
+    let mut max_w: i32 = 0;
+    for item in display_items {
+        let label = display_item_label(item);
+        let mut wide: Vec<u16> = label.encode_utf16().collect();
+        let mut r = WinRect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        unsafe {
+            DrawTextW(hdc, &mut wide, &mut r, DT_CALCRECT | DT_SINGLELINE);
+        }
+        if r.right > max_w {
+            max_w = r.right;
+        }
+    }
+
+    if !old.is_invalid() {
+        unsafe {
+            SelectObject(hdc, old);
+        }
+    }
+    unsafe {
+        let _ = ReleaseDC(None, hdc);
+    }
+    max_w
+}
+
 /// Render a submenu popup. Called from the popup wndproc's `WM_PAINT` handler.
 ///
 /// Not unit-tested (pure GDI) — covered by manual smoke in Task 17.
@@ -372,10 +434,6 @@ pub fn paint_submenu_popup(
     highlighted_index: Option<usize>,
     dpi: u32,
 ) {
-    use windows::Win32::Graphics::Gdi::{
-        DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT, GetStockObject,
-    };
-
     let dark = theme::is_dark_mode();
 
     let bg_color = if dark {
@@ -439,20 +497,11 @@ pub fn paint_submenu_popup(
         }
 
         // Build label text and determine display properties.
-        let (label, is_disabled, has_children) = match item {
-            DisplayItem::Subfolder { entry } => (
-                format!("\u{1F4C1}  {}", entry.name),
-                false,
-                entry.has_children,
-            ),
-            DisplayItem::Dotdot { parent_name, .. } => {
-                (format!("\u{2B06}  {}", parent_name), false, false)
-            }
-            DisplayItem::ParentReshow { name, .. } => {
-                (format!("\u{2022}  \u{1F4C1}  {}", name), false, false)
-            }
-            DisplayItem::Ellipsis => ("\u{2026}(more)".to_string(), true, false),
-            DisplayItem::Empty { message } => (message.clone(), true, false),
+        let label = display_item_label(item);
+        let (is_disabled, has_children) = match item {
+            DisplayItem::Subfolder { entry } => (false, entry.has_children),
+            DisplayItem::Dotdot { .. } | DisplayItem::ParentReshow { .. } => (false, false),
+            DisplayItem::Ellipsis | DisplayItem::Empty { .. } => (true, false),
         };
 
         let color = if is_disabled {

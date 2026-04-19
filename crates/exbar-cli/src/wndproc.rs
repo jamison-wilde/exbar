@@ -625,6 +625,26 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             } else if timer_id == crate::toolbar::TIMER_SUBMENU_SAFETY {
                 // Cursor-tracking safety tick — fires at 30 ms while any popup is open.
                 if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    // Poll Escape — WS_EX_NOACTIVATE means WM_KEYDOWN rarely arrives
+                    // at the popup; polling here is the reliable dismissal path.
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        GetAsyncKeyState, VK_ESCAPE,
+                    };
+                    let esc_pressed = unsafe {
+                        (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16) & 0x8000 != 0
+                    };
+                    if esc_pressed {
+                        state.execute_submenu_event(
+                            hwnd,
+                            crate::submenu::SubmenuEvent::Dismiss,
+                        );
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_SAFETY);
+                        }
+                        state.submenu_timer_active = false;
+                        return LRESULT(0);
+                    }
+
                     let mut cursor = POINT::default();
                     let cursor_ok = unsafe { GetCursorPos(&mut cursor).is_ok() };
 

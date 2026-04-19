@@ -52,8 +52,8 @@ pub struct SubmenuPopup {
     pub layout: SubmenuLayout,
     /// Highlighted row index, if any.
     pub highlighted_index: Option<usize>,
-    /// Layered-window alpha fraction for non-chain-top levels (0.0–1.0).
-    pub non_chain_opacity: f32,
+    /// Layered-window alpha fraction (0.0–1.0) — driven by `config.background_opacity`.
+    pub layered_alpha: f32,
     /// DPI of the monitor the popup is on.
     pub dpi: u32,
     /// HWND of the main toolbar that owns this popup chain (for message routing).
@@ -120,7 +120,7 @@ pub fn create_popup(
 
     let w = popup.layout.popup_w;
     let h = popup.layout.popup_h;
-    let alpha = (popup.non_chain_opacity.clamp(0.0, 1.0) * 255.0) as u8;
+    let alpha = (popup.layered_alpha.clamp(0.0, 1.0) * 255.0) as u8;
 
     // Capture level before Box::into_raw so we can pass it to
     // SubmenuDropTarget::new after window creation (option A).

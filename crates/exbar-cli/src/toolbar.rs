@@ -95,8 +95,6 @@ pub(crate) const GRIP_SIZE: i32 = 12;
 /// Matches `crate::layout::BTN_HEIGHT_LOGICAL_PX` — both derive from the
 /// same 26 px design token.
 const SUBMENU_ROW_LOGICAL_PX: i32 = 26;
-/// Submenu max content width in logical pixels.
-const SUBMENU_MAX_WIDTH_LOGICAL_PX: i32 = 320;
 
 // ── Adapter helpers ──────────────────────────────────────────────────────────
 
@@ -150,6 +148,8 @@ pub(crate) struct ToolbarState {
     pub(crate) last_cursor_y_on_open: i32,
     /// Triggering folder button center-Y — used by resolve_level1_orientation.
     pub(crate) last_button_center_y_on_open: i32,
+    /// Triggering folder button screen rect — used for level-1 popup left-edge alignment.
+    pub(crate) last_button_screen_rect: crate::layout::Rect,
     /// Instant when the last `WM_LBUTTONDOWN` landed on a folder button.
     /// Drives elapsed-ms computation for `LongPressTick` timer ticks.
     pub(crate) last_press_instant: Option<std::time::Instant>,
@@ -216,6 +216,12 @@ impl ToolbarState {
             last_cursor_x_on_open: 0,
             last_cursor_y_on_open: 0,
             last_button_center_y_on_open: 0,
+            last_button_screen_rect: crate::layout::Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
             last_press_instant: None,
             submenu_timer_active: false,
         }
@@ -371,6 +377,7 @@ impl ToolbarState {
                 self.last_button_center_y_on_open = button_center_y;
                 self.last_cursor_x_on_open = pt.x;
                 self.last_cursor_y_on_open = pt.y;
+                self.last_button_screen_rect = self.button_screen_rect(hwnd, folder_button);
 
                 self.execute_submenu_event(
                     hwnd,
@@ -452,7 +459,8 @@ impl ToolbarState {
                     .as_ref()
                     .map(|c| c.new_tab_timeout_ms_zero_disables)
                     .unwrap_or(500);
-                self.shell_browser.open_in_new_tab(active_hwnd, path, timeout);
+                self.shell_browser
+                    .open_in_new_tab(active_hwnd, path, timeout);
             }
             (Some(TargetKind::Explorer), false) => {
                 let active_hwnd = self.active_target.map(|t| t.hwnd).unwrap_or_default();
@@ -535,7 +543,6 @@ impl ToolbarState {
         let btn_center_y = self.last_button_center_y_on_open;
 
         let item_px = self.submenu_item_px();
-        let max_width_px = self.submenu_max_width_px();
         let buffer_px = self.submenu_cfg.hover_buffer_px as i32;
 
         let reshow = if level == 1 {
@@ -568,6 +575,11 @@ impl ToolbarState {
             reshow,
         );
 
+        let measured_w = crate::paint::measure_display_items_width(&display_items, self.dpi);
+        let max_width_px = (measured_w + crate::theme::scale(32, self.dpi))
+            .min(crate::theme::scale(400, self.dpi))
+            .max(crate::theme::scale(100, self.dpi));
+
         let layout = crate::layout::compute_submenu_layout(
             display_items.len(),
             item_px,
@@ -575,20 +587,20 @@ impl ToolbarState {
             buffer_px,
         );
 
-        // Popup placement: level-1 near cursor; deeper levels right of parent.
-        // Task 13 refines with flow-direction lock and edge overflow.
+        // Popup placement: level-1 left-edge aligns to triggering button; deeper levels right of parent.
         let (sx, sy) = if level == 1 {
-            let cursor_x = self.last_cursor_x_on_open;
-            let x = cursor_x - layout.popup_w / 2;
+            let btn = self.last_button_screen_rect;
+            let buffer = buffer_px;
+            let x = btn.left;
             let y = match reshow {
-                // Reshow at First means popup opens downward: cursor is near the top item.
-                ReshowPosition::First => cursor_y - buffer_px - item_px / 2,
-                // Reshow at Last means popup opens upward: cursor is near the bottom item.
-                ReshowPosition::Last => cursor_y - layout.popup_h + buffer_px + item_px / 2,
-                ReshowPosition::None => cursor_y,
+                // Popup opens downward: reshow row (first) should align with button top.
+                ReshowPosition::First => btn.top - buffer,
+                // Popup opens upward: reshow row (last) should align with button bottom.
+                ReshowPosition::Last => btn.bottom - layout.popup_h + buffer,
+                ReshowPosition::None => btn.top,
             };
             (
-                x.max(work.left),
+                x.max(work.left).min(work.right - layout.popup_w),
                 y.max(work.top).min(work.bottom - layout.popup_h),
             )
         } else {
@@ -626,8 +638,7 @@ impl ToolbarState {
             let flow = match self.submenu_chain.flow {
                 Some(f) => f,
                 None => {
-                    let resolved =
-                        crate::submenu::resolve_flow_direction(proposed_right_x, work);
+                    let resolved = crate::submenu::resolve_flow_direction(proposed_right_x, work);
                     self.submenu_chain.flow = Some(resolved);
                     resolved
                 }
@@ -640,19 +651,22 @@ impl ToolbarState {
 
             // Clamp both axes to the monitor work area.
             let clamped_x = x.max(work.left).min(work.right - layout.popup_w);
-            let clamped_y = anchor_top
-                .max(work.top)
-                .min(work.bottom - layout.popup_h);
+            let clamped_y = anchor_top.max(work.top).min(work.bottom - layout.popup_h);
             (clamped_x, clamped_y)
         };
 
+        let base_opacity = self
+            .config
+            .as_ref()
+            .map(|c| c.background_opacity)
+            .unwrap_or(0.8);
         let popup = Box::new(crate::submenu_wnd::SubmenuPopup {
             level,
             folder_path,
             display_items,
             layout,
             highlighted_index: None,
-            non_chain_opacity: self.submenu_cfg.non_chain_item_opacity,
+            layered_alpha: base_opacity,
             dpi: self.dpi,
             toolbar_hwnd: toolbar,
             drop_registered: false,
@@ -741,6 +755,32 @@ impl ToolbarState {
         }
     }
 
+    /// Convert the toolbar-client-coord button rect at `folder_button` (folder index,
+    /// 0-based) to screen coordinates. Returns a zero rect if the index is out of range.
+    fn button_screen_rect(&self, toolbar: HWND, folder_button: usize) -> crate::layout::Rect {
+        use windows::Win32::Graphics::Gdi::ClientToScreen;
+        let Some(btn) = self.buttons.get(folder_button + 1) else {
+            return crate::layout::Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+        };
+        let mut tl = POINT { x: btn.rect.left, y: btn.rect.top };
+        let mut br = POINT { x: btn.rect.right, y: btn.rect.bottom };
+        unsafe {
+            let _ = ClientToScreen(toolbar, &mut tl);
+            let _ = ClientToScreen(toolbar, &mut br);
+        }
+        crate::layout::Rect {
+            left: tl.x,
+            top: tl.y,
+            right: br.x,
+            bottom: br.y,
+        }
+    }
+
     /// Return the work area of the primary monitor (via `SPI_GETWORKAREA`).
     /// A per-monitor variant using `active_target` can replace this in Task 13.
     fn submenu_work_area(&self) -> crate::submenu::WorkArea {
@@ -760,12 +800,6 @@ impl ToolbarState {
     /// Uses [`SUBMENU_ROW_LOGICAL_PX`], which matches `layout::BTN_HEIGHT_LOGICAL_PX`.
     fn submenu_item_px(&self) -> i32 {
         theme::scale(SUBMENU_ROW_LOGICAL_PX, self.dpi)
-    }
-
-    /// DPI-scaled maximum popup width.
-    /// Uses [`SUBMENU_MAX_WIDTH_LOGICAL_PX`].
-    fn submenu_max_width_px(&self) -> i32 {
-        theme::scale(SUBMENU_MAX_WIDTH_LOGICAL_PX, self.dpi)
     }
 
     /// Get the screen rect of a window. Returns a zero rect if hwnd is null.

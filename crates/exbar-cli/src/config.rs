@@ -106,6 +106,9 @@ pub struct SubmenuConfig {
         deserialize_with = "deserialize_hover_buffer"
     )]
     pub hover_buffer_px: u32,
+    /// Reserved for future per-item dimming. Parsed and clamped but not applied
+    /// to the layered-window alpha — all open popups use `config.background_opacity`
+    /// as their uniform layered alpha. Kept in schema for forward-compat.
     #[serde(
         rename = "nonChainItemOpacity",
         default = "default_non_chain_item_opacity",
