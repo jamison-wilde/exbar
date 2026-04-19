@@ -734,14 +734,20 @@ impl IDropTarget_Impl for SubmenuDropTarget_Impl {
                 if idx < 0 {
                     return None;
                 }
-                p.display_items.get(idx as usize).and_then(|item| match item {
-                    crate::submenu::DisplayItem::Subfolder { entry } => Some(entry.path.clone()),
-                    crate::submenu::DisplayItem::Dotdot { parent_path, .. } => {
-                        Some(parent_path.clone())
-                    }
-                    crate::submenu::DisplayItem::ParentReshow { path, .. } => Some(path.clone()),
-                    _ => None,
-                })
+                p.display_items
+                    .get(idx as usize)
+                    .and_then(|item| match item {
+                        crate::submenu::DisplayItem::Subfolder { entry } => {
+                            Some(entry.path.clone())
+                        }
+                        crate::submenu::DisplayItem::Dotdot { parent_path, .. } => {
+                            Some(parent_path.clone())
+                        }
+                        crate::submenu::DisplayItem::ParentReshow { path, .. } => {
+                            Some(path.clone())
+                        }
+                        _ => None,
+                    })
             })
         };
 
