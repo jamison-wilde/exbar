@@ -335,14 +335,6 @@ unsafe extern "system" fn submenu_wndproc(
             let mut ps = PAINTSTRUCT::default();
             let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
             if let Some(popup) = unsafe { popup_state(hwnd) } {
-                // TEMP-DIAG: one log per paint to spot scroll/highlight mismatches.
-                log::debug!(
-                    "WM_PAINT hwnd={hwnd:?} scroll_off={} highlight={:?} visible={} total={}",
-                    popup.scroll_offset,
-                    popup.highlighted_index,
-                    popup.layout.visible_count,
-                    popup.display_items.len()
-                );
                 crate::paint::paint_submenu_popup(
                     hdc,
                     &popup.layout,
@@ -404,12 +396,6 @@ unsafe extern "system" fn submenu_wndproc(
 
             // Only post if direction changed — avoids message spam.
             if popup.last_bandhover_dir != dir {
-                // TEMP-DIAG: log band-hover direction changes to diagnose autoscroll timing.
-                log::debug!(
-                    "band_hover hwnd={hwnd:?} y={y} buffer={} trigger={} dir={dir} can_up={can_up} can_down={can_down}",
-                    popup.layout.buffer_px,
-                    popup.layout.scroll_trigger_px
-                );
                 popup.last_bandhover_dir = dir;
                 unsafe {
                     let _ = PostMessageW(
@@ -523,15 +509,6 @@ unsafe extern "system" fn submenu_wndproc(
             } else {
                 (popup.scroll_offset + (-steps) as usize).min(max_offset)
             };
-            // TEMP-DIAG: log wheel scroll to triangulate offset transitions.
-            log::debug!(
-                "WM_MOUSEWHEEL hwnd={hwnd:?} delta={delta} accum={} old_off={} new_off={} total={} visible={}",
-                popup.scroll_delta_accum,
-                popup.scroll_offset,
-                new_offset,
-                total,
-                visible
-            );
             if new_offset != popup.scroll_offset {
                 popup.scroll_offset = new_offset;
                 // Clear the fractional accumulator at clamp boundaries to avoid
@@ -631,15 +608,6 @@ pub unsafe fn refresh_highlight_from_cursor(hwnd: windows::Win32::Foundation::HW
     } else {
         Some(hit as usize)
     };
-    // TEMP-DIAG: log cursor-recompute after scroll to spot off-by-one in highlight.
-    log::debug!(
-        "refresh_highlight hwnd={hwnd:?} cursor_client=({},{}) hit={hit} old_highlight={:?} new_highlight={:?} scroll_off={}",
-        pt.x,
-        pt.y,
-        popup.highlighted_index,
-        new_highlight,
-        popup.scroll_offset
-    );
     if popup.highlighted_index != new_highlight {
         popup.highlighted_index = new_highlight;
         unsafe {

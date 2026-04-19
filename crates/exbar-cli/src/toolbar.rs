@@ -1096,15 +1096,6 @@ impl ToolbarState {
                             None => any_offscreen = true,
                         }
                     }
-                    // TEMP-DIAG: triangulate highlight/scroll mismatches.
-                    log::debug!(
-                        "set_popup_highlight level={level} old={old:?} new={index:?} \
-                         scroll={} visible={} rects={} any_offscreen={}",
-                        popup.scroll_offset,
-                        popup.layout.visible_count,
-                        rects.len(),
-                        any_offscreen
-                    );
                     if any_offscreen {
                         Action::Full
                     } else if rects.is_empty() {

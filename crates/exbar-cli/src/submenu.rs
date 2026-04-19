@@ -262,6 +262,11 @@ pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuComm
             // Different deeper path (or no deeper level): truncate and open fresh.
             if chain.levels.len() > idx + 1 {
                 chain.levels.truncate(idx + 1);
+                // Reset flow direction — the new deeper subtree should re-evaluate Right
+                // vs Left freshly, not inherit the locked direction from the abandoned
+                // subtree. Fixes: a deep-chain left-flip "sticks" after the user backs
+                // up and hovers a different shallower item.
+                chain.flow = None;
                 cmds.push(CloseDeeperThan { level });
             }
             if chain.levels[idx].highlighted_item != Some(index) {
@@ -1042,6 +1047,60 @@ mod tests_chain {
         assert_eq!(
             opened.map(|p| p.to_string_lossy().to_string()),
             Some("C:\\A\\C".to_string())
+        );
+    }
+
+    #[test]
+    fn flow_resets_when_subtree_truncates() {
+        // Simulate: deep chain forced Left by overflow; user backs up and
+        // hovers a sibling; flow should reset to None so the new subtree can
+        // start fresh with Right.
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: p("C:\\A"),
+                button_center_y: 0,
+                is_recent: false,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: p("C:\\A\\B"),
+                is_dotdot: false,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 2,
+                index: 0,
+                child_path: p("C:\\A\\B\\C"),
+                is_dotdot: false,
+            },
+        );
+        // Caller would set chain.flow = Some(Left) after resolve_flow_direction
+        // at some deep level. Simulate:
+        chain.flow = Some(FlowDir::Left);
+
+        // User backs up to level 1 and hovers a DIFFERENT sibling.
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 2,
+                child_path: p("C:\\A\\X"),
+                is_dotdot: false,
+            },
+        );
+        // Chain truncated + new level opened. Flow should be reset so the
+        // new subtree can re-evaluate.
+        assert!(
+            chain.flow.is_none(),
+            "flow should reset when sibling hover truncates deeper subtree"
         );
     }
 }
