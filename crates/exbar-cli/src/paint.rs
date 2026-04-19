@@ -4,10 +4,9 @@
 
 use windows::Win32::Foundation::{COLORREF, HWND, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DEFAULT_GUI_FONT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT,
-    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect,
-    GetStockObject, GetTextExtentPoint32W, HDC, PAINTSTRUCT, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DEFAULT_GUI_FONT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject,
+    GetTextExtentPoint32W, HDC, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
@@ -363,7 +362,7 @@ fn display_item_label(item: &DisplayItem) -> String {
     match item {
         DisplayItem::Subfolder { entry } => format!("\u{1F4C1}  {}", entry.name),
         DisplayItem::Dotdot { parent_name, .. } => format!("\u{2B06}  {}", parent_name),
-        DisplayItem::ParentReshow { name, .. } => format!("\u{2022}  \u{1F4C1}  {}", name),
+        DisplayItem::ParentReshow { name, .. } => format!("\u{1F4C1}  {}", name),
         DisplayItem::Ellipsis => "\u{2026}(more)".to_string(),
         DisplayItem::Empty { message } => message.clone(),
     }
@@ -375,10 +374,10 @@ fn display_item_label(item: &DisplayItem) -> String {
 /// Returns the measured max text width in physical pixels (without padding).
 /// Caller must add left/right padding before using this as `max_width_px`.
 pub fn measure_display_items_width(display_items: &[DisplayItem], dpi: u32) -> i32 {
+    use windows::Win32::Foundation::RECT as WinRect;
     use windows::Win32::Graphics::Gdi::{
         DT_CALCRECT, DT_SINGLELINE, GetDC, GetStockObject, ReleaseDC, SelectObject,
     };
-    use windows::Win32::Foundation::RECT as WinRect;
 
     let hdc = unsafe { GetDC(None) };
     if hdc.is_invalid() {
@@ -500,7 +499,8 @@ pub fn paint_submenu_popup(
         let label = display_item_label(item);
         let (is_disabled, has_children) = match item {
             DisplayItem::Subfolder { entry } => (false, entry.has_children),
-            DisplayItem::Dotdot { .. } | DisplayItem::ParentReshow { .. } => (false, false),
+            DisplayItem::Dotdot { .. } => (false, true), // Dotdot always opens parent dir submenu
+            DisplayItem::ParentReshow { .. } => (false, false),
             DisplayItem::Ellipsis | DisplayItem::Empty { .. } => (true, false),
         };
 

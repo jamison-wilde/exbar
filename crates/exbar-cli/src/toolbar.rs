@@ -744,14 +744,24 @@ impl ToolbarState {
         if h.0.is_null() {
             return;
         }
-        // Update the per-popup state and trigger a repaint.
-        unsafe {
-            if let Some(popup) = crate::submenu_wnd::popup_state(h) {
-                popup.highlighted_index = index;
+        // Only invalidate when the highlight index actually changes — every pixel
+        // of mouse motion previously triggered a full repaint cycle with a
+        // background-erase flash.
+        let changed = unsafe {
+            match crate::submenu_wnd::popup_state(h) {
+                Some(popup) if popup.highlighted_index != index => {
+                    popup.highlighted_index = index;
+                    true
+                }
+                _ => false,
             }
-        }
-        unsafe {
-            let _ = InvalidateRect(Some(h), None, true);
+        };
+        if changed {
+            unsafe {
+                // erase=false: WM_PAINT fills the full client area first, so the
+                // OS background-erase pass is unnecessary and causes flicker.
+                let _ = InvalidateRect(Some(h), None, false);
+            }
         }
     }
 
@@ -767,8 +777,14 @@ impl ToolbarState {
                 bottom: 0,
             };
         };
-        let mut tl = POINT { x: btn.rect.left, y: btn.rect.top };
-        let mut br = POINT { x: btn.rect.right, y: btn.rect.bottom };
+        let mut tl = POINT {
+            x: btn.rect.left,
+            y: btn.rect.top,
+        };
+        let mut br = POINT {
+            x: btn.rect.right,
+            y: btn.rect.bottom,
+        };
         unsafe {
             let _ = ClientToScreen(toolbar, &mut tl);
             let _ = ClientToScreen(toolbar, &mut br);
