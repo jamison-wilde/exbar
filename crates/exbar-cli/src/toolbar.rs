@@ -156,6 +156,13 @@ pub(crate) struct ToolbarState {
     /// True while the 30 ms submenu cursor-tracking timer is armed.
     /// Prevents double-arming if `open_popup_level` is called rapidly.
     pub(crate) submenu_timer_active: bool,
+    /// Tracks whether the cursor was inside any popup on the PREVIOUS safety-timer tick.
+    /// Used to emit `CursorExit`/`CursorReenter` only on transitions, not every tick.
+    /// Initialized to `true` so that the first tick with cursor outside emits `CursorExit`.
+    pub(crate) cursor_was_inside_popup: bool,
+    /// Tracks whether any mouse button was pressed on the PREVIOUS safety-timer tick.
+    /// Used to detect a fresh button-down for the click-outside-dismiss path.
+    pub(crate) prev_mouse_button_down: bool,
 }
 
 impl ToolbarState {
@@ -224,6 +231,8 @@ impl ToolbarState {
             },
             last_press_instant: None,
             submenu_timer_active: false,
+            cursor_was_inside_popup: true,
+            prev_mouse_button_down: false,
         }
     }
 }
@@ -591,7 +600,9 @@ impl ToolbarState {
         let (sx, sy) = if level == 1 {
             let btn = self.last_button_screen_rect;
             let buffer = buffer_px;
-            let x = btn.left - buffer; // shift so inner items align with button.left
+            // Empirically tuned: shift by buffer/2 (5px at default 10px buffer) rather than
+            // the full buffer_px, which over-corrects for the toolbar button's internal padding.
+            let x = btn.left - buffer / 2;
             let y = match reshow {
                 // Popup opens downward: reshow row (first) should align with button top.
                 ReshowPosition::First => btn.top - buffer,
@@ -692,6 +703,9 @@ impl ToolbarState {
 
         // Arm the cursor-tracking safety timer if this is the first popup to open.
         if !self.submenu_timer_active {
+            // Fresh chain: cursor is on the button that triggered the open, so we
+            // start "inside" to avoid an immediate spurious CursorExit on the first tick.
+            self.cursor_was_inside_popup = true;
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
                     Some(toolbar),

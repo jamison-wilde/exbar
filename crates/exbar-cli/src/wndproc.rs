@@ -624,20 +624,24 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 LRESULT(0)
             } else if timer_id == crate::toolbar::TIMER_SUBMENU_SAFETY {
                 // Cursor-tracking safety tick — fires at 30 ms while any popup is open.
+                //
+                // Ordering is important (see fix notes in CLAUDE.md):
+                //   1. Escape check — immediate dismiss.
+                //   2. Cursor poll — compute inside_any.
+                //   3. Mouse-button check — instant dismiss if newly pressed outside.
+                //   4. Transition-only cursor events (CursorExit / CursorReenter) — NOT every tick.
+                //   5. SafetyTick — always emitted, drives the dismiss countdown.
+                //   6. Kill timer if chain closed.
                 if let Some(state) = unsafe { toolbar_state(hwnd) } {
-                    // Poll Escape — WS_EX_NOACTIVATE means WM_KEYDOWN rarely arrives
-                    // at the popup; polling here is the reliable dismissal path.
                     use windows::Win32::UI::Input::KeyboardAndMouse::{
-                        GetAsyncKeyState, VK_ESCAPE,
+                        GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RBUTTON,
                     };
-                    let esc_pressed = unsafe {
-                        (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16) & 0x8000 != 0
-                    };
+
+                    // 1. Escape — WS_EX_NOACTIVATE means WM_KEYDOWN rarely arrives; poll here.
+                    let esc_pressed =
+                        unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16) & 0x8000 != 0 };
                     if esc_pressed {
-                        state.execute_submenu_event(
-                            hwnd,
-                            crate::submenu::SubmenuEvent::Dismiss,
-                        );
+                        state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Dismiss);
                         unsafe {
                             let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_SAFETY);
                         }
@@ -645,24 +649,48 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         return LRESULT(0);
                     }
 
+                    // 2. Cursor poll.
                     let mut cursor = POINT::default();
                     let cursor_ok = unsafe { GetCursorPos(&mut cursor).is_ok() };
-
                     let inside_any =
                         cursor_ok && cursor_inside_any_padded_popup(state, cursor.x, cursor.y);
 
-                    let cursor_event = if inside_any {
-                        crate::submenu::SubmenuEvent::CursorReenter
-                    } else {
-                        crate::submenu::SubmenuEvent::CursorExit
-                    };
-                    state.execute_submenu_event(hwnd, cursor_event);
+                    // 3. Mouse-button check — instant dismiss on a fresh click outside all popups.
+                    let lb =
+                        unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16) & 0x8000 != 0 };
+                    let rb =
+                        unsafe { (GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16) & 0x8000 != 0 };
+                    let btn_now = lb || rb;
+                    let btn_just_pressed = btn_now && !state.prev_mouse_button_down;
+                    state.prev_mouse_button_down = btn_now;
+
+                    if btn_just_pressed && !inside_any {
+                        state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Dismiss);
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_SAFETY);
+                        }
+                        state.submenu_timer_active = false;
+                        return LRESULT(0);
+                    }
+
+                    // 4. Transition-only cursor events.
+                    // Emitting CursorExit on every tick was resetting dismiss_pending_ticks=5
+                    // each tick, preventing the countdown from ever reaching zero.
+                    if inside_any != state.cursor_was_inside_popup {
+                        let ev = if inside_any {
+                            crate::submenu::SubmenuEvent::CursorReenter
+                        } else {
+                            crate::submenu::SubmenuEvent::CursorExit
+                        };
+                        state.execute_submenu_event(hwnd, ev);
+                        state.cursor_was_inside_popup = inside_any;
+                    }
+
+                    // 5. SafetyTick — always; drives the dismiss countdown.
                     state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::SafetyTick);
 
-                    // If CloseAll was dispatched, the chain is now empty — kill timer here
-                    // too (belt-and-suspenders; maybe_kill_safety_timer already ran via
-                    // close_all_popups, but the flag may still be set if chain cleared by
-                    // a different code path that bypassed close_all_popups).
+                    // 6. Kill timer if chain closed (belt-and-suspenders alongside
+                    //    maybe_kill_safety_timer which runs inside close_all_popups).
                     if !state.submenu_chain.is_open() && state.submenu_timer_active {
                         unsafe {
                             let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_SAFETY);
