@@ -43,6 +43,10 @@ pub const WM_USER_SUBMENU_CLICK: u32 = 0x040B; // WM_USER + 11
 pub const WM_USER_SUBMENU_DISMISS: u32 = 0x040C; // WM_USER + 12
 /// Safety timer tick for the submenu dismiss countdown (~30 ms period).
 pub const WM_USER_SUBMENU_SAFETY_TICK: u32 = 0x040D; // WM_USER + 13
+/// Posted to the toolbar HWND when the cursor enters/leaves a scroll band
+/// inside a popup. `WPARAM` = popup HWND as usize; `LPARAM` = direction
+/// (-1 = up band, 0 = none/cancel, 1 = down band).
+pub const WM_USER_SUBMENU_BANDHOVER: u32 = 0x040F; // WM_USER + 15
 
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
@@ -707,6 +711,36 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
+        x if x == WM_USER_SUBMENU_BANDHOVER => {
+            let popup_hwnd = windows::Win32::Foundation::HWND(wparam.0 as *mut _);
+            let dir = lparam.0 as i32;
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                if dir == 0 {
+                    // Cancel autoscroll.
+                    if state.autoscroll_dir != 0 {
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_AUTOSCROLL);
+                        }
+                        state.autoscroll_popup = None;
+                        state.autoscroll_dir = 0;
+                    }
+                } else {
+                    // Arm (or re-target) autoscroll.
+                    state.autoscroll_popup = Some(popup_hwnd);
+                    state.autoscroll_dir = dir;
+                    unsafe {
+                        let _ = SetTimer(
+                            Some(hwnd),
+                            crate::toolbar::TIMER_SUBMENU_AUTOSCROLL,
+                            150,
+                            None,
+                        );
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
         WM_TIMER => {
             let timer_id = wparam.0;
             if timer_id == crate::toolbar::TIMER_REPOSITION {
@@ -891,6 +925,53 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             is_recent,
                         },
                     );
+                }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_SUBMENU_AUTOSCROLL {
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    let Some(popup_hwnd) = state.autoscroll_popup else {
+                        return LRESULT(0);
+                    };
+                    let dir = state.autoscroll_dir;
+                    if dir == 0 {
+                        return LRESULT(0);
+                    }
+                    // Advance scroll on the target popup by 1 step, respecting clamps.
+                    let done = unsafe {
+                        match crate::submenu_wnd::popup_state(popup_hwnd) {
+                            Some(popup) => {
+                                let total = popup.display_items.len();
+                                let visible = popup.layout.visible_count;
+                                if total <= visible {
+                                    true
+                                } else {
+                                    let max_offset = total - visible;
+                                    let new_offset = if dir < 0 {
+                                        popup.scroll_offset.saturating_sub(1)
+                                    } else {
+                                        (popup.scroll_offset + 1).min(max_offset)
+                                    };
+                                    if new_offset != popup.scroll_offset {
+                                        popup.scroll_offset = new_offset;
+                                        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                                            Some(popup_hwnd),
+                                            None,
+                                            false,
+                                        );
+                                    }
+                                    new_offset == 0 || new_offset == max_offset
+                                }
+                            }
+                            None => true,
+                        }
+                    };
+                    if done {
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_AUTOSCROLL);
+                        }
+                        state.autoscroll_popup = None;
+                        state.autoscroll_dir = 0;
+                    }
                 }
                 LRESULT(0)
             } else if timer_id == crate::toolbar::TIMER_DWELL_TICK {

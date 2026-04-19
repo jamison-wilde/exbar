@@ -94,6 +94,10 @@ pub(crate) const TIMER_DWELL_TICK: usize = 5;
 /// One-shot timer that fires after springOpenDelayMs ms of cursor rest on a
 /// folder button, opening its submenu without requiring a mouse press.
 pub(crate) const TIMER_HOVER_OPEN: usize = 6;
+/// Timer ID for hover-driven auto-scroll inside a submenu popup. Fires every
+/// ~150 ms while the cursor rests in a scrollable band (top or bottom buffer
+/// of a popup with off-screen items).
+pub(crate) const TIMER_SUBMENU_AUTOSCROLL: usize = 7;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -182,6 +186,10 @@ pub(crate) struct ToolbarState {
     pub(crate) recent_debounce_pending: bool,
     /// Button index the hover-open timer is waiting on. `None` when no wait is active.
     pub(crate) hover_open_pending_button: Option<usize>,
+    /// HWND of the popup currently being auto-scrolled (`None` = no autoscroll).
+    pub(crate) autoscroll_popup: Option<HWND>,
+    /// Auto-scroll direction: -1 = scroll up (decrease offset), +1 = scroll down. 0 = inactive.
+    pub(crate) autoscroll_dir: i32,
 }
 
 impl ToolbarState {
@@ -264,6 +272,8 @@ impl ToolbarState {
             recent_dirty: false,
             recent_debounce_pending: false,
             hover_open_pending_button: None,
+            autoscroll_popup: None,
+            autoscroll_dir: 0,
         }
     }
 }
@@ -937,6 +947,8 @@ impl ToolbarState {
             toolbar_hwnd: toolbar,
             drop_registered: false,
             scroll_offset: 0,
+            scroll_delta_accum: 0,
+            last_bandhover_dir: 0,
         });
 
         let popup_hwnd =
@@ -990,6 +1002,17 @@ impl ToolbarState {
             if !h.0.is_null() {
                 crate::submenu_wnd::destroy_popup(h);
             }
+        }
+        // Cancel any active autoscroll timer — the target popup is gone.
+        if self.autoscroll_dir != 0 {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                    Some(toolbar),
+                    crate::toolbar::TIMER_SUBMENU_AUTOSCROLL,
+                );
+            }
+            self.autoscroll_popup = None;
+            self.autoscroll_dir = 0;
         }
         self.maybe_kill_safety_timer(toolbar);
     }
