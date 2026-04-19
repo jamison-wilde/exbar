@@ -85,6 +85,7 @@
 
 pub mod actions;
 pub mod clipboard;
+pub mod clock;
 pub mod config;
 pub mod contextmenu;
 pub mod dialog_nav;

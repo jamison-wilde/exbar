@@ -3,6 +3,7 @@
 //! only under `#[cfg(test)]`.
 
 use crate::clipboard::{Clipboard, test_mocks::MockClipboard};
+use crate::clock::{Clock, test_mocks::MockClock};
 use crate::config::{Config, ConfigStore, FolderEntry, FolderKind, test_mocks::MockConfigStore};
 use crate::dialog_nav::{DialogNavigator, test_mocks::MockDialogNavigator};
 use crate::dragdrop::{FileOperator, test_mocks::MockFileOp};
@@ -27,6 +28,13 @@ pub struct ClipArc(pub Arc<MockClipboard>);
 impl Clipboard for ClipArc {
     fn set_text(&self, t: &str) -> ExbarResult<()> {
         self.0.set_text(t)
+    }
+}
+#[allow(dead_code)]
+pub struct ClockArc(pub Arc<MockClock>);
+impl Clock for ClockArc {
+    fn now_unix_ms(&self) -> u64 {
+        self.0.now_unix_ms()
     }
 }
 pub struct CfgArc(pub Arc<MockConfigStore>);
