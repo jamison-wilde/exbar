@@ -17,10 +17,11 @@ use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    GWLP_USERDATA, GetWindowLongPtrW, IDC_ARROW, LWA_ALPHA, LoadCursorW, PostMessageW,
-    RegisterClassExW, SW_SHOWNOACTIVATE, SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow,
-    WM_DESTROY, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, LoadCursorW,
+    PostMessageW, RegisterClassExW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DESTROY,
+    WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows_core::PCWSTR;
 
@@ -125,6 +126,15 @@ pub fn create_popup(
     // SubmenuDropTarget::new after window creation (option A).
     let level_at_creation = popup.level;
 
+    log::info!(
+        "submenu: create_popup level={} size={}x{} at screen=({},{})",
+        popup.level,
+        popup.layout.popup_w,
+        popup.layout.popup_h,
+        screen_x,
+        screen_y
+    );
+
     // SAFETY: Box::into_raw transfers ownership to the CreateWindowExW
     // lpCreateParams slot, which Win32 delivers to WM_NCCREATE as
     // cs.lpCreateParams. If window creation fails the Err branch below
@@ -163,6 +173,21 @@ pub fn create_popup(
             }
             unsafe {
                 crate::warn_on_err!(ShowWindow(hwnd, SW_SHOWNOACTIVATE).ok());
+            }
+            // Promote popup to topmost to avoid being rendered behind Explorer's
+            // WinUI 3 XAML content (see CLAUDE.md gotcha about HWND_TOPMOST).
+            // SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE ensures the popup keeps
+            // its requested position and size without affecting input focus.
+            unsafe {
+                crate::warn_on_err!(SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                ));
             }
             // Register the OLE drop target so drag-hover events can reach the
             // toolbar's wndproc via WM_USER_SUBMENU_HOVER. RegisterDragDrop
