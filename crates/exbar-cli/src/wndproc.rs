@@ -401,6 +401,16 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             }
                             _ => {}
                         }
+                    } else if state.buttons[idx].folder.kind == crate::config::FolderKind::Recent {
+                        // Recent button: trimmed menu — only Remove (= disable Recent).
+                        let items = [crate::contextmenu::MenuItem {
+                            id: MENU_ID_REMOVE,
+                            label: "Remove",
+                        }];
+                        let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
+                        if chosen == MENU_ID_REMOVE {
+                            handle_toggle_recent(state, hwnd);
+                        }
                     } else {
                         let items = [
                             crate::contextmenu::MenuItem {
