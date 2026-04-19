@@ -13,10 +13,9 @@ use std::sync::Once;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_BTNFACE, CreateSolidBrush, DeleteObject, EndPaint, FillRect, HGDIOBJ,
+    BeginPaint, COLOR_BTNFACE, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
     PAINTSTRUCT,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, IDC_ARROW, LWA_ALPHA, LoadCursorW,
@@ -27,6 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_core::PCWSTR;
 
 use crate::layout::SubmenuLayout;
+use crate::lifecycle;
 use crate::submenu::DisplayItem;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ fn ensure_class_registered() {
             lpfnWndProc: Some(submenu_wndproc),
             cbClsExtra: 0,
             cbWndExtra: 0,
-            hInstance: exe_hinstance(),
+            hInstance: lifecycle::exe_hinstance(),
             hCursor: hcursor,
             hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(std::ptr::null_mut()),
             lpszClassName: PCWSTR(class_wide.as_ptr()),
@@ -104,7 +104,7 @@ fn ensure_class_registered() {
 /// - `popup` — fully initialised [`SubmenuPopup`] describing this level.
 /// - `screen_x`, `screen_y` — top-left corner of the popup in screen coords.
 pub fn create_popup(
-    toolbar_hwnd: HWND,
+    _toolbar_hwnd: HWND,
     popup: Box<SubmenuPopup>,
     screen_x: i32,
     screen_y: i32,
@@ -135,7 +135,7 @@ pub fn create_popup(
             h,
             None, // no owner — independent top-level popup
             None,
-            Some(exe_hinstance()),
+            Some(lifecycle::exe_hinstance()),
             Some(boxed_ptr as *const std::ffi::c_void),
         )
     };
@@ -154,7 +154,6 @@ pub fn create_popup(
             unsafe {
                 crate::warn_on_err!(ShowWindow(hwnd, SW_SHOWNOACTIVATE).ok());
             }
-            let _ = toolbar_hwnd; // stored in SubmenuPopup; referenced here for clarity
             hwnd
         }
         Err(e) => {
@@ -207,6 +206,7 @@ pub fn destroy_popup(hwnd: HWND) {
 ///   by [`submenu_wndproc`] during `WM_NCCREATE`).
 /// - Caller must be on the message-pump thread — Win32's single-threaded
 ///   message dispatch is the synchronisation boundary; no lock is taken.
+#[allow(dead_code)] // Task 10: used by paint_submenu_popup when real paint impl arrives
 pub(crate) unsafe fn popup_state<'a>(hwnd: HWND) -> Option<&'a mut SubmenuPopup> {
     // SAFETY: GetWindowLongPtrW returns the value written by SetWindowLongPtrW
     // in WM_NCCREATE; we stored a Box::into_raw pointer there.
@@ -239,7 +239,7 @@ unsafe fn stub_fill_rect(hwnd: HWND, hdc: windows::Win32::Graphics::Gdi::HDC) {
     let bg_brush = unsafe { CreateSolidBrush(bg_color) };
     unsafe { FillRect(hdc, &client_rect, bg_brush) };
     unsafe {
-        let _ = DeleteObject(HGDIOBJ(bg_brush.0));
+        let _ = DeleteObject(bg_brush.into());
     }
 }
 
@@ -277,28 +277,9 @@ unsafe extern "system" fn submenu_wndproc(
             let mut ps = PAINTSTRUCT::default();
             let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
 
-            // Call the (currently stub) submenu paint function.
-            if let Some(state) = unsafe { popup_state(hwnd) } {
-                crate::paint::paint_submenu_popup(
-                    hdc,
-                    &state.layout,
-                    &state.display_items,
-                    state.highlighted_index,
-                    state.dpi,
-                );
-
-                // Stub fill so the popup renders something visible until Task 10
-                // implements the full paint body. Use a system color to pick up
-                // the current theme automatically.
-                unsafe {
-                    stub_fill_rect(hwnd, hdc);
-                }
-            } else {
-                // State not yet available (shouldn't normally happen post-NCCREATE).
-                unsafe {
-                    stub_fill_rect(hwnd, hdc);
-                }
-            }
+            // Task 9: stub FillRect only. Task 10 replaces this call (not adds alongside!)
+            // with paint::paint_submenu_popup(hdc, &popup.layout, ...) once that fn has a real body.
+            unsafe { stub_fill_rect(hwnd, hdc) };
 
             unsafe {
                 let _ = EndPaint(hwnd, &ps);
@@ -330,11 +311,4 @@ unsafe extern "system" fn submenu_wndproc(
 /// Encode `s` as a null-terminated UTF-16 vector suitable for `PCWSTR(v.as_ptr())`.
 fn wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// Returns the `HINSTANCE` for the running executable.
-fn exe_hinstance() -> windows::Win32::Foundation::HINSTANCE {
-    use windows::Win32::Foundation::HMODULE;
-    let hmod = unsafe { GetModuleHandleW(PCWSTR::null()) }.unwrap_or(HMODULE(std::ptr::null_mut()));
-    windows::Win32::Foundation::HINSTANCE(hmod.0)
 }

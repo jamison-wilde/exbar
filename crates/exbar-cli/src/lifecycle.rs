@@ -11,8 +11,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, IDC_ARROW, LWA_ALPHA, LoadCursorW, RegisterClassExW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowPos, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowPos,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::config::Config;
