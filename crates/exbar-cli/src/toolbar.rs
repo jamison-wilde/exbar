@@ -545,6 +545,16 @@ impl ToolbarState {
         }
     }
 
+    /// Hook called by drop targets after a successful file operation into `dest`.
+    /// Emits `ActionInFolder` through the tracker adapter, which commits the
+    /// destination to the recent list immediately (regardless of dwell).
+    pub(crate) fn on_drop_committed(&mut self, toolbar: HWND, dest: std::path::PathBuf) {
+        self.execute_tracker_event(
+            toolbar,
+            crate::recent_tracker::TrackerEvent::ActionInFolder(dest),
+        );
+    }
+
     fn dispatch_tracker_command(
         &mut self,
         toolbar: HWND,
