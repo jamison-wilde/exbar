@@ -4,18 +4,33 @@ All notable changes to Exbar are documented here. Format based on [Keep a Change
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-04-19
+
 ### Added
 
-- **Spring-open submenus** for every folder button. Drag-hover or long-press (500 ms, configurable) opens a vertical popup listing that folder's subdirectories, nestable up to 5 levels deep. Drop files on any item to move/copy into that folder. `..` navigation in ancestor mode for quick up-traversal. Translucent buffer zone around each popup provides cursor forgiveness on near-misses. Cursor-tracking safety timer dismisses the chain ~150 ms after the cursor leaves all popups. Click / Ctrl-click a submenu item to navigate / open in new tab; drops invoke move/copy via `IFileOperation`. File-dialog mode degrades to `open_in_new_window`. Configurable via new `submenu` block in `~/.exbar/config.json` (`springOpenDelayMs`, `hoverBufferPx`, `nonChainItemOpacity`).
-- **Recent Folders** (opt-in) — tracks folders where you spend time or take action. Enable via right-click on the `+` button → `Enable Recent Folders`. A dedicated 🕘 Recent button appears on the toolbar whose submenu lists recently-used paths (default 5, max 20, configurable). Dwell + action hybrid detection: a folder commits after `dwellSecondsToTrack` seconds (default 10 s) of being the active tab in the foreground Explorer window, OR immediately when you drop files into it via exbar. Configurable exclusion paths (prefix match with `\` boundary). `recents.json` stored under `~/.exbar/`; deleted atomically when Recent is disabled (privacy-preserving). New config block `recent` with `enabled`, `maxCount`, `includePinned`, `dwellSecondsToTrack`, `excludedPaths`. Right-clicking the 🕘 Recent button shows only `Remove`, which disables Recent and deletes `recents.json`.
-
-## [1.2.0] - 2026-04-17
+- **Recent Folders** (opt-in, right click on '+') — tracks folders where you spend time or take action. Enable via right-click on the `+` button → `Enable Recent Folders`. A dedicated 🕘 Recent button appears on the toolbar whose submenu lists recently-used paths (default 5, max 20, configurable). Dwell + action hybrid detection: a folder commits after `dwellSecondsToTrack` seconds (default 10 s) of being the active tab in the foreground Explorer window, OR immediately when you drop files into it via exbar. Configurable exclusion paths (prefix match with `\` boundary). `recents.json` stored under `~/.exbar/`; deleted atomically when Recent is disabled (privacy-preserving). New config block `recent` with `enabled`, `maxCount`, `includePinned`, `dwellSecondsToTrack`, `excludedPaths`. Right-clicking the 🕘 Recent button shows only `Remove`, which disables Recent and deletes `recents.json`. The Recent submenu sits entirely above or below the toolbar (never covering the 🕘 button), and hovering a recent folder enables `..` upward navigation from there.
+- **Spring-open submenus** for every folder button. Long-press (500 ms, configurable) OR long-hover (1200 ms, configurable) opens a vertical popup listing that folder's subdirectories, nestable up to 7 levels deep. Drop files on any item to move/copy into that folder. `..` navigation in ancestor mode for quick up-traversal. Translucent buffer zone around each popup provides cursor forgiveness; the toolbar-facing buffer collapses to 0 at the screen edge so items sit flush against the button. Flow direction (left/right for nested popups) resolves per-subtree: hovering back up a shallower level re-evaluates fresh for the new subtree. Cursor-tracking safety timer dismisses the chain ~150 ms after the cursor leaves all popups; clicking outside OR pressing Esc dismisses immediately. Click / Ctrl-click a submenu item to navigate / open in new tab; drops invoke move/copy via `IFileOperation`. File-dialog mode degrades to `open_in_new_window`. New `submenu` block in `~/.exbar/config.json` (`springOpenDelayMs`, `longHoverOpenMs`, `hoverBufferPx`, `nonChainItemOpacity`).
+- **Scroll support for large submenus.** Popups clamp their height to the monitor work area. Mouse wheel scrolls within the popup (with touchpad sub-WHEEL_DELTA accumulation); ▲ / ▼ glyphs at the top / bottom edges indicate more items available. Hovering in the scroll-trigger band at top or bottom auto-scrolls the list at ~150 ms / item. Hit-test, drop-target, and paint all correctly handle the scrolled offset.
 
 ### Changed
-- **Persisted state moved to `~/.exbar/`.** Previously two files at the home root: `~/.exbar.json` (config) and `~/.exbar-pos.json` (position). Now one folder: `~/.exbar/config.json` and `~/.exbar/position.json`. The hook auto-migrates the legacy files on first run after upgrade — no manual intervention needed.
+
+- **Persisted state moved to `~/.exbar/`.** Previously two files at the home root: `~/.exbar.json` (config) and `~/.exbar-pos.json` (position). Now one folder: `~/.exbar/config.json` and `~/.exbar/position.json`. The hook auto-migrates the legacy files on first run after upgrade — no manual intervention needed. Recent Folders tracking (when enabled) adds `~/.exbar/recents.json`.
+- **`FolderEntry.kind`** added to config schema (optional; `"Folder"` default, also fall-back for unknown values). The Recent pseudo-button uses `"kind": "Recent"`.
+- **The `+` button's folder picker** now opens at the active Explorer tab's current folder instead of always `%SystemDrive%\`.
+- **Drop-target resolution** reads live toolbar state on each drop event, so newly-added folder buttons become valid drop targets immediately (previously required toolbar recreation to register).
 
 ### Fixed
+
 - Cursor no longer disappears over the toolbar after committing an inline rename. Root cause: the toolbar window class didn't set `hCursor`, so when the rename `EDIT` child released the cursor, `DefWindowProc` had no class cursor to fall back on. Now uses `IDC_ARROW` as the class cursor.
+- **Desktop foreground hides the toolbar.** Clicking the desktop (`Progman` / `WorkerW` in explorer.exe) previously left the toolbar visible on top of the wallpaper. Now explicitly hides.
+- **Reposition skips when Explorer is minimized.** `IsIconic` check short-circuits `reposition_and_show` (with a defence-in-depth origin-sentinel check). Previously the 250 ms LOCATIONCHANGE timer would re-position the toolbar to the minimized-window sentinel origin and show it at the work-area top-left.
+- **Hover-open no longer races right-click context menus.** `TIMER_HOVER_OPEN` is cancelled at `WM_RBUTTONDOWN` so right-click always pre-empts pending hover-open. Hover-open also uses a distinct `longHoverOpenMs` (default 1200 ms) so accidental brief hovers don't spawn a submenu.
+- **Highlighted item under cursor tracks correctly across scroll.** `set_popup_highlight` maps display-items index → visible-window index before partial invalidation; out-of-view indices fall back to full popup invalidation. `refresh_highlight_from_cursor` recomputes after each scroll change.
+- **Cursor on the triggering toolbar button counts as "inside" the submenu chain.** Prevents immediate dismissal when the Recent submenu opens above or below the button (no overlap).
+
+### Removed
+
+- Legacy flat state paths (`~/.exbar.json`, `~/.exbar-pos.json`) are no longer read after migration. The hook migrates on first start post-upgrade.
 
 ## [1.1.0] - 2026-04-17
 
@@ -50,5 +65,6 @@ First public release.
 
 [Unreleased]: https://github.com/jamison-wilde/exbar/compare/v1.2.0...HEAD
 [1.2.0]: https://github.com/jamison-wilde/exbar/compare/v1.1.0...v1.2.0
+
 [1.1.0]: https://github.com/jamison-wilde/exbar/releases/tag/v1.1.0
 [1.0.0]: https://github.com/jamison-wilde/exbar/releases/tag/v1.0.0

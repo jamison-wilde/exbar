@@ -44,7 +44,15 @@ exbar/
 │       │   ├── paths.rs                # Filesystem layout (~/.exbar/) + one-shot legacy migration
 │       │   ├── theme.rs                # DPI scale, dark-mode detection
 │       │   ├── error.rs                # ExbarError + ExbarResult (SP5)
-│       │   └── log.rs                  # FileLogger (log crate) → %TEMP%\exbar.log (SP5)
+│       │   ├── log.rs                  # FileLogger (log crate) → %TEMP%\exbar.log (SP5)
+│       │   ├── path_norm.rs            # Pure path normalization + prefix-exclusion match
+│       │   ├── submenu.rs              # Pure chain-of-popups state machine + direction/display-list
+│       │   ├── subfolder_enum.rs       # SubfolderSource trait + Win32 impl (read_dir + ▸ probe)
+│       │   ├── submenu_wnd.rs          # Submenu popup HWND lifecycle (WS_EX_LAYERED + IDropTarget)
+│       │   ├── recent_list.rs          # Pure LRU ops for recent folders (push/dedup/trim/exclude)
+│       │   ├── recent_tracker.rs       # Pure dwell+action state machine for Recent Folders
+│       │   ├── recent_store.rs         # RecentStore trait + JsonRecentStore → ~/.exbar/recents.json
+│       │   ├── clock.rs                # Clock trait + SystemClock + MockClock (time-source seam)
 │       │   └── bin/uia_spike.rs        # Diagnostic: dump UIA tree of a live file dialog (kept for future selector changes)
 │       ├── tests/                      # integration tests
 │       └── wix/
@@ -62,7 +70,7 @@ exbar/
 All commands assume `cargo` is on PATH (`export PATH="$HOME/.cargo/bin:$PATH"` in git-bash).
 
 - **Build:** `cargo build` (dev) or `cargo build --release`
-- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 187 tests across 28 modules
+- **Run unit tests:** `cargo test` (or `cargo test -p exbar-cli`) — 290+ tests across ~36 modules
 - **Build only the CLI:** `cargo build --release -p exbar-cli` (faster iteration)
 - **Run the CLI:** `./target/release/exbar.exe <install|uninstall|status|hook>`
 - **Build MSI:** `./scripts/build-msi.sh` (requires WiX v7 installed — see "MSI installer" section)
@@ -114,7 +122,11 @@ Pointer and rename interactions are split into pure state-machine modules and th
 
 - `pointer.rs` — `PointerState`, `PointerEvent`, `PointerCommand`, `transition(state, event) → (state, Vec<command>)`. No Win32.
 - `rename.rs` — `RenameState`, `RenameEvent`, `RenameAction`, `transition(...)`. No Win32.
-- `toolbar.rs::execute_pointer_command` / `execute_rename_event` — the adapters. Translate `WM_*` messages to events, call `transition`, dispatch returned commands against Win32 + trait seams.
+- `submenu.rs` — `SubmenuChain`, `SubmenuEvent`, `SubmenuCommand`, `transition(...)`. No Win32.
+- `recent_tracker.rs` — `TrackerState`, `TrackerEvent`, `TrackerCommand`, `transition(...)`. No Win32.
+- `recent_list.rs` — `push`, `for_display` — LRU mutations, no time/IO; adapter supplies `now_unix_ms` via `Clock` trait.
+- `path_norm.rs` — Windows path normalization + prefix-exclusion match (no IO).
+- `toolbar.rs::execute_pointer_command` / `execute_rename_event` / `execute_submenu_event` / `execute_tracker_event` — the adapters. Translate `WM_*` messages or foreground events to events, call `transition`, dispatch returned commands against Win32 + trait seams.
 
 Future interaction subsystems (context-menu controller, drag-reorder commit, etc.) should follow the same split.
 
@@ -125,14 +137,17 @@ All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` 
 | Trait | Production impl | Used for |
 |---|---|---|
 | `shell_windows::ShellBrowser` | `Win32Shell` | Explorer navigation (`BrowseObject`, `open_in_new_tab`, `open_in_new_window`) |
-| `picker::FolderPicker` | `Win32Picker` | `IFileOpenDialog` folder picker |
+| `picker::FolderPicker` | `Win32Picker` | `IFileOpenDialog` folder picker (accepts optional start folder) |
 | `dragdrop::FileOperator` | `Win32FileOp` | `IFileOperation` move/copy |
 | `clipboard::Clipboard` | `Win32Clipboard` | `OleClipboard` text writes |
 | `config::ConfigStore` | `JsonFileStore` | `~/.exbar/config.json` load/save |
 | `dialog_nav::DialogNavigator` | `KeybdDialogNavigator` | Ctrl+L keyboard injection into file dialogs |
 | `visibility::DefViewProbe` | `Win32DefViewProbe` | Detects `SHELLDLL_DefView` descendants to recognise file dialogs |
+| `subfolder_enum::SubfolderSource` | `Win32SubfolderSource` | Directory enumeration + ▸ has-children probe for submenus |
+| `recent_store::RecentStore` | `JsonRecentStore` | `~/.exbar/recents.json` load/save/delete for Recent Folders |
+| `clock::Clock` | `SystemClock` | Time source for dwell timestamps + debounced writes |
 
-Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
+Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView`, `MockSubfolderSource`, `MockRecentStore`, `MockClock` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
 
 ### Error handling (SP5)
 
@@ -153,6 +168,28 @@ Beyond Explorer windows, the toolbar also activates over the Windows Common Item
 - **Navigation**: `dialog_nav::KeybdDialogNavigator::navigate(hwnd, path)` does `SetForegroundWindow(hwnd)` → `SendInput(Ctrl+L)` (focuses the breadcrumb path bar in edit mode) → `SendInput` Unicode-typing the path → `SendInput(Enter)`. No UIA; `Ctrl+L` is the OS-level shortcut baked into every Shell-hosted dialog. Same `SendInput` rationale as `shell_windows::open_in_new_tab` — `PostMessageW` is unreliable across focus boundaries.
 - **Position persistence**: `~/.exbar/position.json` stores per-kind offsets under `{"explorer": {offset_x, offset_y}, "file_dialog": {offset_x, offset_y}}`. Old flat `{offset_x, offset_y}` auto-migrates — value is promoted to `explorer` and copied to `file_dialog` so the user's tuned position applies on first dialog interaction.
 - **Degraded actions in FileDialog mode**: `FireFolderClick(ctrl=true)`, right-click **Open**, and right-click **Open in new tab** all call `ShellBrowser::open_in_new_window(path)` (ShellExecuteW of `explorer.exe "path"`) — dialogs have no tabs, so opening a fresh Explorer window is the most useful degradation. Drag-drop, Copy path, Rename, Remove, Add-folder, drag-reorder, and `+` config actions all work unchanged.
+
+### Spring-open submenus (v1.2.0)
+
+Every folder button can spawn a hierarchical subfolder popup tree on long-press (`springOpenDelayMs`, default 500 ms) or long-hover (`longHoverOpenMs`, default 1200 ms).
+
+- **Pure state machine** — `submenu.rs` owns `SubmenuChain` (vec of `ChainLevel`), `SubmenuEvent` (OpenRoot / HoverChildItem / HoverBufferAt / CursorExit / SafetyTick / CursorReenter / Commit / Dismiss), and `SubmenuCommand` (OpenLevel / CloseDeeperThan / CloseAll / SetHighlight). `transition(state, event) → Vec<command>`. No Win32.
+- **Win32 adapter** — `submenu_wnd.rs` creates per-level `WS_POPUP | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | HWND_TOPMOST` windows, each with its own `IDropTarget`. `SubmenuPopup` state stored via `GWLP_USERDATA` (`Box::into_raw` / `Box::from_raw` on destroy). Paint via `paint::paint_submenu_popup` with dark-mode-aware palette, chain-opacity rendering, and partial-rect invalidation on highlight changes.
+- **Depth cap** `MAX_CHAIN_DEPTH = 7`. Level 1 centered on the triggering button; levels 2+ flow right unless overflow triggers a one-way flip to left (reset per-subtree on truncation). `..` ancestor navigation with mode tracking (disappears once descent begins). Recent's root submenu sits entirely above or below the toolbar (not overlapping the 🕘 button).
+- **Dismiss** — 30 ms safety timer polls cursor position; transitions inside→outside arm a 5-tick (~150 ms) dismiss countdown. Click outside (`GetAsyncKeyState(VK_LBUTTON/VK_RBUTTON)` polled in the same tick) dismisses immediately. Esc via `GetAsyncKeyState(VK_ESCAPE)`. Foreground change to foreign window dismisses via existing `HwndRole::Unknown` branch.
+- **Scroll** — popup height clamps to work area. `SubmenuLayout` reports `visible_count`, `total_count`, asymmetric `buffer_top_px` / `buffer_bottom_px` (toolbar-facing buffer collapses to 0 at level 1 for screen-edge forgiveness). `WM_MOUSEWHEEL` accumulates sub-WHEEL_DELTA values for touchpads. `▲`/`▼` glyphs in scroll-trigger bands; hovering a scroll band auto-advances via `TIMER_SUBMENU_AUTOSCROLL` (150 ms cadence).
+- **Drop-through** — `SubmenuDropTarget::Drop` resolves the hit display-item to its path, extracts paths from the `CF_HDROP` `IDataObject`, and invokes `FileOperator::move_or_copy_paths` synchronously before posting `WM_USER_SUBMENU_CLICK` to dismiss.
+
+### Recent Folders (v1.2.0)
+
+Opt-in tracking of folders where the user spends time or acts.
+
+- **Enable/disable** via `+` button's right-click menu. Enable appends a `FolderEntry{kind: "Recent"}` pseudo-entry to `folders[]`, hydrates `recent_list` from `~/.exbar/recents.json`, arms a 1 Hz dwell-tick timer. Disable deletes `recents.json` atomically, clears in-memory list, disarms tick, dismisses any open submenu chain.
+- **Tracking** — pure `recent_tracker::TrackerState` + `transition(event)` returning `CommitRecent` / `ClearDwell` commands. Events: `NavigationTo`, `ForegroundLost`, `SelfInitiated`, `DwellTick`, `ActionInFolder`. Dwell fires at `dwellSecondsToTrack` (default 10s) of being the active tab in the foreground Explorer. Actions (drops onto folder buttons) commit immediately regardless of dwell. Toolbar-initiated navigations emit `SelfInitiated` to suppress self-tracking.
+- **Active-tab path resolution** — `IShellBrowser::QueryActiveShellView` → `IFolderView::GetFolder::<IPersistFolder2>` → `GetCurFolder()` PIDL → `SHGetPathFromIDListW`. Polled each `TIMER_DWELL_TICK`.
+- **Persistence** — `RecentStore` trait; `JsonRecentStore` writes `recents.json` with a 2 s debounced `TIMER_RECENT_DEBOUNCE` on each `CommitRecent`. `flush_recent` called on toolbar `WM_DESTROY` so a clean shutdown doesn't lose pending commits.
+- **LRU semantics** — `recent_list::push` dedupes case-insensitively (normalized via `path_norm::normalize`), trims to `maxCount`. `for_display` filters pinned folders at render time when `includePinned == false`. `excludedPaths` is a prefix match with `\` boundary.
+- **UI** — Recent button renders `🕘 Recent` (fixed label); its root submenu uses `build_recent_display_list` (no parent-reshow, no `..`, empty state shows `(no recent folders yet)`). Hovering a recent folder opens level 2 as a normal subfolder chain with `..` enabled from there down. Right-click the 🕘 button → `Remove` (same effect as Disable).
 
 ### Context menus and inline rename
 
