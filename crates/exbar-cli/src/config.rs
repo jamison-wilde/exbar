@@ -61,7 +61,7 @@ fn default_spring_open_delay_ms() -> u32 {
     500
 }
 fn default_hover_buffer_px() -> u32 {
-    10
+    30
 }
 fn default_non_chain_item_opacity() -> f32 {
     0.5
@@ -596,7 +596,7 @@ mod tests {
     fn submenu_defaults_when_missing() {
         let cfg: Config = Config::from_str(r#"{"folders":[]}"#).unwrap();
         assert_eq!(cfg.submenu.spring_open_delay_ms, 500);
-        assert_eq!(cfg.submenu.hover_buffer_px, 10);
+        assert_eq!(cfg.submenu.hover_buffer_px, 30);
         assert!((cfg.submenu.non_chain_item_opacity - 0.5).abs() < 1e-6);
     }
 

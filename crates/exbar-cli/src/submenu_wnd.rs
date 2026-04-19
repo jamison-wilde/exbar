@@ -328,6 +328,7 @@ unsafe extern "system" fn submenu_wndproc(
                     &popup.display_items,
                     popup.highlighted_index,
                     popup.dpi,
+                    popup.level,
                 );
             }
             unsafe {

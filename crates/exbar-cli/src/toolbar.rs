@@ -584,7 +584,7 @@ impl ToolbarState {
             reshow,
         );
 
-        let measured_w = crate::paint::measure_display_items_width(&display_items, self.dpi);
+        let measured_w = crate::paint::measure_display_items_width(&display_items, self.dpi, level);
         let max_width_px = (measured_w + crate::theme::scale(32, self.dpi))
             .min(crate::theme::scale(400, self.dpi))
             .max(crate::theme::scale(100, self.dpi));
@@ -752,29 +752,55 @@ impl ToolbarState {
     }
 
     fn set_popup_highlight(&mut self, level: u8, index: Option<usize>) {
+        use windows::Win32::Foundation::RECT as WinRect;
+
         let Some(&h) = self.submenu_popups.get((level as usize).saturating_sub(1)) else {
             return;
         };
         if h.0.is_null() {
             return;
         }
-        // Only invalidate when the highlight index actually changes — every pixel
-        // of mouse motion previously triggered a full repaint cycle with a
-        // background-erase flash.
-        let changed = unsafe {
+
+        // Collect the old + new item rects that need repainting, updating the
+        // highlighted_index in the same pass. Only fires when the index actually
+        // changed, so mouse micro-motion at the same item is a no-op.
+        let dirty: Option<Vec<crate::layout::Rect>> = unsafe {
             match crate::submenu_wnd::popup_state(h) {
                 Some(popup) if popup.highlighted_index != index => {
+                    let old = popup.highlighted_index;
                     popup.highlighted_index = index;
-                    true
+                    let mut rects = Vec::new();
+                    if let Some(i) = old
+                        && let Some(r) = popup.layout.item_rects.get(i)
+                    {
+                        rects.push(*r);
+                    }
+                    if let Some(i) = index
+                        && let Some(r) = popup.layout.item_rects.get(i)
+                    {
+                        rects.push(*r);
+                    }
+                    Some(rects)
                 }
-                _ => false,
+                _ => None,
             }
         };
-        if changed {
-            unsafe {
-                // erase=false: WM_PAINT fills the full client area first, so the
-                // OS background-erase pass is unnecessary and causes flicker.
-                let _ = InvalidateRect(Some(h), None, false);
+
+        // Invalidate only the two changed rows (old highlight + new highlight).
+        // GDI's update region clips the paint loop in paint_submenu_popup so
+        // unaffected rows are skipped with zero GDI work.
+        // erase=false: WM_PAINT fills its own background, so no OS erase needed.
+        if let Some(rects) = dirty {
+            for r in rects {
+                let win_rect = WinRect {
+                    left: r.left,
+                    top: r.top,
+                    right: r.right,
+                    bottom: r.bottom,
+                };
+                unsafe {
+                    let _ = InvalidateRect(Some(h), Some(&win_rect), false);
+                }
             }
         }
     }

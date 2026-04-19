@@ -4,15 +4,15 @@
 //! events, calls the transition function, and dispatches returned commands
 //! against Win32. No Win32 types appear here.
 //!
-//! Chain model: at most 5 levels of nested popups. Level 0 is the toolbar
-//! button itself (not a popup); levels 1–5 are popups. Each level records
+//! Chain model: at most [`MAX_CHAIN_DEPTH`] levels of nested popups. Level 0 is the toolbar
+//! button itself (not a popup); levels 1–[`MAX_CHAIN_DEPTH`] are popups. Each level records
 //! its folder path, `ancestor_mode` flag, and horizontal flow direction
 //! (which is locked at the chain level once the first right-overflow happens).
 
 use crate::subfolder_enum::SubfolderEntry;
 use std::path::PathBuf;
 
-pub const MAX_CHAIN_DEPTH: usize = 5;
+pub const MAX_CHAIN_DEPTH: usize = 7;
 
 /// Horizontal flow for levels 2+. Locked per chain once set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -693,7 +693,7 @@ mod tests_chain {
     }
 
     #[test]
-    fn max_depth_caps_at_5() {
+    fn max_depth_caps_at_const() {
         let mut chain = SubmenuChain::default();
         transition(
             &mut chain,
@@ -702,7 +702,7 @@ mod tests_chain {
                 button_center_y: 0,
             },
         );
-        for l in 1..=10 {
+        for l in 1..=(MAX_CHAIN_DEPTH as u8 + 5) {
             transition(
                 &mut chain,
                 SubmenuEvent::HoverChildItem {

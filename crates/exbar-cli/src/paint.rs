@@ -356,11 +356,21 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
 
 /// Build the display label string for a `DisplayItem`, consistent with paint rendering.
 ///
+/// `at_max_depth` — when `true`, subfolders that have children append a
+/// `(max subfolders)` suffix so the user can see the depth cap is reached.
+/// Dotdot (upward `..`) is not affected because going up is never blocked.
+///
 /// Called by both [`paint_submenu_popup`] and [`measure_display_items_width`] so the
 /// two code paths stay in sync.
-fn display_item_label(item: &DisplayItem) -> String {
+fn display_item_label(item: &DisplayItem, at_max_depth: bool) -> String {
     match item {
-        DisplayItem::Subfolder { entry } => format!("\u{1F4C1} {}", entry.name),
+        DisplayItem::Subfolder { entry } => {
+            if at_max_depth && entry.has_children {
+                format!("\u{1F4C1} {} (max subfolders)", entry.name)
+            } else {
+                format!("\u{1F4C1} {}", entry.name)
+            }
+        }
         DisplayItem::Dotdot { parent_name, .. } => format!("\u{2B06} {}", parent_name),
         DisplayItem::ParentReshow { name, .. } => format!("\u{1F4C1} {}", name),
         DisplayItem::Ellipsis => "\u{2026}(more)".to_string(),
@@ -371,13 +381,19 @@ fn display_item_label(item: &DisplayItem) -> String {
 /// Measure the maximum rendered pixel width of the given `display_items` list
 /// using `DrawTextW` with `DT_CALCRECT`. Used to compute a dynamic popup width.
 ///
+/// `level` — the nesting depth of the popup being measured. Items at
+/// [`crate::submenu::MAX_CHAIN_DEPTH`] get the `(max subfolders)` suffix
+/// appended to their label, which widens the measurement accordingly.
+///
 /// Returns the measured max text width in physical pixels (without padding).
 /// Caller must add left/right padding before using this as `max_width_px`.
-pub fn measure_display_items_width(display_items: &[DisplayItem], dpi: u32) -> i32 {
+pub fn measure_display_items_width(display_items: &[DisplayItem], dpi: u32, level: u8) -> i32 {
     use windows::Win32::Foundation::RECT as WinRect;
     use windows::Win32::Graphics::Gdi::{
         DT_CALCRECT, DT_SINGLELINE, GetDC, GetStockObject, ReleaseDC, SelectObject,
     };
+
+    let at_max_depth = (level as usize) >= crate::submenu::MAX_CHAIN_DEPTH;
 
     let hdc = unsafe { GetDC(None) };
     if hdc.is_invalid() {
@@ -388,7 +404,7 @@ pub fn measure_display_items_width(display_items: &[DisplayItem], dpi: u32) -> i
 
     let mut max_w: i32 = 0;
     for item in display_items {
-        let label = display_item_label(item);
+        let label = display_item_label(item, at_max_depth);
         let mut wide: Vec<u16> = label.encode_utf16().collect();
         let mut r = WinRect {
             left: 0,
@@ -432,7 +448,9 @@ pub fn paint_submenu_popup(
     display_items: &[DisplayItem],
     highlighted_index: Option<usize>,
     dpi: u32,
+    level: u8,
 ) {
+    let at_max_depth = (level as usize) >= crate::submenu::MAX_CHAIN_DEPTH;
     let dark = theme::is_dark_mode();
 
     let bg_color = if dark {
@@ -496,9 +514,13 @@ pub fn paint_submenu_popup(
         }
 
         // Build label text and determine display properties.
-        let label = display_item_label(item);
-        let (is_disabled, has_children) = match item {
-            DisplayItem::Subfolder { entry } => (false, entry.has_children),
+        let label = display_item_label(item, at_max_depth);
+        // `has_children_visual` controls the ▸ arrow glyph. At max depth,
+        // subfolders with children cannot open a deeper level, so the arrow
+        // would be misleading — suppress it. Dotdot (upward ..) is unaffected
+        // because going up is never blocked by the depth cap.
+        let (is_disabled, has_children_visual) = match item {
+            DisplayItem::Subfolder { entry } => (false, entry.has_children && !at_max_depth),
             DisplayItem::Dotdot { .. } => (false, true), // Dotdot always opens parent dir submenu
             DisplayItem::ParentReshow { .. } => (false, false),
             DisplayItem::Ellipsis | DisplayItem::Empty { .. } => (true, false),
@@ -514,7 +536,7 @@ pub fn paint_submenu_popup(
         // Draw label with left padding and end-ellipsis on overflow.
         let pad = theme::scale(8, dpi);
         let arrow_w = theme::scale(20, dpi);
-        let text_right = if has_children {
+        let text_right = if has_children_visual {
             win_rect.right - arrow_w
         } else {
             win_rect.right - theme::scale(8, dpi)
@@ -535,8 +557,8 @@ pub fn paint_submenu_popup(
             );
         }
 
-        // Trailing ▸ arrow for items that have children.
-        if has_children {
+        // Trailing ▸ arrow for items that have children (suppressed at max depth).
+        if has_children_visual {
             let mut arrow_rect = RECT {
                 left: win_rect.right - arrow_w,
                 top: win_rect.top,
