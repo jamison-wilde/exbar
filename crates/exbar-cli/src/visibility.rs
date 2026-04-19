@@ -119,12 +119,16 @@ pub fn classify_hwnd(
 // ── Foreground window tracking ───────────────────────────────────────────────
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+const EVENT_SYSTEM_MENUPOPUPSTART: u32 = 0x0006;
+const EVENT_SYSTEM_MENUPOPUPEND: u32 = 0x0007;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
 const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 const EVENT_SYSTEM_MOVESIZESTART: u32 = 0x000A;
 const EVENT_SYSTEM_MOVESIZEEND: u32 = 0x000B;
 const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
+const EVENT_OBJECT_SHOW: u32 = 0x8002;
+const EVENT_OBJECT_HIDE: u32 = 0x8003;
 const OBJID_WINDOW: i32 = 0;
 const CHILDID_SELF: i32 = 0;
 
@@ -207,6 +211,33 @@ fn hwnd_in_explorer_process(hwnd: HWND) -> bool {
     classify_foreground(pid, exe_path_for_pid(pid).as_deref(), our_pid) == Foreground::Explorer
 }
 
+// ── Topmost helpers ───────────────────────────────────────────────────────────
+
+/// Set or clear the toolbar's `HWND_TOPMOST` flag.
+///
+/// Called when a shell context menu opens (drop to `HWND_NOTOPMOST` so the
+/// menu renders above the toolbar) and when it closes / Explorer retakes
+/// foreground (restore `HWND_TOPMOST` so Explorer's own XAML content stays below).
+fn set_toolbar_topmost(toolbar: HWND, topmost: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{HWND_NOTOPMOST, HWND_TOPMOST};
+    let target = if topmost {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
+    unsafe {
+        crate::warn_on_err!(SetWindowPos(
+            toolbar,
+            Some(target),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        ));
+    }
+}
+
 // ── WinEvent callback ─────────────────────────────────────────────────────────
 
 unsafe extern "system" fn foreground_event_proc(
@@ -223,6 +254,35 @@ unsafe extern "system" fn foreground_event_proc(
     let class = crate::explorer::get_class_name(hwnd);
     let is_explorer = class == "CabinetWClass";
     let in_our_process = hwnd_in_our_process(hwnd);
+
+    // Classic Win32 popup menus (including shell context menus on Win10 and
+    // legacy Win11 style). Drop topmost so the menu renders above the toolbar,
+    // then restore on MENUPOPUPEND. These events are in the system-hook range
+    // (0x0003..=0x0017) so no extra hook registration is needed.
+    if event == EVENT_SYSTEM_MENUPOPUPSTART {
+        if let Some(tb) = tb_opt
+            && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
+        {
+            if state.popup_open_count == 0 {
+                log::debug!("MENUPOPUPSTART hwnd={hwnd:?} class={class:?} — toolbar → non-topmost");
+                set_toolbar_topmost(tb, false);
+            }
+            state.popup_open_count = state.popup_open_count.saturating_add(1);
+        }
+        return;
+    }
+    if event == EVENT_SYSTEM_MENUPOPUPEND {
+        if let Some(tb) = tb_opt
+            && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
+        {
+            state.popup_open_count = state.popup_open_count.saturating_sub(1);
+            if state.popup_open_count == 0 {
+                log::debug!("MENUPOPUPEND — count=0, toolbar → topmost");
+                set_toolbar_topmost(tb, true);
+            }
+        }
+        return;
+    }
 
     if event == EVENT_SYSTEM_MINIMIZESTART {
         // Only hide if NOT our process (avoid hiding on Explorer's internal popups)
@@ -323,6 +383,7 @@ unsafe extern "system" fn foreground_event_proc(
     //   - OUR process (rename edit, folder picker, popup menu — all transient)
     // Hide only when a window in a DIFFERENT unrelated process takes foreground.
     let in_explorer = hwnd_in_explorer_process(hwnd);
+
     if is_explorer {
         if let Some(toolbar_hwnd) = get_global_toolbar_hwnd() {
             // SAFETY: Win32 dispatches WinEvent callbacks on the thread that
@@ -583,13 +644,70 @@ fn update_toolbar_visibility(toolbar: HWND) {
     }
 }
 
-/// Install WinEvent hooks. Callers must invoke exactly once (from `run_hook`).
-/// Returns both hook handles so the caller can `UnhookWinEvent` them at exit.
+/// Narrow context-menu detection. Win11 shell context menus (right-click
+/// on a file/folder/empty area in Explorer) fire EVENT_OBJECT_SHOW /
+/// EVENT_OBJECT_HIDE with window class
+/// "Microsoft.UI.Content.PopupWindowSiteBridge". While at least one is
+/// visible, drop the toolbar from HWND_TOPMOST so the menu renders above.
 ///
-/// Two hooks:
-/// 1. System events (0x0003–0x0017): FOREGROUND, MOVESIZESTART/END, MINIMIZESTART/END
+/// # Safety
+/// Registered as a WinEvent callback — Win32 guarantees the signature.
+unsafe extern "system" fn object_show_hide_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if id_object != OBJID_WINDOW {
+        return;
+    }
+    // Filter to explorer.exe first to keep the event volume sane.
+    if !hwnd_in_explorer_process(hwnd) {
+        return;
+    }
+    let class = crate::explorer::get_class_name(hwnd);
+    if class != "Microsoft.UI.Content.PopupWindowSiteBridge" {
+        return;
+    }
+    let Some(toolbar) = get_global_toolbar_hwnd() else {
+        return;
+    };
+    let Some(state) = (unsafe { crate::toolbar::toolbar_state(toolbar) }) else {
+        return;
+    };
+
+    match event {
+        EVENT_OBJECT_SHOW => {
+            if state.popup_open_count == 0 {
+                log::debug!("popup SHOW hwnd={hwnd:?} class={class:?} — toolbar → non-topmost");
+                set_toolbar_topmost(toolbar, false);
+            }
+            state.popup_open_count = state.popup_open_count.saturating_add(1);
+        }
+        EVENT_OBJECT_HIDE => {
+            state.popup_open_count = state.popup_open_count.saturating_sub(1);
+            if state.popup_open_count == 0 {
+                log::debug!("popup HIDE hwnd={hwnd:?} — count=0, toolbar → topmost");
+                set_toolbar_topmost(toolbar, true);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Install WinEvent hooks. Callers must invoke exactly once (from `run_hook`).
+/// Returns hook handles so the caller can `UnhookWinEvent` them at exit.
+///
+/// Three hooks:
+/// 1. System events (0x0003–0x0017): FOREGROUND, MOVESIZESTART/END, MINIMIZESTART/END,
+///    MENUPOPUPSTART/END (classic Win32 popup menus)
 /// 2. LOCATIONCHANGE (0x800B): detects Explorer maximize/restore/snap
-pub fn install_foreground_hook() -> (HWINEVENTHOOK, HWINEVENTHOOK) {
+/// 3. OBJECT_SHOW/HIDE (0x8002–0x8003): Win11 shell context menus
+///    (`Microsoft.UI.Content.PopupWindowSiteBridge`) — fires when popups appear/dismiss
+pub fn install_foreground_hook() -> (HWINEVENTHOOK, HWINEVENTHOOK, HWINEVENTHOOK) {
     // SAFETY: SetWinEventHook registers our extern "system" callback and
     // returns a handle we own; single call from run_hook is the sole user.
     let system_hook = unsafe {
@@ -614,8 +732,21 @@ pub fn install_foreground_hook() -> (HWINEVENTHOOK, HWINEVENTHOOK) {
             WINEVENT_OUTOFCONTEXT,
         )
     };
-    log::info!("Installed foreground + location-change event hooks");
-    (system_hook, location_hook)
+    // Win11 shell context menus fire OBJECT_SHOW/HIDE (not FOREGROUND) for
+    // their PopupWindowSiteBridge windows. Filter to explorer.exe in the callback.
+    let show_hide_hook = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_HIDE,
+            None,
+            Some(object_show_hide_proc),
+            0, // idProcess = 0: all processes (filter in callback)
+            0, // idThread
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+    log::info!("Installed foreground + location-change + show/hide event hooks");
+    (system_hook, location_hook, show_hide_hook)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

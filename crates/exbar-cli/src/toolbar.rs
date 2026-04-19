@@ -146,6 +146,12 @@ pub(crate) struct ToolbarState {
     /// MOVESIZESTART and MOVESIZEEND). Used to suppress CAPTUREEND
     /// repositioning during drag — MOVESIZEEND handles that instead.
     pub(crate) explorer_moving: bool,
+    /// Count of shell popup windows currently visible (e.g. Win11 context
+    /// menus, class "Microsoft.UI.Content.PopupWindowSiteBridge"). While > 0
+    /// the toolbar drops from HWND_TOPMOST to HWND_NOTOPMOST so the popups
+    /// (also top-level windows) render above. Resets to topmost when count
+    /// returns to 0.
+    pub(crate) popup_open_count: u32,
     pub(crate) rename_state: Option<rename::RenameState>,
     // Submenu subsystem (SP-submenu Task 10):
     pub(crate) submenu_chain: crate::submenu::SubmenuChain,
@@ -247,6 +253,7 @@ impl ToolbarState {
             active_target: None,
             last_explorer_origin: None,
             explorer_moving: false,
+            popup_open_count: 0,
             rename_state: None,
             submenu_chain: crate::submenu::SubmenuChain::default(),
             submenu_popups: Vec::new(),
