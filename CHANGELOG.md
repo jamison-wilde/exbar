@@ -2,6 +2,12 @@
 
 All notable changes to Exbar are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Spring-open submenus** for every folder button. Drag-hover or long-press (500 ms, configurable) opens a vertical popup listing that folder's subdirectories, nestable up to 5 levels deep. Drop files on any item to move/copy into that folder. `..` navigation in ancestor mode for quick up-traversal. Translucent buffer zone around each popup provides cursor forgiveness on near-misses. Cursor-tracking safety timer dismisses the chain ~150 ms after the cursor leaves all popups. Click / Ctrl-click a submenu item to navigate / open in new tab; drops invoke move/copy via `IFileOperation`. File-dialog mode degrades to `open_in_new_window`. Configurable via new `submenu` block in `~/.exbar/config.json` (`springOpenDelayMs`, `hoverBufferPx`, `nonChainItemOpacity`).
+
 ## [1.2.0] - 2026-04-17
 
 ### Changed
@@ -42,6 +48,6 @@ First public release.
 - GitHub Actions CI: lint, test, doc-check, and MSI build on every push; automatic release creation on tag push.
 
 [Unreleased]: https://github.com/jamison-wilde/exbar/compare/v1.2.0...HEAD
-[1.2.0]: https://github.com/jamison-wilde/exbar/releases/tag/v1.2.0
+[1.2.0]: https://github.com/jamison-wilde/exbar/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jamison-wilde/exbar/releases/tag/v1.1.0
 [1.0.0]: https://github.com/jamison-wilde/exbar/releases/tag/v1.0.0

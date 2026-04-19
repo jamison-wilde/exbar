@@ -15,10 +15,11 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, DefWindowProcW, GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW,
-    HTCAPTION, KillTimer, PostMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+    CREATESTRUCTW, DefWindowProcW, GWLP_USERDATA, GetCursorPos, GetForegroundWindow,
+    GetWindowLongPtrW, GetWindowRect, HTCAPTION, KillTimer, PostMessageW, SW_HIDE, SWP_NOACTIVATE,
+    SWP_NOZORDER, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED,
+    WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST,
+    WM_PAINT, WM_RBUTTONUP, WM_TIMER,
 };
 
 use crate::hit_test;
@@ -30,6 +31,19 @@ use crate::toolbar::{GRIP_SIZE, ToolbarState, WM_USER_RELOAD, toolbar_state};
 const WM_DPICHANGED: u32 = 0x02E0;
 const REORDER_THRESHOLD: i32 = 5;
 
+// ── Submenu WM_USER messages ──────────────────────────────────────────────────
+
+/// Posted to the toolbar HWND when the cursor enters a submenu item.
+/// `WPARAM` = level (u8), `LPARAM` = item index (usize).
+pub const WM_USER_SUBMENU_HOVER: u32 = 0x040A; // WM_USER + 10
+/// Posted to the toolbar HWND when the user clicks a submenu item.
+/// `WPARAM` = level (u8), `LPARAM` = item index (usize).
+pub const WM_USER_SUBMENU_CLICK: u32 = 0x040B; // WM_USER + 11
+/// Posted to the toolbar HWND to dismiss the entire submenu chain.
+pub const WM_USER_SUBMENU_DISMISS: u32 = 0x040C; // WM_USER + 12
+/// Safety timer tick for the submenu dismiss countdown (~30 ms period).
+pub const WM_USER_SUBMENU_SAFETY_TICK: u32 = 0x040D; // WM_USER + 13
+
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
 const MENU_ID_OPEN: u32 = 201;
@@ -37,6 +51,28 @@ const MENU_ID_OPEN_NEW_TAB: u32 = 202;
 const MENU_ID_COPY_PATH: u32 = 203;
 const MENU_ID_RENAME: u32 = 204;
 const MENU_ID_REMOVE: u32 = 205;
+
+/// Returns `true` if the given screen-coord cursor is inside any open popup's
+/// rendered bounds (the HWND rect already includes the buffer band, so no
+/// extra inflation is needed — spec §3.8 says the buffer is the inner padding
+/// inside the popup window, not an additional outer halo).
+fn cursor_inside_any_padded_popup(state: &crate::toolbar::ToolbarState, cx: i32, cy: i32) -> bool {
+    use windows::Win32::Foundation::RECT;
+
+    for &h in state.submenu_popups.iter() {
+        if h.0.is_null() {
+            continue;
+        }
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(h, &mut rect).is_err() } {
+            continue;
+        }
+        if cx >= rect.left && cx < rect.right && cy >= rect.top && cy < rect.bottom {
+            return true;
+        }
+    }
+    false
+}
 
 /// Extract `(x, y)` from a WM_* LPARAM whose layout is
 /// `(y << 16) | (x & 0xFFFF)` with signed 16-bit components.
@@ -258,7 +294,11 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     // Our own ReleaseCapture() dispatched this; consume the flag.
                     state.self_release_pending = false;
                 } else {
-                    // External capture loss — feed to machine.
+                    // External capture loss — kill long-press timer and feed to machine.
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_LONGPRESS);
+                    }
+                    state.last_press_instant = None;
                     state.apply_pointer_event(hwnd, pointer::PointerEvent::CaptureLost);
                 }
             }
@@ -267,18 +307,40 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         WM_LBUTTONDOWN => {
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                // If submenus are open, a toolbar click starts a new gesture.
+                // Dismiss the current chain before processing the press so the
+                // new press-release cycle works cleanly (and a subsequent
+                // long-press on the same button re-opens a fresh chain).
+                if state.submenu_chain.is_open() {
+                    state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Dismiss);
+                }
+
                 let (x, y) = lparam_point(lparam);
                 let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| pointer::HitResult {
                     button: idx,
                     is_folder: !state.buttons[idx].is_add,
                 });
                 state.apply_pointer_event(hwnd, pointer::PointerEvent::Press { x, y, hit });
+
+                // If we landed in PressedFolder, start the long-press detection timer.
+                if matches!(state.pointer, pointer::PointerState::PressedFolder { .. }) {
+                    state.last_press_instant = Some(std::time::Instant::now());
+                    unsafe {
+                        let _ = SetTimer(Some(hwnd), crate::toolbar::TIMER_LONGPRESS, 50, None);
+                    }
+                }
             }
             LRESULT(0)
         }
 
         WM_LBUTTONUP => {
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                // Stop the long-press timer — release ends the gesture regardless of outcome.
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_LONGPRESS);
+                }
+                state.last_press_instant = None;
+
                 let (x, y) = lparam_point(lparam);
                 let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| pointer::HitResult {
                     button: idx,
@@ -407,19 +469,239 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
-        WM_TIMER if wparam.0 == crate::toolbar::TIMER_REPOSITION => {
-            // Deferred reposition after Explorer maximize/restore animation.
-            // Kill the timer (one-shot) then reposition.
-            unsafe {
-                let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_REPOSITION);
-            }
-            if let Some(state) = unsafe { toolbar_state(hwnd) }
-                && let Some(explorer) = state.active_target.map(|t| t.hwnd)
-            {
-                log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
-                crate::visibility::reposition_and_show(hwnd, explorer);
+        x if x == WM_USER_SUBMENU_CLICK => {
+            // WPARAM: high 16 bits = popup level, bit 0 = ctrl held.
+            // LPARAM: item index (usize).
+            let level = (wparam.0 >> 16) as u8;
+            let ctrl = (wparam.0 & 1) != 0;
+            let idx = lparam.0 as usize;
+
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                // Look up the popup HWND for this level (level is 1-based, vec is 0-based).
+                let popup_hwnd = state
+                    .submenu_popups
+                    .get((level as usize).saturating_sub(1))
+                    .copied();
+
+                let display_item = popup_hwnd.and_then(|h| {
+                    if h.0.is_null() {
+                        return None;
+                    }
+                    unsafe {
+                        crate::submenu_wnd::popup_state(h)
+                            .and_then(|p| p.display_items.get(idx).cloned())
+                    }
+                });
+
+                match display_item {
+                    Some(crate::submenu::DisplayItem::Subfolder { entry }) => {
+                        state.navigate_or_new_window_or_tab(&entry.path.to_string_lossy(), ctrl);
+                    }
+                    Some(crate::submenu::DisplayItem::Dotdot { parent_path, .. }) => {
+                        state.navigate_or_new_window_or_tab(&parent_path.to_string_lossy(), ctrl);
+                    }
+                    Some(crate::submenu::DisplayItem::ParentReshow { path, .. }) => {
+                        state.navigate_or_new_window_or_tab(&path.to_string_lossy(), ctrl);
+                    }
+                    _ => {
+                        // Ellipsis / Empty / None — no action, but still dismiss.
+                    }
+                }
+
+                state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Commit);
             }
             LRESULT(0)
+        }
+
+        x if x == WM_USER_SUBMENU_DISMISS => {
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Dismiss);
+            }
+            LRESULT(0)
+        }
+
+        x if x == WM_USER_SUBMENU_HOVER => {
+            // WPARAM high 16 bits = popup level (u8); LPARAM = item index (isize, -1 = buffer).
+            let level = (wparam.0 >> 16) as u8;
+            let idx = lparam.0; // signed; -1 means "no item hit"
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                if idx < 0 {
+                    state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::HoverBufferAt);
+                } else {
+                    // Recover the display item at (level, idx) from the popup's state.
+                    let popup_hwnd = state
+                        .submenu_popups
+                        .get((level as usize).saturating_sub(1))
+                        .copied();
+                    let display_item = popup_hwnd.and_then(|h| {
+                        if h.0.is_null() {
+                            return None;
+                        }
+                        unsafe {
+                            crate::submenu_wnd::popup_state(h)
+                                .and_then(|p| p.display_items.get(idx as usize).cloned())
+                        }
+                    });
+                    match display_item {
+                        Some(crate::submenu::DisplayItem::Subfolder { entry }) => {
+                            state.execute_submenu_event(
+                                hwnd,
+                                crate::submenu::SubmenuEvent::HoverChildItem {
+                                    level,
+                                    index: idx as usize,
+                                    child_path: entry.path,
+                                    is_dotdot: false,
+                                },
+                            );
+                        }
+                        Some(crate::submenu::DisplayItem::Dotdot { parent_path, .. }) => {
+                            state.execute_submenu_event(
+                                hwnd,
+                                crate::submenu::SubmenuEvent::HoverChildItem {
+                                    level,
+                                    index: idx as usize,
+                                    child_path: parent_path,
+                                    is_dotdot: true,
+                                },
+                            );
+                        }
+                        // ParentReshow, Ellipsis, Empty → treat as buffer
+                        // (highlight stays, dismiss cancelled).
+                        _ => {
+                            state.execute_submenu_event(
+                                hwnd,
+                                crate::submenu::SubmenuEvent::HoverBufferAt,
+                            );
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
+        WM_TIMER => {
+            let timer_id = wparam.0;
+            if timer_id == crate::toolbar::TIMER_REPOSITION {
+                // Deferred reposition after Explorer maximize/restore animation.
+                // Kill the timer (one-shot) then reposition.
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_REPOSITION);
+                }
+                if let Some(state) = unsafe { toolbar_state(hwnd) }
+                    && let Some(explorer) = state.active_target.map(|t| t.hwnd)
+                {
+                    log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
+                    crate::visibility::reposition_and_show(hwnd, explorer);
+                }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_LONGPRESS {
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    let elapsed_ms = state
+                        .last_press_instant
+                        .map(|t| t.elapsed().as_millis() as u32)
+                        .unwrap_or(0);
+
+                    state.apply_pointer_event(
+                        hwnd,
+                        pointer::PointerEvent::LongPressTick { elapsed_ms },
+                    );
+
+                    // Stop the timer if long-press has fired OR state left PressedFolder
+                    // (e.g. drag-reorder kicked in via Move events).
+                    let should_stop = match &state.pointer {
+                        pointer::PointerState::PressedFolder {
+                            long_press_fired, ..
+                        } => *long_press_fired,
+                        _ => true,
+                    };
+                    if should_stop {
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_LONGPRESS);
+                        }
+                        state.last_press_instant = None;
+                    }
+                }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_SUBMENU_SAFETY {
+                // Cursor-tracking safety tick — fires at 30 ms while any popup is open.
+                //
+                // Ordering is important (see fix notes in CLAUDE.md):
+                //   1. Escape check — immediate dismiss.
+                //   2. Cursor poll — compute inside_any.
+                //   3. Mouse-button check — instant dismiss if newly pressed outside.
+                //   4. Transition-only cursor events (CursorExit / CursorReenter) — NOT every tick.
+                //   5. SafetyTick — always emitted, drives the dismiss countdown.
+                //   6. Kill timer if chain closed.
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RBUTTON,
+                    };
+
+                    // 1. Escape — WS_EX_NOACTIVATE means WM_KEYDOWN rarely arrives; poll here.
+                    let esc_pressed =
+                        unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16) & 0x8000 != 0 };
+                    if esc_pressed {
+                        state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Dismiss);
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_SAFETY);
+                        }
+                        state.submenu_timer_active = false;
+                        return LRESULT(0);
+                    }
+
+                    // 2. Cursor poll.
+                    let mut cursor = POINT::default();
+                    let cursor_ok = unsafe { GetCursorPos(&mut cursor).is_ok() };
+                    let inside_any =
+                        cursor_ok && cursor_inside_any_padded_popup(state, cursor.x, cursor.y);
+
+                    // 3. Mouse-button check — instant dismiss on a fresh click outside all popups.
+                    let lb =
+                        unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16) & 0x8000 != 0 };
+                    let rb =
+                        unsafe { (GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16) & 0x8000 != 0 };
+                    let btn_now = lb || rb;
+                    let btn_just_pressed = btn_now && !state.prev_mouse_button_down;
+                    state.prev_mouse_button_down = btn_now;
+
+                    if btn_just_pressed && !inside_any {
+                        state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Dismiss);
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_SAFETY);
+                        }
+                        state.submenu_timer_active = false;
+                        return LRESULT(0);
+                    }
+
+                    // 4. Transition-only cursor events.
+                    // Emitting CursorExit on every tick was resetting dismiss_pending_ticks=5
+                    // each tick, preventing the countdown from ever reaching zero.
+                    if inside_any != state.cursor_was_inside_popup {
+                        let ev = if inside_any {
+                            crate::submenu::SubmenuEvent::CursorReenter
+                        } else {
+                            crate::submenu::SubmenuEvent::CursorExit
+                        };
+                        state.execute_submenu_event(hwnd, ev);
+                        state.cursor_was_inside_popup = inside_any;
+                    }
+
+                    // 5. SafetyTick — always; drives the dismiss countdown.
+                    state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::SafetyTick);
+
+                    // 6. Kill timer if chain closed (belt-and-suspenders alongside
+                    //    maybe_kill_safety_timer which runs inside close_all_popups).
+                    if !state.submenu_chain.is_open() && state.submenu_timer_active {
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_SAFETY);
+                        }
+                        state.submenu_timer_active = false;
+                    }
+                }
+                LRESULT(0)
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
         }
 
         x if x == WM_DPICHANGED => {

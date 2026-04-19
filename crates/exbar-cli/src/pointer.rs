@@ -27,6 +27,7 @@ pub enum PointerState {
         button: usize,
         press_x: i32,
         press_y: i32,
+        long_press_fired: bool,
     },
     DraggingReorder {
         source_button: usize,
@@ -95,6 +96,11 @@ pub enum PointerEvent {
         ctrl: bool,
     },
     CaptureLost,
+    /// Timer tick from the adapter carrying elapsed hold time since the last
+    /// `Press`. Used to fire the long-press submenu once at or after 500 ms.
+    LongPressTick {
+        elapsed_ms: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +118,11 @@ pub enum PointerCommand {
     CommitReorder {
         from_folder: usize,
         to_folder: usize,
+    },
+    /// Fired once when the user holds a folder button for at least 500 ms.
+    /// `folder_button` is the 0-based folder index (button index minus 1).
+    FireLongPress {
+        folder_button: usize,
     },
 }
 
@@ -183,6 +194,7 @@ pub fn transition(state: PointerState, event: PointerEvent) -> (PointerState, Ve
                 button: b,
                 press_x: px,
                 press_y: py,
+                long_press_fired: lpf,
             },
             Move {
                 x,
@@ -207,6 +219,7 @@ pub fn transition(state: PointerState, event: PointerEvent) -> (PointerState, Ve
                         button: b,
                         press_x: px,
                         press_y: py,
+                        long_press_fired: lpf,
                     },
                     vec![],
                 )
@@ -217,6 +230,7 @@ pub fn transition(state: PointerState, event: PointerEvent) -> (PointerState, Ve
                 button: b,
                 press_x: px,
                 press_y: py,
+                long_press_fired: lpf,
             },
             Leave,
         ) => {
@@ -226,6 +240,7 @@ pub fn transition(state: PointerState, event: PointerEvent) -> (PointerState, Ve
                     button: b,
                     press_x: px,
                     press_y: py,
+                    long_press_fired: lpf,
                 },
                 vec![],
             )
@@ -235,6 +250,7 @@ pub fn transition(state: PointerState, event: PointerEvent) -> (PointerState, Ve
                 button: b,
                 press_x: px,
                 press_y: py,
+                long_press_fired: lpf,
             },
             Press { .. },
         ) => {
@@ -244,12 +260,20 @@ pub fn transition(state: PointerState, event: PointerEvent) -> (PointerState, Ve
                     button: b,
                     press_x: px,
                     press_y: py,
+                    long_press_fired: lpf,
                 },
                 vec![],
             )
         }
-        (PressedFolder { button: b, .. }, Release { hit, ctrl, .. }) => {
-            let fires_click = matches!(hit, Some(h) if h.button == b && h.is_folder);
+        (
+            PressedFolder {
+                button: b,
+                long_press_fired: lpf,
+                ..
+            },
+            Release { hit, ctrl, .. },
+        ) => {
+            let fires_click = matches!(hit, Some(h) if h.button == b && h.is_folder) && !lpf;
             let mut cmds = vec![ReleaseMouse];
             if fires_click {
                 cmds.push(FireFolderClick {
@@ -260,6 +284,46 @@ pub fn transition(state: PointerState, event: PointerEvent) -> (PointerState, Ve
             cmds.push(Redraw);
             (post_release_state(hit), cmds)
         }
+        // Long-press fires once per press, at or after 500 ms elapsed.
+        (
+            PressedFolder {
+                button: b,
+                press_x: px,
+                press_y: py,
+                long_press_fired: false,
+            },
+            LongPressTick { elapsed_ms },
+        ) if elapsed_ms >= 500 => (
+            PressedFolder {
+                button: b,
+                press_x: px,
+                press_y: py,
+                long_press_fired: true,
+            },
+            vec![FireLongPress {
+                folder_button: b - 1,
+            }],
+        ),
+
+        // Tick below threshold OR already-fired long-press is a no-op that preserves state.
+        (
+            PressedFolder {
+                button: b,
+                press_x: px,
+                press_y: py,
+                long_press_fired: lpf,
+            },
+            LongPressTick { .. },
+        ) => (
+            PressedFolder {
+                button: b,
+                press_x: px,
+                press_y: py,
+                long_press_fired: lpf,
+            },
+            vec![],
+        ),
+
         (PressedFolder { .. }, CaptureLost) => (Idle, vec![Redraw]),
 
         // ── DraggingReorder ─────────────────────────────────────────────
@@ -335,6 +399,26 @@ pub fn transition(state: PointerState, event: PointerEvent) -> (PointerState, Ve
             (post_release_state(hit), cmds)
         }
         (DraggingReorder { .. }, CaptureLost) => (Idle, vec![Redraw]),
+        (
+            DraggingReorder {
+                source_button,
+                insertion,
+            },
+            LongPressTick { .. },
+        ) => (
+            DraggingReorder {
+                source_button,
+                insertion,
+            },
+            vec![],
+        ),
+
+        // ── LongPressTick no-ops for non-PressedFolder states ───────────
+        (Idle, LongPressTick { .. }) => (Idle, vec![]),
+        (Hovering { button: b }, LongPressTick { .. }) => (Hovering { button: b }, vec![]),
+        (PressedNonFolder { button: b }, LongPressTick { .. }) => {
+            (PressedNonFolder { button: b }, vec![])
+        }
     }
 }
 
@@ -357,6 +441,7 @@ fn press_on_hit(h: HitResult, x: i32, y: i32) -> (PointerState, Vec<PointerComma
                 button: h.button,
                 press_x: x,
                 press_y: y,
+                long_press_fired: false,
             },
             vec![CaptureMouse, CancelInlineRename, Redraw],
         )
@@ -430,7 +515,8 @@ mod tests {
             PointerState::PressedFolder {
                 button: 2,
                 press_x: 60,
-                press_y: 14
+                press_y: 14,
+                long_press_fired: false,
             }
         );
         assert_eq!(
@@ -541,7 +627,8 @@ mod tests {
             PointerState::PressedFolder {
                 button: 1,
                 press_x: 50,
-                press_y: 14
+                press_y: 14,
+                long_press_fired: false,
             }
         );
         assert_eq!(
@@ -646,6 +733,7 @@ mod tests {
                 button: 1,
                 press_x: 60,
                 press_y: 14,
+                long_press_fired: false,
             },
             PointerEvent::Move {
                 x: 62,
@@ -660,7 +748,8 @@ mod tests {
             PointerState::PressedFolder {
                 button: 1,
                 press_x: 60,
-                press_y: 14
+                press_y: 14,
+                long_press_fired: false,
             }
         );
         assert!(cmds.is_empty());
@@ -673,6 +762,7 @@ mod tests {
                 button: 2,
                 press_x: 60,
                 press_y: 14,
+                long_press_fired: false,
             },
             PointerEvent::Move {
                 x: 90,
@@ -702,6 +792,7 @@ mod tests {
                 button: 2,
                 press_x: 60,
                 press_y: 14,
+                long_press_fired: false,
             },
             PointerEvent::Release {
                 x: 60,
@@ -731,6 +822,7 @@ mod tests {
                 button: 2,
                 press_x: 60,
                 press_y: 14,
+                long_press_fired: false,
             },
             PointerEvent::Release {
                 x: 60,
@@ -760,6 +852,7 @@ mod tests {
                 button: 2,
                 press_x: 60,
                 press_y: 14,
+                long_press_fired: false,
             },
             PointerEvent::Release {
                 x: 200,
@@ -782,6 +875,7 @@ mod tests {
                 button: 2,
                 press_x: 60,
                 press_y: 14,
+                long_press_fired: false,
             },
             PointerEvent::Release {
                 x: 1000,
@@ -804,6 +898,7 @@ mod tests {
                 button: 2,
                 press_x: 60,
                 press_y: 14,
+                long_press_fired: false,
             },
             PointerEvent::CaptureLost,
         );
@@ -924,7 +1019,8 @@ mod tests {
             PointerState::PressedFolder {
                 button: 1,
                 press_x: 0,
-                press_y: 0
+                press_y: 0,
+                long_press_fired: false,
             }
             .hover_button(),
             None,
@@ -949,7 +1045,8 @@ mod tests {
             PointerState::PressedFolder {
                 button: 3,
                 press_x: 0,
-                press_y: 0
+                press_y: 0,
+                long_press_fired: false,
             }
             .pressed_button(),
             Some(3),
@@ -981,10 +1078,189 @@ mod tests {
             PointerState::PressedFolder {
                 button: 2,
                 press_x: 0,
-                press_y: 0
+                press_y: 0,
+                long_press_fired: false,
             }
             .dragging_reorder(),
             None,
+        );
+    }
+
+    // ── LongPressTick ────────────────────────────────────────────────────
+
+    #[test]
+    fn long_press_tick_below_threshold_does_not_fire() {
+        let (state, _) = transition(
+            PointerState::Idle,
+            PointerEvent::Press {
+                x: 10,
+                y: 10,
+                hit: Some(hit(3, true)),
+            },
+        );
+        let (state, cmds) = transition(state, PointerEvent::LongPressTick { elapsed_ms: 300 });
+        assert!(matches!(
+            state,
+            PointerState::PressedFolder {
+                long_press_fired: false,
+                ..
+            }
+        ));
+        assert!(
+            cmds.iter()
+                .all(|c| !matches!(c, PointerCommand::FireLongPress { .. }))
+        );
+    }
+
+    #[test]
+    fn long_press_tick_at_threshold_fires_command() {
+        let (state, _) = transition(
+            PointerState::Idle,
+            PointerEvent::Press {
+                x: 10,
+                y: 10,
+                hit: Some(hit(3, true)),
+            },
+        );
+        let (state, cmds) = transition(state, PointerEvent::LongPressTick { elapsed_ms: 500 });
+        assert!(matches!(
+            state,
+            PointerState::PressedFolder {
+                long_press_fired: true,
+                ..
+            }
+        ));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PointerCommand::FireLongPress { folder_button: 2 }))
+        );
+    }
+
+    #[test]
+    fn long_press_tick_fires_only_once() {
+        let (state, _) = transition(
+            PointerState::Idle,
+            PointerEvent::Press {
+                x: 10,
+                y: 10,
+                hit: Some(hit(3, true)),
+            },
+        );
+        let (state, _) = transition(state, PointerEvent::LongPressTick { elapsed_ms: 600 });
+        let (_, cmds) = transition(state, PointerEvent::LongPressTick { elapsed_ms: 900 });
+        assert!(
+            cmds.iter()
+                .all(|c| !matches!(c, PointerCommand::FireLongPress { .. }))
+        );
+    }
+
+    #[test]
+    fn release_after_long_press_does_not_fire_folder_click() {
+        let (state, _) = transition(
+            PointerState::Idle,
+            PointerEvent::Press {
+                x: 10,
+                y: 10,
+                hit: Some(hit(3, true)),
+            },
+        );
+        let (state, _) = transition(state, PointerEvent::LongPressTick { elapsed_ms: 600 });
+        let (_, cmds) = transition(
+            state,
+            PointerEvent::Release {
+                x: 10,
+                y: 10,
+                hit: Some(hit(3, true)),
+                ctrl: false,
+            },
+        );
+        assert!(
+            cmds.iter()
+                .all(|c| !matches!(c, PointerCommand::FireFolderClick { .. }))
+        );
+    }
+
+    #[test]
+    fn release_before_long_press_fires_folder_click_normally() {
+        let (state, _) = transition(
+            PointerState::Idle,
+            PointerEvent::Press {
+                x: 10,
+                y: 10,
+                hit: Some(hit(3, true)),
+            },
+        );
+        let (_, cmds) = transition(
+            state,
+            PointerEvent::Release {
+                x: 10,
+                y: 10,
+                hit: Some(hit(3, true)),
+                ctrl: false,
+            },
+        );
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            PointerCommand::FireFolderClick {
+                folder_button: 2,
+                ctrl: false
+            }
+        )));
+    }
+
+    #[test]
+    fn drag_reorder_transition_cancels_long_press() {
+        // Press, then Move past reorder threshold — state becomes DraggingReorder,
+        // so LongPressTick after that is a no-op that preserves DraggingReorder.
+        let (state, _) = transition(
+            PointerState::Idle,
+            PointerEvent::Press {
+                x: 10,
+                y: 10,
+                hit: Some(hit(3, true)),
+            },
+        );
+        let (state, _) = transition(
+            state,
+            PointerEvent::Move {
+                x: 50,
+                y: 10, // moved 40 px > threshold
+                hit: Some(hit(3, true)),
+                reorder_threshold_px: 5,
+                insertion_if_reordering: 0,
+            },
+        );
+        assert!(matches!(state, PointerState::DraggingReorder { .. }));
+        let (state, cmds) = transition(state, PointerEvent::LongPressTick { elapsed_ms: 600 });
+        assert!(matches!(state, PointerState::DraggingReorder { .. }));
+        assert!(
+            cmds.iter()
+                .all(|c| !matches!(c, PointerCommand::FireLongPress { .. }))
+        );
+    }
+
+    #[test]
+    fn capture_lost_after_long_press_goes_to_idle_no_release_mouse() {
+        // Defensive test: if Windows revokes our capture while a long-press is
+        // in flight, we must NOT emit ReleaseMouse (capture is already gone).
+        // Protects against a future refactor accidentally adding ReleaseMouse
+        // to the CaptureLost arm.
+        let (state, _) = transition(
+            PointerState::Idle,
+            PointerEvent::Press {
+                x: 10,
+                y: 10,
+                hit: Some(hit(3, true)),
+            },
+        );
+        let (state, _) = transition(state, PointerEvent::LongPressTick { elapsed_ms: 600 });
+        let (next, cmds) = transition(state, PointerEvent::CaptureLost);
+        assert_eq!(next, PointerState::Idle);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PointerCommand::ReleaseMouse)),
+            "CaptureLost must not emit ReleaseMouse: got {cmds:?}"
         );
     }
 
@@ -1023,6 +1299,7 @@ mod tests {
             (0i32..200, 0i32..100, arb_hit, any::<bool>())
                 .prop_map(|(x, y, hit, ctrl)| PointerEvent::Release { x, y, hit, ctrl }),
             Just(PointerEvent::CaptureLost),
+            (0u32..1000).prop_map(|ms| PointerEvent::LongPressTick { elapsed_ms: ms }),
         ]
     }
 
@@ -1032,10 +1309,13 @@ mod tests {
             Just(PointerState::Idle),
             (1usize..5).prop_map(|b| PointerState::Hovering { button: b }),
             Just(PointerState::PressedNonFolder { button: 0 }),
-            (1usize..5, 0i32..200, 0i32..100).prop_map(|(b, px, py)| PointerState::PressedFolder {
-                button: b,
-                press_x: px,
-                press_y: py
+            (1usize..5, 0i32..200, 0i32..100, any::<bool>()).prop_map(|(b, px, py, lpf)| {
+                PointerState::PressedFolder {
+                    button: b,
+                    press_x: px,
+                    press_y: py,
+                    long_press_fired: lpf,
+                }
             }),
             (1usize..5, 0usize..10).prop_map(|(src, ins)| PointerState::DraggingReorder {
                 source_button: src,

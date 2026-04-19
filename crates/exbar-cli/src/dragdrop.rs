@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Com::{FORMATETC, IDataObject, TYMED_HGLOBAL};
@@ -570,6 +570,233 @@ pub unsafe fn extract_paths_from_data_object(
     }
 
     paths
+}
+
+// ── SubmenuDropTarget ─────────────────────────────────────────────────────────
+
+/// `IDropTarget` for a submenu popup HWND.
+///
+/// Message routing:
+///
+/// - **WM_USER_SUBMENU_HOVER** (sent on DragEnter/DragOver/DragLeave):
+///   - `WPARAM = (popup_level as usize) << 16`  — level in bits 16..=23.
+///   - `LPARAM = item_index as isize`  — index of hit item, or `-1` if
+///     cursor is outside all painted items (in the buffer band).
+///
+/// - **WM_USER_SUBMENU_CLICK** (sent on Drop):
+///   - `WPARAM = ((popup_level as usize) << 16) | (ctrl as usize)`
+///     — level in bits 16..=23, ctrl in bit 0.
+///     Decode: `level = (wparam >> 16) as u8; ctrl = (wparam & 1) != 0`.
+///     **Do NOT** use `MK_CONTROL` (0x0008) to decode this bit — that mask
+///     is for native mouse-message flags, not our synthetic encoding.
+///   - `LPARAM = item_index as isize`  — index of hit item on drop.
+///
+/// Drop data lifetime: the `IDataObject` passed to `Drop` is only valid
+/// during the call. Task 14 will extract paths and invoke `file_operator`
+/// synchronously from inside `Drop` — posting `WM_USER_SUBMENU_CLICK` is
+/// a dismissal-only signal and carries no file data.
+#[implement(IDropTarget)]
+pub struct SubmenuDropTarget {
+    toolbar_hwnd: HWND,
+    popup_hwnd: HWND,
+    popup_level: u8,
+    /// File-op executor for drop handling. Invoked synchronously in `Drop`
+    /// while the `IDataObject` is still alive (before returning to the caller).
+    file_operator: std::sync::Arc<dyn crate::dragdrop::FileOperator>,
+}
+
+impl SubmenuDropTarget {
+    pub fn new(
+        toolbar_hwnd: HWND,
+        popup_hwnd: HWND,
+        popup_level: u8,
+        file_operator: std::sync::Arc<dyn crate::dragdrop::FileOperator>,
+    ) -> Self {
+        Self {
+            toolbar_hwnd,
+            popup_hwnd,
+            popup_level,
+            file_operator,
+        }
+    }
+
+    /// Compute the hit item index for a screen-coord point. Returns `-1` if no
+    /// item is under the point (e.g. cursor is in the buffer band).
+    fn hit_item_index(&self, screen_pt: &windows::Win32::Foundation::POINTL) -> isize {
+        let mut pt = POINT {
+            x: screen_pt.x,
+            y: screen_pt.y,
+        };
+        // SAFETY: ScreenToClient is safe on a valid HWND on the message-pump thread.
+        unsafe {
+            let _ = ScreenToClient(self.popup_hwnd, &mut pt);
+        }
+
+        // SAFETY: popup_state is safe to call on a live popup HWND on the
+        // message-pump thread. OLE drag callbacks are delivered on the HWND's
+        // owner-thread by the system.
+        let popup = match unsafe { crate::submenu_wnd::popup_state(self.popup_hwnd) } {
+            Some(p) => p,
+            None => return -1,
+        };
+
+        for (idx, rect) in popup.layout.item_rects.iter().enumerate() {
+            if pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom {
+                return idx as isize;
+            }
+        }
+        -1
+    }
+
+    fn post_hover(&self, item_idx: isize) {
+        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+        let wparam = WPARAM((self.popup_level as usize) << 16);
+        // SAFETY: PostMessageW is safe; HWND validity is upheld by message-pump thread invariant.
+        unsafe {
+            let _ = PostMessageW(
+                Some(self.toolbar_hwnd),
+                crate::wndproc::WM_USER_SUBMENU_HOVER,
+                wparam,
+                LPARAM(item_idx),
+            );
+        }
+    }
+
+    fn post_click(&self, item_idx: isize, ctrl: bool) {
+        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+        let ctrl_bit: usize = if ctrl { 1 } else { 0 };
+        let wparam = WPARAM(((self.popup_level as usize) << 16) | ctrl_bit);
+        // SAFETY: PostMessageW is safe; HWND validity is upheld by message-pump thread invariant.
+        unsafe {
+            let _ = PostMessageW(
+                Some(self.toolbar_hwnd),
+                crate::wndproc::WM_USER_SUBMENU_CLICK,
+                wparam,
+                LPARAM(item_idx),
+            );
+        }
+    }
+}
+
+// IDropTarget trait methods take `*mut DROPEFFECT` as dictated by the COM ABI;
+// they cannot be declared `unsafe fn` without breaking the trait contract.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+impl IDropTarget_Impl for SubmenuDropTarget_Impl {
+    fn DragEnter(
+        &self,
+        _pdataobj: windows_core::Ref<'_, IDataObject>,
+        _grfkeystate: MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        let idx = self.hit_item_index(pt);
+        self.post_hover(idx);
+        if !pdweffect.is_null() {
+            unsafe { *pdweffect = DROPEFFECT_COPY };
+        }
+        Ok(())
+    }
+
+    fn DragOver(
+        &self,
+        _grfkeystate: MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        let idx = self.hit_item_index(pt);
+        self.post_hover(idx);
+        if !pdweffect.is_null() {
+            unsafe { *pdweffect = DROPEFFECT_COPY };
+        }
+        Ok(())
+    }
+
+    fn DragLeave(&self) -> Result<()> {
+        // item_idx = -1 signals "cursor left the popup entirely";
+        // the toolbar's safety timer + state machine decides whether to dismiss.
+        self.post_hover(-1);
+        Ok(())
+    }
+
+    fn Drop(
+        &self,
+        pdataobj: windows_core::Ref<'_, IDataObject>,
+        grfkeystate: MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        let idx = self.hit_item_index(pt);
+        let ctrl = grfkeystate.contains(MK_CONTROL);
+
+        // Resolve destination path from the hit display item.
+        let dest_path: Option<std::path::PathBuf> = unsafe {
+            crate::submenu_wnd::popup_state(self.popup_hwnd).and_then(|p| {
+                if idx < 0 {
+                    return None;
+                }
+                p.display_items
+                    .get(idx as usize)
+                    .and_then(|item| match item {
+                        crate::submenu::DisplayItem::Subfolder { entry } => {
+                            Some(entry.path.clone())
+                        }
+                        crate::submenu::DisplayItem::Dotdot { parent_path, .. } => {
+                            Some(parent_path.clone())
+                        }
+                        crate::submenu::DisplayItem::ParentReshow { path, .. } => {
+                            Some(path.clone())
+                        }
+                        _ => None,
+                    })
+            })
+        };
+
+        let Some(dest) = dest_path else {
+            // No valid drop target (buffer band, Ellipsis, Empty, or out-of-bounds).
+            if !pdweffect.is_null() {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+            }
+            self.post_click(idx, ctrl);
+            return Ok(());
+        };
+
+        let Some(data_obj) = pdataobj.as_ref() else {
+            if !pdweffect.is_null() {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+            }
+            self.post_click(idx, ctrl);
+            return Ok(());
+        };
+
+        // Determine move vs copy using drive-letter heuristic (same as FolderDropTarget).
+        // SAFETY: extract_paths_from_data_object is safe to call while the IDataObject is live.
+        let sources = unsafe { extract_paths_from_data_object(data_obj) };
+        let source_drive = sources
+            .first()
+            .and_then(|p| drive_letter(&p.to_string_lossy()));
+        let real_dest = resolve_to_real_path(&dest.to_string_lossy());
+        let dest_drive = drive_letter(&real_dest);
+        let effect =
+            drop_effect::determine_effect(keystate_from(grfkeystate), source_drive, dest_drive);
+        let dropeffect = effect_to_dropeffect(effect);
+        if !pdweffect.is_null() {
+            unsafe { *pdweffect = dropeffect };
+        }
+
+        if !sources.is_empty() {
+            log::info!(
+                "submenu drop: dest={dest:?} effect={effect:?} sources={}",
+                sources.len()
+            );
+            if let Err(e) = execute_drop_via(&*self.file_operator, effect, &sources, &dest) {
+                log::error!("submenu drop: file operation failed: {e}");
+            }
+        }
+
+        // Post click message to dismiss the chain regardless of success/failure.
+        self.post_click(idx, ctrl);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

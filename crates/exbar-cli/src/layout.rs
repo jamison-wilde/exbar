@@ -231,6 +231,44 @@ pub fn compute_insertion_index(input: &InsertionInput) -> usize {
     }
 }
 
+/// Result of `compute_submenu_layout`: the popup's overall size + each item's
+/// rect (relative to the popup's client-area origin, i.e. (0,0) = top-left).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubmenuLayout {
+    pub item_rects: Vec<Rect>,
+    pub popup_w: i32,
+    pub popup_h: i32,
+    pub buffer_px: i32,
+}
+
+/// Compute a vertical-stack layout for a submenu popup.
+///
+/// Items stack top-to-bottom inside a `buffer_px`-wide translucent band.
+/// The buffer is a visible padding around the inner item stack, implementing
+/// the cursor-forgiveness zone described in the spec.
+pub fn compute_submenu_layout(
+    item_count: usize,
+    item_px: i32,
+    max_width_px: i32,
+    buffer_px: i32,
+) -> SubmenuLayout {
+    let mut rects = Vec::with_capacity(item_count);
+    for i in 0..item_count {
+        rects.push(Rect {
+            left: buffer_px,
+            top: buffer_px + (i as i32) * item_px,
+            right: buffer_px + max_width_px,
+            bottom: buffer_px + (i as i32) * item_px + item_px,
+        });
+    }
+    SubmenuLayout {
+        item_rects: rects,
+        popup_w: max_width_px + 2 * buffer_px,
+        popup_h: (item_count as i32) * item_px + 2 * buffer_px,
+        buffer_px,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -867,5 +905,56 @@ mod tests {
             let idx = compute_insertion_index(&insertion);
             prop_assert!(idx <= folders.len(), "index {} out of range 0..={}", idx, folders.len());
         }
+    }
+
+    #[test]
+    fn submenu_layout_stacks_vertically_with_buffer() {
+        let layout = compute_submenu_layout(3, 28, 200, 10);
+        assert_eq!(layout.item_rects.len(), 3);
+        // First inner rect top-left is (buffer, buffer).
+        assert_eq!(layout.item_rects[0].left, 10);
+        assert_eq!(layout.item_rects[0].top, 10);
+        assert_eq!(layout.item_rects[0].width(), 200);
+        assert_eq!(layout.item_rects[0].height(), 28);
+        assert_eq!(layout.item_rects[1].top, 10 + 28);
+        assert_eq!(layout.item_rects[1].left, 10);
+        assert_eq!(layout.item_rects[1].width(), 200);
+        assert_eq!(layout.item_rects[1].bottom, 10 + 28 + 28);
+        // Total popup size includes buffer on both sides.
+        assert_eq!(layout.popup_w, 200 + 2 * 10);
+        assert_eq!(layout.popup_h, 3 * 28 + 2 * 10);
+    }
+
+    #[test]
+    fn submenu_layout_zero_items_is_just_buffer() {
+        let layout = compute_submenu_layout(0, 28, 200, 10);
+        assert_eq!(layout.popup_w, 220);
+        assert_eq!(layout.popup_h, 20);
+        assert!(layout.item_rects.is_empty());
+    }
+
+    #[test]
+    fn submenu_layout_zero_buffer_tight_fit() {
+        let layout = compute_submenu_layout(2, 30, 150, 0);
+        assert_eq!(layout.popup_w, 150);
+        assert_eq!(layout.popup_h, 60);
+        assert_eq!(
+            layout.item_rects[0],
+            Rect {
+                left: 0,
+                top: 0,
+                right: 150,
+                bottom: 30
+            }
+        );
+        assert_eq!(
+            layout.item_rects[1],
+            Rect {
+                left: 0,
+                top: 30,
+                right: 150,
+                bottom: 60
+            }
+        );
     }
 }

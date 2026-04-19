@@ -57,6 +57,76 @@ where
     Ok(v.min(5000))
 }
 
+fn default_spring_open_delay_ms() -> u32 {
+    500
+}
+fn default_hover_buffer_px() -> u32 {
+    30
+}
+fn default_non_chain_item_opacity() -> f32 {
+    0.5
+}
+
+fn deserialize_spring_open_delay<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = u32::deserialize(d)?;
+    Ok(v.clamp(100, 2000))
+}
+
+fn deserialize_hover_buffer<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = u32::deserialize(d)?;
+    Ok(v.min(64))
+}
+
+fn deserialize_non_chain_opacity<'de, D>(d: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = f32::deserialize(d)?;
+    Ok(v.clamp(0.2, 1.0))
+}
+
+/// Submenu/spring-open UX knobs. All fields have defaults and clamps.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+pub struct SubmenuConfig {
+    #[serde(
+        rename = "springOpenDelayMs",
+        default = "default_spring_open_delay_ms",
+        deserialize_with = "deserialize_spring_open_delay"
+    )]
+    pub spring_open_delay_ms: u32,
+    #[serde(
+        rename = "hoverBufferPx",
+        default = "default_hover_buffer_px",
+        deserialize_with = "deserialize_hover_buffer"
+    )]
+    pub hover_buffer_px: u32,
+    /// Reserved for future per-item dimming. Parsed and clamped but not applied
+    /// to the layered-window alpha — all open popups use `config.background_opacity`
+    /// as their uniform layered alpha. Kept in schema for forward-compat.
+    #[serde(
+        rename = "nonChainItemOpacity",
+        default = "default_non_chain_item_opacity",
+        deserialize_with = "deserialize_non_chain_opacity"
+    )]
+    pub non_chain_item_opacity: f32,
+}
+
+impl Default for SubmenuConfig {
+    fn default() -> Self {
+        Self {
+            spring_open_delay_ms: default_spring_open_delay_ms(),
+            hover_buffer_px: default_hover_buffer_px(),
+            non_chain_item_opacity: default_non_chain_item_opacity(),
+        }
+    }
+}
+
 /// Top-level configuration loaded from `~/.exbar/config.json`. Mutations go through methods so
 /// JSON-round-trip invariants stay in one place.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -81,6 +151,8 @@ pub struct Config {
     pub reposition_delay_ms: u32,
     #[serde(rename = "enableFileDialogs", default = "default_enable_file_dialogs")]
     pub enable_file_dialogs: bool,
+    #[serde(default)]
+    pub submenu: SubmenuConfig,
 }
 
 /// One folder shortcut. Persists to JSON as `{"name": "...", "path": "..."}` plus an optional cached icon.
@@ -304,10 +376,7 @@ mod tests {
             path.ends_with("config.json"),
             "expected config.json suffix: {path}"
         );
-        assert!(
-            path.contains(".exbar"),
-            "expected .exbar component: {path}"
-        );
+        assert!(path.contains(".exbar"), "expected .exbar component: {path}");
         assert!(path.starts_with("C:\\Users\\") || path.starts_with("/"));
     }
 
@@ -521,5 +590,66 @@ mod tests {
         let cfg: Config =
             serde_json::from_str(r#"{"folders":[],"enableFileDialogs":false}"#).unwrap();
         assert!(!cfg.enable_file_dialogs);
+    }
+
+    #[test]
+    fn submenu_defaults_when_missing() {
+        let cfg: Config = Config::from_str(r#"{"folders":[]}"#).unwrap();
+        assert_eq!(cfg.submenu.spring_open_delay_ms, 500);
+        assert_eq!(cfg.submenu.hover_buffer_px, 30);
+        assert!((cfg.submenu.non_chain_item_opacity - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn submenu_delay_clamped_low() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[],"submenu":{"springOpenDelayMs":50}}"#).unwrap();
+        assert_eq!(cfg.submenu.spring_open_delay_ms, 100);
+    }
+
+    #[test]
+    fn submenu_delay_clamped_high() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[],"submenu":{"springOpenDelayMs":9999}}"#).unwrap();
+        assert_eq!(cfg.submenu.spring_open_delay_ms, 2000);
+    }
+
+    #[test]
+    fn submenu_opacity_clamped_low() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[],"submenu":{"nonChainItemOpacity":0.05}}"#).unwrap();
+        assert!((cfg.submenu.non_chain_item_opacity - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn submenu_opacity_clamped_high() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[],"submenu":{"nonChainItemOpacity":2.0}}"#).unwrap();
+        assert!((cfg.submenu.non_chain_item_opacity - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn submenu_buffer_clamped_high() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[],"submenu":{"hoverBufferPx":999}}"#).unwrap();
+        assert_eq!(cfg.submenu.hover_buffer_px, 64);
+    }
+
+    #[test]
+    fn submenu_round_trips() {
+        let cfg: Config = Config::from_str(
+            r#"{"folders":[],"submenu":{"springOpenDelayMs":700,"hoverBufferPx":15,"nonChainItemOpacity":0.7}}"#,
+        )
+        .unwrap();
+        let serialized = serde_json::to_string(&cfg).unwrap();
+        let cfg2 = Config::from_str(&serialized).unwrap();
+        assert_eq!(
+            cfg.submenu.spring_open_delay_ms,
+            cfg2.submenu.spring_open_delay_ms
+        );
+        assert_eq!(cfg.submenu.hover_buffer_px, cfg2.submenu.hover_buffer_px);
+        assert!(
+            (cfg.submenu.non_chain_item_opacity - cfg2.submenu.non_chain_item_opacity).abs() < 1e-6
+        );
     }
 }
