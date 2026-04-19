@@ -601,9 +601,9 @@ pub fn paint_submenu_popup(
         // not the full buffer — keeps the outer forgiveness zone visually clean.
         let mut tr = RECT {
             left: 0,
-            top: layout.buffer_px - layout.scroll_trigger_px,
+            top: layout.buffer_top_px - layout.scroll_trigger_top_px,
             right: layout.popup_w,
-            bottom: layout.buffer_px,
+            bottom: layout.buffer_top_px,
         };
         unsafe {
             DrawTextW(
@@ -618,9 +618,9 @@ pub fn paint_submenu_popup(
         let mut down_glyph: Vec<u16> = "\u{25BC}".encode_utf16().collect(); // ▼
         let mut tr = RECT {
             left: 0,
-            top: layout.popup_h - layout.buffer_px,
+            top: layout.popup_h - layout.buffer_bottom_px,
             right: layout.popup_w,
-            bottom: layout.popup_h - layout.buffer_px + layout.scroll_trigger_px,
+            bottom: layout.popup_h - layout.buffer_bottom_px + layout.scroll_trigger_bottom_px,
         };
         unsafe {
             DrawTextW(

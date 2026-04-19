@@ -239,13 +239,18 @@ pub struct SubmenuLayout {
     pub item_rects: Vec<Rect>,
     pub popup_w: i32,
     pub popup_h: i32,
-    pub buffer_px: i32,
-    /// Height of the scroll-trigger band adjacent to items (at the inner
-    /// edge of the buffer). Cursor in [popup.top + buffer - trigger_px,
-    /// popup.top + buffer) triggers auto-scroll up; similar at the bottom.
-    /// The outer portion of the buffer (closer to the popup edge) stays
-    /// pure forgiveness — no scroll trigger.
-    pub scroll_trigger_px: i32,
+    /// Buffer (forgiveness zone) at the top of the popup, in physical pixels.
+    /// May be 0 when the toolbar-facing side is collapsed for level-1 popups
+    /// whose opening direction means the top edge is flush with the toolbar.
+    pub buffer_top_px: i32,
+    /// Buffer (forgiveness zone) at the bottom of the popup, in physical pixels.
+    /// May be 0 when the toolbar-facing side is collapsed for level-1 popups
+    /// whose opening direction means the bottom edge is flush with the toolbar.
+    pub buffer_bottom_px: i32,
+    /// Scroll-trigger band height at the top (inner min(buffer_top_px, 16) px).
+    pub scroll_trigger_top_px: i32,
+    /// Scroll-trigger band height at the bottom (inner min(buffer_bottom_px, 16) px).
+    pub scroll_trigger_bottom_px: i32,
     /// Number of items visible in the popup's painted area (≤ `total_count`).
     pub visible_count: usize,
     /// Total items the caller wanted to show (pre-scroll).
@@ -254,9 +259,10 @@ pub struct SubmenuLayout {
 
 /// Compute a vertical-stack layout for a submenu popup.
 ///
-/// Items stack top-to-bottom inside a `buffer_px`-wide translucent band.
-/// The buffer is a visible padding around the inner item stack, implementing
-/// the cursor-forgiveness zone described in the spec.
+/// Items stack top-to-bottom inside translucent buffer bands at the top and
+/// bottom. The buffers implement the cursor-forgiveness zone described in the
+/// spec. Pass asymmetric values (e.g. `buffer_top_px = 0`) for level-1 popups
+/// where one side is flush against the toolbar/screen edge.
 ///
 /// `max_popup_h` clamps the popup height: if all items don't fit, only the
 /// first `visible_count` produce rects; the caller uses `scroll_offset` to
@@ -266,35 +272,40 @@ pub fn compute_submenu_layout(
     item_count: usize,
     item_px: i32,
     max_width_px: i32,
-    buffer_px: i32,
+    buffer_top_px: i32,
+    buffer_bottom_px: i32,
     max_popup_h: i32,
 ) -> SubmenuLayout {
     // Floor: always fit at least one item even if max_popup_h is tiny.
-    let floor_h = 2 * buffer_px + item_px;
-    let want_h = (item_count as i32) * item_px + 2 * buffer_px;
+    let floor_h = buffer_top_px + buffer_bottom_px + item_px;
+    let want_h = (item_count as i32) * item_px + buffer_top_px + buffer_bottom_px;
     let popup_h = want_h.min(max_popup_h.max(floor_h));
-    let visible_count = (((popup_h - 2 * buffer_px) / item_px.max(1)) as usize).min(item_count);
+    let visible_count =
+        (((popup_h - buffer_top_px - buffer_bottom_px) / item_px.max(1)) as usize).min(item_count);
     let mut rects = Vec::with_capacity(visible_count);
     for i in 0..visible_count {
         rects.push(Rect {
-            left: buffer_px,
-            top: buffer_px + (i as i32) * item_px,
-            right: buffer_px + max_width_px,
-            bottom: buffer_px + (i as i32) * item_px + item_px,
+            left: buffer_top_px,
+            top: buffer_top_px + (i as i32) * item_px,
+            right: buffer_top_px + max_width_px,
+            bottom: buffer_top_px + (i as i32) * item_px + item_px,
         });
     }
-    // Scroll trigger band: inner min(buffer_px, 16) px adjacent to items.
-    // When buffer is very small (< 16), the whole buffer is the trigger zone.
-    // The outer portion (buffer_px - scroll_trigger_px px) stays pure
-    // forgiveness — cursor can drift past ▲/▼ without triggering scroll.
-    let scroll_trigger_px = buffer_px.min(16);
+    // Scroll trigger bands: inner min(buffer_*_px, 16) px adjacent to items.
+    // When a buffer is very small (< 16), the whole buffer is the trigger zone.
+    // The outer portion stays pure forgiveness — cursor can drift past ▲/▼
+    // without triggering scroll.
+    let scroll_trigger_top_px = buffer_top_px.min(16);
+    let scroll_trigger_bottom_px = buffer_bottom_px.min(16);
 
     SubmenuLayout {
         item_rects: rects,
-        popup_w: max_width_px + 2 * buffer_px,
+        popup_w: max_width_px + buffer_top_px + buffer_bottom_px,
         popup_h,
-        buffer_px,
-        scroll_trigger_px,
+        buffer_top_px,
+        buffer_bottom_px,
+        scroll_trigger_top_px,
+        scroll_trigger_bottom_px,
         visible_count,
         total_count: item_count,
     }
@@ -942,11 +953,11 @@ mod tests {
     #[test]
     fn submenu_layout_stacks_vertically_with_buffer() {
         // Pass generous max_popup_h so no clamping occurs.
-        let layout = compute_submenu_layout(3, 28, 200, 10, 10_000);
+        let layout = compute_submenu_layout(3, 28, 200, 10, 10, 10_000);
         assert_eq!(layout.item_rects.len(), 3);
         assert_eq!(layout.visible_count, 3);
         assert_eq!(layout.total_count, 3);
-        // First inner rect top-left is (buffer, buffer).
+        // First inner rect top-left is (buffer_top, buffer_top).
         assert_eq!(layout.item_rects[0].left, 10);
         assert_eq!(layout.item_rects[0].top, 10);
         assert_eq!(layout.item_rects[0].width(), 200);
@@ -962,13 +973,13 @@ mod tests {
 
     #[test]
     fn submenu_layout_zero_items_is_just_buffer() {
-        let layout = compute_submenu_layout(0, 28, 200, 10, 10_000);
+        let layout = compute_submenu_layout(0, 28, 200, 10, 10, 10_000);
         assert_eq!(layout.popup_w, 220);
         assert_eq!(layout.visible_count, 0);
         assert_eq!(layout.total_count, 0);
         // With zero items, popup_h is just 2*buffer (clamped floor = 2*buffer + item_px,
         // but item_count=0 so want_h=20 which is smaller than floor=56; floor wins).
-        // Actually: floor_h = 2*10 + 28 = 48; want_h = 0*28 + 20 = 20; popup_h = min(20, max(10000, 48)) ... wait:
+        // Actually: floor_h = 10 + 10 + 28 = 48; want_h = 0*28 + 20 = 20; popup_h = min(20, max(10000, 48)) ... wait:
         // popup_h = want_h.min(max_popup_h.max(floor_h)) = 20.min(10000.max(48)) = 20.min(10000) = 20.
         // floor is only used to clamp max_popup_h upward before min — it doesn't lift want_h.
         assert_eq!(layout.popup_h, 20);
@@ -977,7 +988,7 @@ mod tests {
 
     #[test]
     fn submenu_layout_zero_buffer_tight_fit() {
-        let layout = compute_submenu_layout(2, 30, 150, 0, 10_000);
+        let layout = compute_submenu_layout(2, 30, 150, 0, 0, 10_000);
         assert_eq!(layout.popup_w, 150);
         assert_eq!(layout.popup_h, 60);
         assert_eq!(layout.visible_count, 2);
@@ -1005,7 +1016,7 @@ mod tests {
     #[test]
     fn submenu_layout_clamps_to_max_height_and_reports_visible_count() {
         // 10 items × 30 px + 2*10 buffer = 320 needed; max 150 → (150-20)/30 = 4 visible.
-        let layout = compute_submenu_layout(10, 30, 200, 10, 150);
+        let layout = compute_submenu_layout(10, 30, 200, 10, 10, 150);
         assert_eq!(layout.total_count, 10);
         assert_eq!(layout.visible_count, 4);
         assert_eq!(layout.item_rects.len(), 4);
@@ -1015,8 +1026,8 @@ mod tests {
     #[test]
     fn submenu_layout_honors_min_height_floor() {
         // max_popup_h smaller than even one item + buffer → floor lifts it.
-        // floor_h = 2*10 + 30 = 50; max_popup_h=20 → max(20, 50) = 50.
-        let layout = compute_submenu_layout(10, 30, 200, 10, 20);
+        // floor_h = 10 + 10 + 30 = 50; max_popup_h=20 → max(20, 50) = 50.
+        let layout = compute_submenu_layout(10, 30, 200, 10, 10, 20);
         assert_eq!(layout.popup_h, 50);
         assert_eq!(layout.visible_count, 1);
     }
@@ -1024,22 +1035,38 @@ mod tests {
     #[test]
     fn submenu_layout_visible_count_never_exceeds_total() {
         // Plenty of height for 20 but only 3 items → visible=3, not more.
-        let layout = compute_submenu_layout(3, 30, 200, 10, 10_000);
+        let layout = compute_submenu_layout(3, 30, 200, 10, 10, 10_000);
         assert_eq!(layout.visible_count, 3);
         assert_eq!(layout.total_count, 3);
     }
 
     #[test]
     fn submenu_layout_scroll_trigger_px_reasonable() {
-        // buffer_px=30 >= 16 → trigger clamps to 16.
-        let layout = compute_submenu_layout(5, 30, 200, 30, 10_000);
-        assert_eq!(layout.scroll_trigger_px, 16);
+        // buffer=30 >= 16 → both triggers clamp to 16.
+        let layout = compute_submenu_layout(5, 30, 200, 30, 30, 10_000);
+        assert_eq!(layout.scroll_trigger_top_px, 16);
+        assert_eq!(layout.scroll_trigger_bottom_px, 16);
     }
 
     #[test]
     fn submenu_layout_scroll_trigger_clamps_to_small_buffer() {
-        // buffer_px=5 < 16 → trigger equals buffer.
-        let layout = compute_submenu_layout(5, 30, 200, 5, 10_000);
-        assert_eq!(layout.scroll_trigger_px, 5);
+        // buffer=5 < 16 → trigger equals buffer on both sides.
+        let layout = compute_submenu_layout(5, 30, 200, 5, 5, 10_000);
+        assert_eq!(layout.scroll_trigger_top_px, 5);
+        assert_eq!(layout.scroll_trigger_bottom_px, 5);
+    }
+
+    #[test]
+    fn submenu_layout_asymmetric_buffer() {
+        // top=0, bottom=20: popup_h = 3*30 + 0 + 20 = 110; items start at y=0.
+        let layout = compute_submenu_layout(3, 30, 200, 0, 20, 10_000);
+        assert_eq!(layout.popup_h, 110);
+        assert_eq!(layout.item_rects[0].top, 0);
+        assert_eq!(layout.item_rects[0].bottom, 30);
+        assert_eq!(layout.item_rects[2].bottom, 90);
+        assert_eq!(layout.buffer_top_px, 0);
+        assert_eq!(layout.buffer_bottom_px, 20);
+        assert_eq!(layout.scroll_trigger_top_px, 0);
+        assert_eq!(layout.scroll_trigger_bottom_px, 16);
     }
 }
