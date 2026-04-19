@@ -821,11 +821,13 @@ impl ToolbarState {
             .min(crate::theme::scale(400, self.dpi))
             .max(crate::theme::scale(100, self.dpi));
 
+        let max_popup_h = work.bottom - work.top;
         let layout = crate::layout::compute_submenu_layout(
             display_items.len(),
             item_px,
             max_width_px,
             buffer_px,
+            max_popup_h,
         );
 
         // Popup placement: level-1 left-edge aligns to triggering button; deeper levels right of parent.
@@ -872,7 +874,14 @@ impl ToolbarState {
                     crate::submenu_wnd::popup_state(parent_hwnd)
                         .and_then(|p| {
                             p.highlighted_index.and_then(|hi| {
-                                p.layout.item_rects.get(hi).map(|r| parent_rect.top + r.top)
+                                // highlighted_index is in display-items space;
+                                // item_rects is in visible-window space (0..visible_count).
+                                // Subtract scroll_offset to get the rect index.
+                                let vis_i = hi.checked_sub(p.scroll_offset)?;
+                                p.layout
+                                    .item_rects
+                                    .get(vis_i)
+                                    .map(|r| parent_rect.top + r.top)
                             })
                         })
                         .unwrap_or(parent_rect.top)
@@ -927,6 +936,7 @@ impl ToolbarState {
             dpi: self.dpi,
             toolbar_hwnd: toolbar,
             drop_registered: false,
+            scroll_offset: 0,
         });
 
         let popup_hwnd =

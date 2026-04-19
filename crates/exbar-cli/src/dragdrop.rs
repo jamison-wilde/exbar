@@ -651,9 +651,9 @@ impl SubmenuDropTarget {
             None => return -1,
         };
 
-        for (idx, rect) in popup.layout.item_rects.iter().enumerate() {
+        for (vis_i, rect) in popup.layout.item_rects.iter().enumerate() {
             if pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom {
-                return idx as isize;
+                return (vis_i + popup.scroll_offset) as isize;
             }
         }
         -1

@@ -240,6 +240,10 @@ pub struct SubmenuLayout {
     pub popup_w: i32,
     pub popup_h: i32,
     pub buffer_px: i32,
+    /// Number of items visible in the popup's painted area (≤ `total_count`).
+    pub visible_count: usize,
+    /// Total items the caller wanted to show (pre-scroll).
+    pub total_count: usize,
 }
 
 /// Compute a vertical-stack layout for a submenu popup.
@@ -247,14 +251,25 @@ pub struct SubmenuLayout {
 /// Items stack top-to-bottom inside a `buffer_px`-wide translucent band.
 /// The buffer is a visible padding around the inner item stack, implementing
 /// the cursor-forgiveness zone described in the spec.
+///
+/// `max_popup_h` clamps the popup height: if all items don't fit, only the
+/// first `visible_count` produce rects; the caller uses `scroll_offset` to
+/// select which slice of `display_items` to paint. Pass a very large value
+/// (e.g. 10 000) to disable clamping.
 pub fn compute_submenu_layout(
     item_count: usize,
     item_px: i32,
     max_width_px: i32,
     buffer_px: i32,
+    max_popup_h: i32,
 ) -> SubmenuLayout {
-    let mut rects = Vec::with_capacity(item_count);
-    for i in 0..item_count {
+    // Floor: always fit at least one item even if max_popup_h is tiny.
+    let floor_h = 2 * buffer_px + item_px;
+    let want_h = (item_count as i32) * item_px + 2 * buffer_px;
+    let popup_h = want_h.min(max_popup_h.max(floor_h));
+    let visible_count = (((popup_h - 2 * buffer_px) / item_px.max(1)) as usize).min(item_count);
+    let mut rects = Vec::with_capacity(visible_count);
+    for i in 0..visible_count {
         rects.push(Rect {
             left: buffer_px,
             top: buffer_px + (i as i32) * item_px,
@@ -265,8 +280,10 @@ pub fn compute_submenu_layout(
     SubmenuLayout {
         item_rects: rects,
         popup_w: max_width_px + 2 * buffer_px,
-        popup_h: (item_count as i32) * item_px + 2 * buffer_px,
+        popup_h,
         buffer_px,
+        visible_count,
+        total_count: item_count,
     }
 }
 
@@ -911,8 +928,11 @@ mod tests {
 
     #[test]
     fn submenu_layout_stacks_vertically_with_buffer() {
-        let layout = compute_submenu_layout(3, 28, 200, 10);
+        // Pass generous max_popup_h so no clamping occurs.
+        let layout = compute_submenu_layout(3, 28, 200, 10, 10_000);
         assert_eq!(layout.item_rects.len(), 3);
+        assert_eq!(layout.visible_count, 3);
+        assert_eq!(layout.total_count, 3);
         // First inner rect top-left is (buffer, buffer).
         assert_eq!(layout.item_rects[0].left, 10);
         assert_eq!(layout.item_rects[0].top, 10);
@@ -929,17 +949,26 @@ mod tests {
 
     #[test]
     fn submenu_layout_zero_items_is_just_buffer() {
-        let layout = compute_submenu_layout(0, 28, 200, 10);
+        let layout = compute_submenu_layout(0, 28, 200, 10, 10_000);
         assert_eq!(layout.popup_w, 220);
+        assert_eq!(layout.visible_count, 0);
+        assert_eq!(layout.total_count, 0);
+        // With zero items, popup_h is just 2*buffer (clamped floor = 2*buffer + item_px,
+        // but item_count=0 so want_h=20 which is smaller than floor=56; floor wins).
+        // Actually: floor_h = 2*10 + 28 = 48; want_h = 0*28 + 20 = 20; popup_h = min(20, max(10000, 48)) ... wait:
+        // popup_h = want_h.min(max_popup_h.max(floor_h)) = 20.min(10000.max(48)) = 20.min(10000) = 20.
+        // floor is only used to clamp max_popup_h upward before min — it doesn't lift want_h.
         assert_eq!(layout.popup_h, 20);
         assert!(layout.item_rects.is_empty());
     }
 
     #[test]
     fn submenu_layout_zero_buffer_tight_fit() {
-        let layout = compute_submenu_layout(2, 30, 150, 0);
+        let layout = compute_submenu_layout(2, 30, 150, 0, 10_000);
         assert_eq!(layout.popup_w, 150);
         assert_eq!(layout.popup_h, 60);
+        assert_eq!(layout.visible_count, 2);
+        assert_eq!(layout.total_count, 2);
         assert_eq!(
             layout.item_rects[0],
             Rect {
@@ -958,5 +987,32 @@ mod tests {
                 bottom: 60
             }
         );
+    }
+
+    #[test]
+    fn submenu_layout_clamps_to_max_height_and_reports_visible_count() {
+        // 10 items × 30 px + 2*10 buffer = 320 needed; max 150 → (150-20)/30 = 4 visible.
+        let layout = compute_submenu_layout(10, 30, 200, 10, 150);
+        assert_eq!(layout.total_count, 10);
+        assert_eq!(layout.visible_count, 4);
+        assert_eq!(layout.item_rects.len(), 4);
+        assert_eq!(layout.popup_h, 150);
+    }
+
+    #[test]
+    fn submenu_layout_honors_min_height_floor() {
+        // max_popup_h smaller than even one item + buffer → floor lifts it.
+        // floor_h = 2*10 + 30 = 50; max_popup_h=20 → max(20, 50) = 50.
+        let layout = compute_submenu_layout(10, 30, 200, 10, 20);
+        assert_eq!(layout.popup_h, 50);
+        assert_eq!(layout.visible_count, 1);
+    }
+
+    #[test]
+    fn submenu_layout_visible_count_never_exceeds_total() {
+        // Plenty of height for 20 but only 3 items → visible=3, not more.
+        let layout = compute_submenu_layout(3, 30, 200, 10, 10_000);
+        assert_eq!(layout.visible_count, 3);
+        assert_eq!(layout.total_count, 3);
     }
 }

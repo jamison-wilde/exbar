@@ -20,8 +20,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, LoadCursorW,
     PostMessageW, RegisterClassExW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DESTROY,
-    WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows_core::PCWSTR;
 
@@ -62,6 +62,9 @@ pub struct SubmenuPopup {
     /// in [`destroy_popup`] so we don't log spurious `DRAGDROP_E_NOTREGISTERED`
     /// warnings in test contexts where OleInitialize was never called.
     pub drop_registered: bool,
+    /// Index of the first `display_items` entry that is currently painted.
+    /// `0` when all items fit; adjusted by `WM_MOUSEWHEEL`.
+    pub scroll_offset: usize,
 }
 
 // ── Class registration ────────────────────────────────────────────────────────
@@ -329,6 +332,7 @@ unsafe extern "system" fn submenu_wndproc(
                     popup.highlighted_index,
                     popup.dpi,
                     popup.level,
+                    popup.scroll_offset,
                 );
             }
             unsafe {
@@ -345,7 +349,7 @@ unsafe extern "system" fn submenu_wndproc(
             // both sign-extended from i16 to handle negative coords correctly.
             let x = (lparam.0 as i16) as i32;
             let y = ((lparam.0 >> 16) as i16) as i32;
-            let item_idx = hit_test_inner(&popup.layout, x, y);
+            let item_idx = hit_test_inner(&popup.layout, x, y, popup.scroll_offset);
             // Pack level into the high 16 bits of wparam; item index into lparam.
             let wparam_level = WPARAM((popup.level as usize) << 16);
             let toolbar_hwnd = popup.toolbar_hwnd;
@@ -366,7 +370,7 @@ unsafe extern "system" fn submenu_wndproc(
             };
             let x = (lparam.0 as i16) as i32;
             let y = ((lparam.0 >> 16) as i16) as i32;
-            let item_idx = hit_test_inner(&popup.layout, x, y);
+            let item_idx = hit_test_inner(&popup.layout, x, y, popup.scroll_offset);
             if item_idx < 0 {
                 // Click landed in the translucent buffer band (not on any item). Treat
                 // as a dismissal signal — user clicked "near but not on" any folder.
@@ -397,6 +401,33 @@ unsafe extern "system" fn submenu_wndproc(
                 );
             }
             LRESULT(0)
+        }
+
+        WM_MOUSEWHEEL => {
+            let Some(popup) = (unsafe { popup_state(hwnd) }) else {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            };
+            let total = popup.display_items.len();
+            let visible = popup.layout.visible_count;
+            if total <= visible {
+                return windows::Win32::Foundation::LRESULT(0);
+            }
+            // wparam high-word = wheel delta (signed i16).
+            // Positive delta = wheel rolled away from user = scroll content up (decrease offset).
+            let delta = (((wparam.0 >> 16) as i16) as i32) / 120; // WHEEL_DELTA = 120 per notch
+            let max_offset = total - visible;
+            let new_offset = if delta > 0 {
+                popup.scroll_offset.saturating_sub(delta as usize)
+            } else {
+                (popup.scroll_offset + (-delta) as usize).min(max_offset)
+            };
+            if new_offset != popup.scroll_offset {
+                popup.scroll_offset = new_offset;
+                unsafe {
+                    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
+                }
+            }
+            windows::Win32::Foundation::LRESULT(0)
         }
 
         WM_KEYDOWN => {
@@ -443,12 +474,19 @@ unsafe extern "system" fn submenu_wndproc(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Return the item-rect index containing `(x, y)` in client coords, or `-1`
-/// if the point is outside all item rects (e.g., inside the buffer band).
-fn hit_test_inner(layout: &crate::layout::SubmenuLayout, x: i32, y: i32) -> isize {
+/// Return the logical `display_items` index containing `(x, y)` in client
+/// coords, or `-1` if the point is outside all item rects (e.g., inside the
+/// buffer band). The returned index accounts for `scroll_offset` so callers
+/// can index directly into `display_items`.
+fn hit_test_inner(
+    layout: &crate::layout::SubmenuLayout,
+    x: i32,
+    y: i32,
+    scroll_offset: usize,
+) -> isize {
     for (i, r) in layout.item_rects.iter().enumerate() {
         if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
-            return i as isize;
+            return (i + scroll_offset) as isize;
         }
     }
     -1
