@@ -197,6 +197,7 @@ fn synthesized_add_button() -> FolderEntry {
         name: "+".into(),
         path: String::new(),
         icon: None,
+        kind: crate::config::FolderKind::Folder,
     }
 }
 
@@ -318,6 +319,7 @@ mod tests {
             name: name.into(),
             path: "C:\\test".into(),
             icon: None,
+            kind: crate::config::FolderKind::Folder,
         }
     }
 

@@ -155,13 +155,30 @@ pub struct Config {
     pub submenu: SubmenuConfig,
 }
 
+/// Discriminator for toolbar button kinds. Omitted in JSON = `Folder` (backward compat).
+/// Unknown values deserialize to `Folder` (forward compat via `serde(other)`).
+///
+/// Note: `#[serde(other)]` must appear on the **last** variant; `Folder` is placed last
+/// so it acts as the catch-all for unknown future kinds.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FolderKind {
+    Recent,
+    #[default]
+    #[serde(other)]
+    Folder,
+}
+
 /// One folder shortcut. Persists to JSON as `{"name": "...", "path": "..."}` plus an optional cached icon.
+/// `path` is empty for `kind = Recent` pseudo-entries (no fixed path).
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct FolderEntry {
     pub name: String,
+    #[serde(default)]
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    #[serde(default)]
+    pub kind: FolderKind,
 }
 
 impl Config {
@@ -192,6 +209,7 @@ impl Config {
             name,
             path,
             icon: None,
+            kind: FolderKind::Folder,
         });
     }
 
@@ -651,5 +669,38 @@ mod tests {
         assert!(
             (cfg.submenu.non_chain_item_opacity - cfg2.submenu.non_chain_item_opacity).abs() < 1e-6
         );
+    }
+
+    #[test]
+    fn folder_entry_kind_defaults_to_folder_when_missing() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[{"name":"Downloads","path":"C:\\Downloads"}]}"#)
+                .unwrap();
+        assert_eq!(cfg.folders[0].kind, FolderKind::Folder);
+    }
+
+    #[test]
+    fn folder_entry_kind_deserializes_recent() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[{"name":"Recent","kind":"Recent"}]}"#).unwrap();
+        assert_eq!(cfg.folders[0].kind, FolderKind::Recent);
+    }
+
+    #[test]
+    fn folder_entry_unknown_kind_falls_back_to_folder() {
+        // Forward-compat: unknown kinds should NOT fail deserialization.
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[{"name":"X","path":"C:\\x","kind":"Mystery"}]}"#)
+                .unwrap();
+        assert_eq!(cfg.folders[0].kind, FolderKind::Folder);
+    }
+
+    #[test]
+    fn folder_kind_round_trips() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[{"name":"Recent","kind":"Recent"}]}"#).unwrap();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let cfg2 = Config::from_str(&json).unwrap();
+        assert_eq!(cfg2.folders[0].kind, FolderKind::Recent);
     }
 }

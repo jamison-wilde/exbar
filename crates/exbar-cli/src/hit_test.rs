@@ -24,6 +24,7 @@ mod tests {
                 name: "x".into(),
                 path: "p".into(),
                 icon: None,
+                kind: crate::config::FolderKind::Folder,
             },
             is_add: false,
         }

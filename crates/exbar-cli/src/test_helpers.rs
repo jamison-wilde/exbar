@@ -3,7 +3,7 @@
 //! only under `#[cfg(test)]`.
 
 use crate::clipboard::{Clipboard, test_mocks::MockClipboard};
-use crate::config::{Config, ConfigStore, FolderEntry, test_mocks::MockConfigStore};
+use crate::config::{Config, ConfigStore, FolderEntry, FolderKind, test_mocks::MockConfigStore};
 use crate::dialog_nav::{DialogNavigator, test_mocks::MockDialogNavigator};
 use crate::dragdrop::{FileOperator, test_mocks::MockFileOp};
 use crate::error::ExbarResult;
@@ -118,6 +118,7 @@ pub fn mk_add_button() -> ButtonLayout {
             name: "+".into(),
             path: String::new(),
             icon: None,
+            kind: FolderKind::Folder,
         },
         is_add: true,
     }
@@ -135,6 +136,7 @@ pub fn mk_folder_button(name: &str, path: &str, left: i32) -> ButtonLayout {
             name: name.into(),
             path: path.into(),
             icon: None,
+            kind: FolderKind::Folder,
         },
         is_add: false,
     }
