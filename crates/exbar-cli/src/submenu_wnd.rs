@@ -19,9 +19,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, IDC_ARROW, LWA_ALPHA, LoadCursorW,
-    RegisterClassExW, SW_SHOWNOACTIVATE, SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow,
-    WM_DESTROY, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    PostMessageW, RegisterClassExW, SW_SHOWNOACTIVATE, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, ShowWindow, WM_DESTROY, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows_core::PCWSTR;
 
@@ -332,6 +332,29 @@ unsafe extern "system" fn submenu_wndproc(
             LRESULT(0)
         }
 
+        WM_MOUSEMOVE => {
+            let Some(popup) = (unsafe { popup_state(hwnd) }) else {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            };
+            // Extract client coords from lparam: LOWORD = x, HIWORD = y,
+            // both sign-extended from i16 to handle negative coords correctly.
+            let x = (lparam.0 as i16) as i32;
+            let y = ((lparam.0 >> 16) as i16) as i32;
+            let item_idx = hit_test_inner(&popup.layout, x, y);
+            // Pack level into the high 16 bits of wparam; item index into lparam.
+            let wparam_level = WPARAM((popup.level as usize) << 16);
+            let toolbar_hwnd = popup.toolbar_hwnd;
+            unsafe {
+                let _ = PostMessageW(
+                    Some(toolbar_hwnd),
+                    crate::wndproc::WM_USER_SUBMENU_HOVER,
+                    wparam_level,
+                    LPARAM(item_idx),
+                );
+            }
+            LRESULT(0)
+        }
+
         WM_DESTROY => {
             // Normal path: destroy_popup drops the Box before calling
             // DestroyWindow, so GWLP_USERDATA is already 0 here.
@@ -352,6 +375,17 @@ unsafe extern "system" fn submenu_wndproc(
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Return the item-rect index containing `(x, y)` in client coords, or `-1`
+/// if the point is outside all item rects (e.g., inside the buffer band).
+fn hit_test_inner(layout: &crate::layout::SubmenuLayout, x: i32, y: i32) -> isize {
+    for (i, r) in layout.item_rects.iter().enumerate() {
+        if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
+            return i as isize;
+        }
+    }
+    -1
+}
 
 /// Encode `s` as a null-terminated UTF-16 vector suitable for `PCWSTR(v.as_ptr())`.
 fn wide_null(s: &str) -> Vec<u16> {

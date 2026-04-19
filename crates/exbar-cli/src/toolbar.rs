@@ -560,7 +560,7 @@ impl ToolbarState {
                 y.max(work.top).min(work.bottom - layout.popup_h),
             )
         } else {
-            // Deeper level: to the right of its parent popup (Task 13 refines).
+            // Level 2+: place beside the parent popup with flow-direction lock.
             let parent_idx = (level as usize) - 2; // parent is one level shallower
             let parent_hwnd = self
                 .submenu_popups
@@ -568,7 +568,50 @@ impl ToolbarState {
                 .copied()
                 .unwrap_or(HWND(std::ptr::null_mut()));
             let parent_rect = self.get_window_screen_rect(parent_hwnd);
-            (parent_rect.right, parent_rect.top)
+
+            // Extract anchor_top from the parent popup's highlighted item before
+            // any further mutable borrows of self. We do this in a separate block
+            // so the immutable borrow of popup_state ends before we mutate
+            // self.submenu_chain.flow below.
+            let anchor_top: i32 = if parent_hwnd.0.is_null() {
+                parent_rect.top
+            } else {
+                unsafe {
+                    crate::submenu_wnd::popup_state(parent_hwnd)
+                        .and_then(|p| {
+                            p.highlighted_index.and_then(|hi| {
+                                p.layout.item_rects.get(hi).map(|r| parent_rect.top + r.top)
+                            })
+                        })
+                        .unwrap_or(parent_rect.top)
+                }
+            };
+
+            // Resolve (or reuse the locked) flow direction for this chain.
+            // The first level-2 open determines direction; subsequent deeper
+            // levels inherit it so the cascade stays visually consistent.
+            let proposed_right_x = parent_rect.right + layout.popup_w;
+            let flow = match self.submenu_chain.flow {
+                Some(f) => f,
+                None => {
+                    let resolved =
+                        crate::submenu::resolve_flow_direction(proposed_right_x, work);
+                    self.submenu_chain.flow = Some(resolved);
+                    resolved
+                }
+            };
+
+            let x = match flow {
+                crate::submenu::FlowDir::Right => parent_rect.right,
+                crate::submenu::FlowDir::Left => parent_rect.left - layout.popup_w,
+            };
+
+            // Clamp both axes to the monitor work area.
+            let clamped_x = x.max(work.left).min(work.right - layout.popup_w);
+            let clamped_y = anchor_top
+                .max(work.top)
+                .min(work.bottom - layout.popup_h);
+            (clamped_x, clamped_y)
         };
 
         let popup = Box::new(crate::submenu_wnd::SubmenuPopup {

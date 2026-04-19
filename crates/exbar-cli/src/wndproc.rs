@@ -461,6 +461,68 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
+        x if x == WM_USER_SUBMENU_HOVER => {
+            // WPARAM high 16 bits = popup level (u8); LPARAM = item index (isize, -1 = buffer).
+            let level = (wparam.0 >> 16) as u8;
+            let idx = lparam.0; // signed; -1 means "no item hit"
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                if idx < 0 {
+                    state.execute_submenu_event(
+                        hwnd,
+                        crate::submenu::SubmenuEvent::HoverBufferAt,
+                    );
+                } else {
+                    // Recover the display item at (level, idx) from the popup's state.
+                    let popup_hwnd = state
+                        .submenu_popups
+                        .get((level as usize).saturating_sub(1))
+                        .copied();
+                    let display_item = popup_hwnd.and_then(|h| {
+                        if h.0.is_null() {
+                            return None;
+                        }
+                        unsafe {
+                            crate::submenu_wnd::popup_state(h)
+                                .and_then(|p| p.display_items.get(idx as usize).cloned())
+                        }
+                    });
+                    match display_item {
+                        Some(crate::submenu::DisplayItem::Subfolder { entry }) => {
+                            state.execute_submenu_event(
+                                hwnd,
+                                crate::submenu::SubmenuEvent::HoverChildItem {
+                                    level,
+                                    index: idx as usize,
+                                    child_path: entry.path,
+                                    is_dotdot: false,
+                                },
+                            );
+                        }
+                        Some(crate::submenu::DisplayItem::Dotdot { parent_path, .. }) => {
+                            state.execute_submenu_event(
+                                hwnd,
+                                crate::submenu::SubmenuEvent::HoverChildItem {
+                                    level,
+                                    index: idx as usize,
+                                    child_path: parent_path,
+                                    is_dotdot: true,
+                                },
+                            );
+                        }
+                        // ParentReshow, Ellipsis, Empty → treat as buffer
+                        // (highlight stays, dismiss cancelled).
+                        _ => {
+                            state.execute_submenu_event(
+                                hwnd,
+                                crate::submenu::SubmenuEvent::HoverBufferAt,
+                            );
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
         WM_TIMER => {
             let timer_id = wparam.0;
             if timer_id == crate::toolbar::TIMER_REPOSITION {
