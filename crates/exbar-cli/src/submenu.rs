@@ -974,4 +974,24 @@ mod tests_direction {
     fn flow_left_on_right_overflow() {
         assert_eq!(resolve_flow_direction(1921, wa()), FlowDir::Left);
     }
+
+    #[test]
+    fn flow_direction_once_left_always_left() {
+        let work = WorkArea {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        // First overflow flips to Left.
+        let first = resolve_flow_direction(2000, work);
+        assert_eq!(first, FlowDir::Left);
+        // Subsequent non-overflow x would normally say Right, but the ratchet is
+        // enforced at the caller (open_popup_level match arm) — resolve_flow_direction
+        // itself is a pure function and always answers based on the input.
+        let second = resolve_flow_direction(1800, work);
+        assert_eq!(second, FlowDir::Right);
+        // This test documents that the one-way lock is the CALLER's responsibility,
+        // not this function's. The caller preserves FlowDir::Left once set.
+    }
 }

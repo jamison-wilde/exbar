@@ -643,12 +643,18 @@ impl ToolbarState {
             };
 
             // Resolve (or reuse the locked) flow direction for this chain.
-            // The first level-2 open determines direction; subsequent deeper
-            // levels inherit it so the cascade stays visually consistent.
+            // One-way ratchet: Right can flip to Left at any deeper level if
+            // the proposed right edge overflows the work area. Once Left, it
+            // stays Left for the remainder of the chain (no zigzag).
             let proposed_right_x = parent_rect.right + layout.popup_w;
             let flow = match self.submenu_chain.flow {
-                Some(f) => f,
-                None => {
+                Some(crate::submenu::FlowDir::Left) => {
+                    // Already flipped — stays flipped for the rest of the chain.
+                    crate::submenu::FlowDir::Left
+                }
+                _ => {
+                    // Either first evaluation (None) OR still Right — re-check
+                    // for overflow at THIS level. Flip to Left if needed.
                     let resolved = crate::submenu::resolve_flow_direction(proposed_right_x, work);
                     self.submenu_chain.flow = Some(resolved);
                     resolved
