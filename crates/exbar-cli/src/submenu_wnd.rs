@@ -14,14 +14,17 @@ use std::sync::Once;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_ESCAPE};
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_ESCAPE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, LoadCursorW,
     PostMessageW, RegisterClassExW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DESTROY,
-    WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows_core::PCWSTR;
 
@@ -62,6 +65,16 @@ pub struct SubmenuPopup {
     /// in [`destroy_popup`] so we don't log spurious `DRAGDROP_E_NOTREGISTERED`
     /// warnings in test contexts where OleInitialize was never called.
     pub drop_registered: bool,
+    /// Index of the first `display_items` entry that is currently painted.
+    /// `0` when all items fit; adjusted by `WM_MOUSEWHEEL`.
+    pub scroll_offset: usize,
+    /// Leftover wheel delta from a partial (touchpad) gesture. Accumulates
+    /// until it crosses ±WHEEL_DELTA (120), then translates to 1 unit of
+    /// scroll. Reset to 0 on any full-unit scroll OR on scroll-offset clamp.
+    pub scroll_delta_accum: i32,
+    /// Last band-hover direction posted to the toolbar (-1 up, 0 none, 1 down).
+    /// Tracked to suppress duplicate `WM_USER_SUBMENU_BANDHOVER` posts.
+    pub last_bandhover_dir: isize,
 }
 
 // ── Class registration ────────────────────────────────────────────────────────
@@ -329,6 +342,7 @@ unsafe extern "system" fn submenu_wndproc(
                     popup.highlighted_index,
                     popup.dpi,
                     popup.level,
+                    popup.scroll_offset,
                 );
             }
             unsafe {
@@ -345,7 +359,7 @@ unsafe extern "system" fn submenu_wndproc(
             // both sign-extended from i16 to handle negative coords correctly.
             let x = (lparam.0 as i16) as i32;
             let y = ((lparam.0 >> 16) as i16) as i32;
-            let item_idx = hit_test_inner(&popup.layout, x, y);
+            let item_idx = hit_test_inner(&popup.layout, x, y, popup.scroll_offset);
             // Pack level into the high 16 bits of wparam; item index into lparam.
             let wparam_level = WPARAM((popup.level as usize) << 16);
             let toolbar_hwnd = popup.toolbar_hwnd;
@@ -357,6 +371,72 @@ unsafe extern "system" fn submenu_wndproc(
                     LPARAM(item_idx),
                 );
             }
+
+            // Band-hover detection for auto-scroll. Only the INNER trigger zone
+            // (adjacent to items) fires auto-scroll; the outer forgiveness zone
+            // lets the cursor drift past ▲/▼ without triggering scroll.
+            let total = popup.display_items.len();
+            let visible = popup.layout.visible_count;
+            let can_up = popup.scroll_offset > 0;
+            let can_down = popup.scroll_offset + visible < total;
+            let buffer = popup.layout.buffer_px;
+            let trigger = popup.layout.scroll_trigger_px;
+            // Top trigger band: [buffer - trigger, buffer)
+            let in_top_band = y >= buffer - trigger && y < buffer;
+            // Bottom trigger band: [popup_h - buffer, popup_h - buffer + trigger)
+            let in_bottom_band =
+                y >= popup.layout.popup_h - buffer && y < popup.layout.popup_h - buffer + trigger;
+            let dir: isize = if in_top_band && can_up {
+                -1
+            } else if in_bottom_band && can_down {
+                1
+            } else {
+                0
+            };
+
+            // Only post if direction changed — avoids message spam.
+            if popup.last_bandhover_dir != dir {
+                popup.last_bandhover_dir = dir;
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(toolbar_hwnd),
+                        crate::wndproc::WM_USER_SUBMENU_BANDHOVER,
+                        windows::Win32::Foundation::WPARAM(hwnd.0 as usize),
+                        windows::Win32::Foundation::LPARAM(dir),
+                    );
+                }
+            }
+
+            // Ensure we receive WM_MOUSELEAVE so we can cancel autoscroll.
+            unsafe {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
+            }
+
+            LRESULT(0)
+        }
+
+        x if x == WM_MOUSELEAVE => {
+            let Some(popup) = (unsafe { popup_state(hwnd) }) else {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            };
+            if popup.last_bandhover_dir != 0 {
+                popup.last_bandhover_dir = 0;
+                let toolbar_hwnd = popup.toolbar_hwnd;
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(toolbar_hwnd),
+                        crate::wndproc::WM_USER_SUBMENU_BANDHOVER,
+                        windows::Win32::Foundation::WPARAM(hwnd.0 as usize),
+                        windows::Win32::Foundation::LPARAM(0),
+                    );
+                }
+            }
             LRESULT(0)
         }
 
@@ -366,7 +446,7 @@ unsafe extern "system" fn submenu_wndproc(
             };
             let x = (lparam.0 as i16) as i32;
             let y = ((lparam.0 >> 16) as i16) as i32;
-            let item_idx = hit_test_inner(&popup.layout, x, y);
+            let item_idx = hit_test_inner(&popup.layout, x, y, popup.scroll_offset);
             if item_idx < 0 {
                 // Click landed in the translucent buffer band (not on any item). Treat
                 // as a dismissal signal — user clicked "near but not on" any folder.
@@ -397,6 +477,56 @@ unsafe extern "system" fn submenu_wndproc(
                 );
             }
             LRESULT(0)
+        }
+
+        WM_MOUSEWHEEL => {
+            let Some(popup) = (unsafe { popup_state(hwnd) }) else {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            };
+            let total = popup.display_items.len();
+            let visible = popup.layout.visible_count;
+            if total <= visible {
+                return windows::Win32::Foundation::LRESULT(0);
+            }
+            const WHEEL_DELTA: i32 = 120;
+
+            // wparam high-word = wheel delta (signed i16).
+            // Positive delta = wheel rolled away from user = scroll content up (decrease offset).
+            let delta = ((wparam.0 >> 16) as i16) as i32;
+            popup.scroll_delta_accum += delta;
+
+            // Translate accumulated delta into integer item-units.
+            let steps = popup.scroll_delta_accum / WHEEL_DELTA;
+            popup.scroll_delta_accum -= steps * WHEEL_DELTA;
+
+            if steps == 0 {
+                return windows::Win32::Foundation::LRESULT(0);
+            }
+
+            let max_offset = total - visible;
+            let new_offset = if steps > 0 {
+                popup.scroll_offset.saturating_sub(steps as usize)
+            } else {
+                (popup.scroll_offset + (-steps) as usize).min(max_offset)
+            };
+            if new_offset != popup.scroll_offset {
+                popup.scroll_offset = new_offset;
+                // Clear the fractional accumulator at clamp boundaries to avoid
+                // feel-of-accumulation when user hits top/bottom.
+                if new_offset == 0 || new_offset == max_offset {
+                    popup.scroll_delta_accum = 0;
+                }
+                unsafe {
+                    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
+                }
+                // After scroll, cursor is over a different logical item.
+                // Recompute hit-test so highlighted_index stays accurate
+                // without waiting for the next WM_MOUSEMOVE.
+                unsafe {
+                    refresh_highlight_from_cursor(hwnd);
+                }
+            }
+            windows::Win32::Foundation::LRESULT(0)
         }
 
         WM_KEYDOWN => {
@@ -441,14 +571,66 @@ unsafe extern "system" fn submenu_wndproc(
     }
 }
 
+// ── Public helpers ────────────────────────────────────────────────────────────
+
+/// After a scroll change, recompute which logical display-item is under
+/// the current cursor and update `popup.highlighted_index`. Invalidates the
+/// popup to repaint the new highlight.
+///
+/// Cursor in the buffer band (outside all item rects, i.e. `hit_test_inner`
+/// returns `-1`) leaves the existing `highlighted_index` unchanged — preserves
+/// the "last-hovered sticks" behavior so the highlight doesn't vanish while
+/// the cursor rests in the forgiveness zone.
+///
+/// # Safety
+/// `hwnd` must be a live popup HWND with state in `GWLP_USERDATA`. Must be
+/// called on the popup's owner-thread (same invariant as all `popup_state`
+/// consumers).
+pub unsafe fn refresh_highlight_from_cursor(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let Some(popup) = (unsafe { popup_state(hwnd) }) else {
+        return;
+    };
+    let mut pt = POINT::default();
+    unsafe {
+        if GetCursorPos(&mut pt).is_err() {
+            return;
+        }
+        let _ = ScreenToClient(hwnd, &mut pt);
+    }
+    let hit = hit_test_inner(&popup.layout, pt.x, pt.y, popup.scroll_offset);
+    let new_highlight = if hit < 0 {
+        // Cursor is in the buffer band — don't clear the existing highlight.
+        popup.highlighted_index
+    } else {
+        Some(hit as usize)
+    };
+    if popup.highlighted_index != new_highlight {
+        popup.highlighted_index = new_highlight;
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Return the item-rect index containing `(x, y)` in client coords, or `-1`
-/// if the point is outside all item rects (e.g., inside the buffer band).
-fn hit_test_inner(layout: &crate::layout::SubmenuLayout, x: i32, y: i32) -> isize {
+/// Return the logical `display_items` index containing `(x, y)` in client
+/// coords, or `-1` if the point is outside all item rects (e.g., inside the
+/// buffer band). The returned index accounts for `scroll_offset` so callers
+/// can index directly into `display_items`.
+fn hit_test_inner(
+    layout: &crate::layout::SubmenuLayout,
+    x: i32,
+    y: i32,
+    scroll_offset: usize,
+) -> isize {
     for (i, r) in layout.item_rects.iter().enumerate() {
         if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
-            return i as isize;
+            return (i + scroll_offset) as isize;
         }
     }
     -1

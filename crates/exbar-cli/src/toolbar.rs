@@ -94,6 +94,10 @@ pub(crate) const TIMER_DWELL_TICK: usize = 5;
 /// One-shot timer that fires after springOpenDelayMs ms of cursor rest on a
 /// folder button, opening its submenu without requiring a mouse press.
 pub(crate) const TIMER_HOVER_OPEN: usize = 6;
+/// Timer ID for hover-driven auto-scroll inside a submenu popup. Fires every
+/// ~150 ms while the cursor rests in a scrollable band (top or bottom buffer
+/// of a popup with off-screen items).
+pub(crate) const TIMER_SUBMENU_AUTOSCROLL: usize = 7;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -182,6 +186,10 @@ pub(crate) struct ToolbarState {
     pub(crate) recent_debounce_pending: bool,
     /// Button index the hover-open timer is waiting on. `None` when no wait is active.
     pub(crate) hover_open_pending_button: Option<usize>,
+    /// HWND of the popup currently being auto-scrolled (`None` = no autoscroll).
+    pub(crate) autoscroll_popup: Option<HWND>,
+    /// Auto-scroll direction: -1 = scroll up (decrease offset), +1 = scroll down. 0 = inactive.
+    pub(crate) autoscroll_dir: i32,
 }
 
 impl ToolbarState {
@@ -264,6 +272,8 @@ impl ToolbarState {
             recent_dirty: false,
             recent_debounce_pending: false,
             hover_open_pending_button: None,
+            autoscroll_popup: None,
+            autoscroll_dir: 0,
         }
     }
 }
@@ -821,11 +831,13 @@ impl ToolbarState {
             .min(crate::theme::scale(400, self.dpi))
             .max(crate::theme::scale(100, self.dpi));
 
+        let max_popup_h = work.bottom - work.top;
         let layout = crate::layout::compute_submenu_layout(
             display_items.len(),
             item_px,
             max_width_px,
             buffer_px,
+            max_popup_h,
         );
 
         // Popup placement: level-1 left-edge aligns to triggering button; deeper levels right of parent.
@@ -840,12 +852,30 @@ impl ToolbarState {
             //              = btn.left + scale(2, dpi) - buffer
             let align_offset = crate::theme::scale(BTN_PAD_H - 8, self.dpi);
             let x = btn.left + align_offset - buffer;
-            let y = match reshow {
-                // Popup opens downward: reshow row (first) should align with button top.
-                ReshowPosition::First => btn.top - buffer,
-                // Popup opens upward: reshow row (last) should align with button bottom.
-                ReshowPosition::Last => btn.bottom - layout.popup_h + buffer,
-                ReshowPosition::None => btn.top,
+            // TODO(vertical toolbar): if layout is Vertical, horizontal offset should
+            // push the Recent popup left/right of the toolbar instead. For now assume
+            // horizontal toolbars — the dominant case.
+            let y = if is_recent {
+                // Recent's root submenu sits entirely above or below the toolbar —
+                // never overlapping the Recent button itself. Regular folders have a
+                // ParentReshow row that is meant to sit "in place" over the toolbar
+                // button; Recent has no such row, so overlapping serves no purpose.
+                match reshow {
+                    // Popup opens downward: sit below the button entirely.
+                    ReshowPosition::First => btn.bottom,
+                    // Popup opens upward: sit above the button entirely.
+                    ReshowPosition::Last => btn.top - layout.popup_h,
+                    // Defensive — Recent at level 1 always resolves First or Last.
+                    ReshowPosition::None => btn.top,
+                }
+            } else {
+                match reshow {
+                    // Popup opens downward: reshow row (first) should align with button top.
+                    ReshowPosition::First => btn.top - buffer,
+                    // Popup opens upward: reshow row (last) should align with button bottom.
+                    ReshowPosition::Last => btn.bottom - layout.popup_h + buffer,
+                    ReshowPosition::None => btn.top,
+                }
             };
             (
                 x.max(work.left).min(work.right - layout.popup_w),
@@ -872,7 +902,14 @@ impl ToolbarState {
                     crate::submenu_wnd::popup_state(parent_hwnd)
                         .and_then(|p| {
                             p.highlighted_index.and_then(|hi| {
-                                p.layout.item_rects.get(hi).map(|r| parent_rect.top + r.top)
+                                // highlighted_index is in display-items space;
+                                // item_rects is in visible-window space (0..visible_count).
+                                // Subtract scroll_offset to get the rect index.
+                                let vis_i = hi.checked_sub(p.scroll_offset)?;
+                                p.layout
+                                    .item_rects
+                                    .get(vis_i)
+                                    .map(|r| parent_rect.top + r.top)
                             })
                         })
                         .unwrap_or(parent_rect.top)
@@ -927,6 +964,9 @@ impl ToolbarState {
             dpi: self.dpi,
             toolbar_hwnd: toolbar,
             drop_registered: false,
+            scroll_offset: 0,
+            scroll_delta_accum: 0,
+            last_bandhover_dir: 0,
         });
 
         let popup_hwnd =
@@ -981,6 +1021,17 @@ impl ToolbarState {
                 crate::submenu_wnd::destroy_popup(h);
             }
         }
+        // Cancel any active autoscroll timer — the target popup is gone.
+        if self.autoscroll_dir != 0 {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                    Some(toolbar),
+                    crate::toolbar::TIMER_SUBMENU_AUTOSCROLL,
+                );
+            }
+            self.autoscroll_popup = None;
+            self.autoscroll_dir = 0;
+        }
         self.maybe_kill_safety_timer(toolbar);
     }
 
@@ -998,7 +1049,7 @@ impl ToolbarState {
     }
 
     fn set_popup_highlight(&mut self, level: u8, index: Option<usize>) {
-        use windows::Win32::Foundation::RECT as WinRect;
+        use windows::Win32::Graphics::Gdi::InvalidateRect as InvalidateRectFn;
 
         let Some(&h) = self.submenu_popups.get((level as usize).saturating_sub(1)) else {
             return;
@@ -1010,25 +1061,50 @@ impl ToolbarState {
         // Collect the old + new item rects that need repainting, updating the
         // highlighted_index in the same pass. Only fires when the index actually
         // changed, so mouse micro-motion at the same item is a no-op.
-        let dirty: Option<Vec<crate::layout::Rect>> = unsafe {
+        //
+        // highlighted_index is in display-items space (0..total_count).
+        // layout.item_rects is in visible-window space (0..visible_count).
+        // When scroll_offset > 0 these spaces don't match — passing a display-space
+        // index directly to item_rects.get() returns the WRONG row or silently
+        // misses (causing stuck highlights or multi-highlight artifacts).
+        // We map display→visible before lookup; off-screen items fall back to a
+        // full InvalidateRect so no repaint is ever missed.
+        enum Action {
+            None,
+            Full,
+            Partial(Vec<crate::layout::Rect>),
+        }
+
+        let action = unsafe {
             match crate::submenu_wnd::popup_state(h) {
                 Some(popup) if popup.highlighted_index != index => {
                     let old = popup.highlighted_index;
                     popup.highlighted_index = index;
                     let mut rects = Vec::new();
-                    if let Some(i) = old
-                        && let Some(r) = popup.layout.item_rects.get(i)
-                    {
-                        rects.push(*r);
+                    let mut any_offscreen = false;
+                    for display_idx in [old, index].into_iter().flatten() {
+                        // Map display-space index → visible-space index.
+                        let vis = display_idx
+                            .checked_sub(popup.scroll_offset)
+                            .filter(|&v| v < popup.layout.visible_count);
+                        match vis {
+                            Some(v) => {
+                                if let Some(r) = popup.layout.item_rects.get(v) {
+                                    rects.push(*r);
+                                }
+                            }
+                            None => any_offscreen = true,
+                        }
                     }
-                    if let Some(i) = index
-                        && let Some(r) = popup.layout.item_rects.get(i)
-                    {
-                        rects.push(*r);
+                    if any_offscreen {
+                        Action::Full
+                    } else if rects.is_empty() {
+                        Action::None
+                    } else {
+                        Action::Partial(rects)
                     }
-                    Some(rects)
                 }
-                _ => None,
+                _ => Action::None,
             }
         };
 
@@ -1036,16 +1112,24 @@ impl ToolbarState {
         // GDI's update region clips the paint loop in paint_submenu_popup so
         // unaffected rows are skipped with zero GDI work.
         // erase=false: WM_PAINT fills its own background, so no OS erase needed.
-        if let Some(rects) = dirty {
-            for r in rects {
-                let win_rect = WinRect {
-                    left: r.left,
-                    top: r.top,
-                    right: r.right,
-                    bottom: r.bottom,
-                };
-                unsafe {
-                    let _ = InvalidateRect(Some(h), Some(&win_rect), false);
+        // When either index is off-screen, fall back to full invalidation so no
+        // repaint is ever missed.
+        match action {
+            Action::None => {}
+            Action::Full => unsafe {
+                let _ = InvalidateRectFn(Some(h), None, false);
+            },
+            Action::Partial(rects) => {
+                for r in rects {
+                    let win_rect = windows::Win32::Foundation::RECT {
+                        left: r.left,
+                        top: r.top,
+                        right: r.right,
+                        bottom: r.bottom,
+                    };
+                    unsafe {
+                        let _ = InvalidateRectFn(Some(h), Some(&win_rect), false);
+                    }
                 }
             }
         }

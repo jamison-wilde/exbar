@@ -455,6 +455,7 @@ pub fn paint_submenu_popup(
     highlighted_index: Option<usize>,
     dpi: u32,
     level: u8,
+    scroll_offset: usize,
 ) {
     let at_max_depth = (level as usize) >= crate::submenu::MAX_CHAIN_DEPTH;
     let dark = theme::is_dark_mode();
@@ -499,8 +500,11 @@ pub fn paint_submenu_popup(
 
     unsafe { SetBkMode(hdc, TRANSPARENT) };
 
-    for (i, item) in display_items.iter().enumerate() {
-        let Some(rect) = layout.item_rects.get(i) else {
+    // Only paint the visible window of items (scroll_offset..scroll_offset+visible_count).
+    let start = scroll_offset;
+    let end = (start + layout.visible_count).min(display_items.len());
+    for (vis_i, item) in display_items[start..end].iter().enumerate() {
+        let Some(rect) = layout.item_rects.get(vis_i) else {
             continue;
         };
         let win_rect = RECT {
@@ -510,8 +514,10 @@ pub fn paint_submenu_popup(
             bottom: rect.bottom,
         };
 
+        // highlighted_index is in display-items space; vis_i is visible-window space.
+        let logical_i = start + vis_i;
         // Accent background for the highlighted row.
-        if highlighted_index == Some(i) {
+        if highlighted_index == Some(logical_i) {
             let accent_brush = unsafe { CreateSolidBrush(accent_bg) };
             unsafe {
                 FillRect(hdc, &win_rect, accent_brush);
@@ -580,6 +586,49 @@ pub fn paint_submenu_popup(
                     DT_SINGLELINE | DT_VCENTER | DT_RIGHT,
                 );
             }
+        }
+    }
+
+    // Scroll indicators: ▲ in top buffer band when more items above; ▼ in bottom band below.
+    let can_scroll_up = scroll_offset > 0;
+    let can_scroll_down = scroll_offset + layout.visible_count < display_items.len();
+
+    unsafe { SetTextColor(hdc, text_color_dim) };
+
+    if can_scroll_up {
+        let mut up_glyph: Vec<u16> = "\u{25B2}".encode_utf16().collect(); // ▲
+        // Glyph paints in the inner trigger band only (adjacent to items),
+        // not the full buffer — keeps the outer forgiveness zone visually clean.
+        let mut tr = RECT {
+            left: 0,
+            top: layout.buffer_px - layout.scroll_trigger_px,
+            right: layout.popup_w,
+            bottom: layout.buffer_px,
+        };
+        unsafe {
+            DrawTextW(
+                hdc,
+                &mut up_glyph,
+                &mut tr,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+    }
+    if can_scroll_down {
+        let mut down_glyph: Vec<u16> = "\u{25BC}".encode_utf16().collect(); // ▼
+        let mut tr = RECT {
+            left: 0,
+            top: layout.popup_h - layout.buffer_px,
+            right: layout.popup_w,
+            bottom: layout.popup_h - layout.buffer_px + layout.scroll_trigger_px,
+        };
+        unsafe {
+            DrawTextW(
+                hdc,
+                &mut down_glyph,
+                &mut tr,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
         }
     }
 
