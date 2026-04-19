@@ -141,6 +141,68 @@ pub(crate) fn copy_folder_path_to_clipboard(state: &mut ToolbarState, folder_but
     }
 }
 
+// ── Toggle Recent Folders ─────────────────────────────────────────────
+
+/// Core: flip `config.recent.enabled`, add/remove the `FolderKind::Recent` entry,
+/// save config, then update in-memory state.  Returns `Ok(now_enabled)` on
+/// success, `Err(())` if config is unavailable or saving fails.
+/// Does NOT touch any HWND, timer, or in-memory `recent_list` — the caller
+/// (`toggle_recent_and_reload`) handles those Win32 side-effects.
+pub(crate) fn toggle_recent_in_state(state: &mut ToolbarState) -> Result<bool, ()> {
+    let cfg = match state.config.as_mut() {
+        Some(c) => c,
+        None => return Err(()),
+    };
+
+    cfg.recent.enabled = !cfg.recent.enabled;
+    let now_enabled = cfg.recent.enabled;
+
+    if now_enabled {
+        // Append the pseudo-entry only if not already present.
+        if !cfg
+            .folders
+            .iter()
+            .any(|f| f.kind == crate::config::FolderKind::Recent)
+        {
+            cfg.folders.push(crate::config::FolderEntry {
+                name: "Recent".to_string(),
+                path: String::new(),
+                icon: None,
+                kind: crate::config::FolderKind::Recent,
+            });
+        }
+    } else {
+        cfg.folders
+            .retain(|f| f.kind != crate::config::FolderKind::Recent);
+    }
+
+    let cfg_snapshot = cfg.clone();
+    if let Err(e) = state.config_store.save(&cfg_snapshot) {
+        log::warn!("toggle recent: config save failed: {e:?}");
+        // Revert in-memory flip so state stays consistent with the on-disk file.
+        if let Some(c) = state.config.as_mut() {
+            c.recent.enabled = !now_enabled;
+            if now_enabled {
+                c.folders
+                    .retain(|f| f.kind != crate::config::FolderKind::Recent);
+            } else if !c
+                .folders
+                .iter()
+                .any(|f| f.kind == crate::config::FolderKind::Recent)
+            {
+                c.folders.push(crate::config::FolderEntry {
+                    name: "Recent".to_string(),
+                    path: String::new(),
+                    icon: None,
+                    kind: crate::config::FolderKind::Recent,
+                });
+            }
+        }
+        return Err(());
+    }
+    Ok(now_enabled)
+}
+
 // ── Edit config ──────────────────────────────────────────────────────
 
 pub(crate) fn open_config_in_editor() {

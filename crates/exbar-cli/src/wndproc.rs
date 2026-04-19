@@ -46,6 +46,7 @@ pub const WM_USER_SUBMENU_SAFETY_TICK: u32 = 0x040D; // WM_USER + 13
 
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
+const MENU_ID_TOGGLE_RECENT: u32 = 103;
 const MENU_ID_OPEN: u32 = 201;
 const MENU_ID_OPEN_NEW_TAB: u32 = 202;
 const MENU_ID_COPY_PATH: u32 = 203;
@@ -363,6 +364,16 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         let _ = ClientToScreen(hwnd, &mut pt);
                     }
                     if state.buttons[idx].is_add {
+                        let recent_enabled = state
+                            .config
+                            .as_ref()
+                            .map(|c| c.recent.enabled)
+                            .unwrap_or(false);
+                        let toggle_label = if recent_enabled {
+                            "Disable Recent Folders"
+                        } else {
+                            "Enable Recent Folders"
+                        };
                         let items = [
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_EDIT_CONFIG,
@@ -372,6 +383,11 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 id: MENU_ID_RELOAD_CONFIG,
                                 label: "Reload config",
                             },
+                            crate::contextmenu::SEPARATOR,
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_TOGGLE_RECENT,
+                                label: toggle_label,
+                            },
                         ];
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
                         match chosen {
@@ -380,6 +396,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 let _ =
                                     PostMessageW(Some(hwnd), WM_USER_RELOAD, WPARAM(0), LPARAM(0));
                             },
+                            MENU_ID_TOGGLE_RECENT => {
+                                handle_toggle_recent(state, hwnd);
+                            }
                             _ => {}
                         }
                     } else {
@@ -793,6 +812,38 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+/// Toggle `config.recent.enabled`: enable adds the Recent pseudo-entry to `folders[]`,
+/// disable removes it, deletes `recents.json`, clears in-memory state, and
+/// disarms the 1 Hz dwell tick. Either branch saves config and refreshes the toolbar.
+fn handle_toggle_recent(state: &mut crate::toolbar::ToolbarState, toolbar: HWND) {
+    let now_enabled = match crate::actions::toggle_recent_in_state(state) {
+        Ok(enabled) => enabled,
+        Err(()) => return, // config unavailable or save failed; already logged
+    };
+
+    if now_enabled {
+        // Hydrate recent_list from disk in case recents.json survived a prior disable.
+        state.recent_list = state.recent_store.load();
+        state.arm_dwell_tick(toolbar);
+    } else {
+        // Privacy-critical: delete recents.json.
+        if let Err(e) = state.recent_store.delete() {
+            log::warn!("toggle recent: recents.json delete failed: {e:?}");
+        }
+        state.recent_list.clear();
+        state.recent_dirty = false;
+        state.recent_debounce_pending = false;
+        unsafe {
+            let _ = KillTimer(Some(toolbar), crate::toolbar::TIMER_RECENT_DEBOUNCE);
+        }
+        state.disarm_dwell_tick(toolbar);
+        // Dismiss any open submenu that may reference the Recent button.
+        state.execute_submenu_event(toolbar, crate::submenu::SubmenuEvent::Dismiss);
+    }
+
+    crate::lifecycle::refresh_toolbar(toolbar);
 }
 
 pub(crate) unsafe extern "system" fn toolbar_wndproc_safe(
