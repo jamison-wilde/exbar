@@ -5,16 +5,16 @@
 //! (`ExbarSubmenuPopup`) is registered once per process; per-popup state
 //! lives in `GWLP_USERDATA` as a `Box<SubmenuPopup>`.
 //!
-//! `IDropTarget` registration happens in Task 10; this task creates and
-//! destroys popup windows cleanly with a stub paint.
+//! `IDropTarget` registration via [`create_popup`] / [`destroy_popup`] routes
+//! drag-hover and drop events to the toolbar HWND as `WM_USER_SUBMENU_HOVER`
+//! and `WM_USER_SUBMENU_CLICK`.
 
 use std::path::PathBuf;
 use std::sync::Once;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_BTNFACE, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-    PAINTSTRUCT,
+    BeginPaint, COLOR_BTNFACE, CreateSolidBrush, DeleteObject, EndPaint, FillRect, PAINTSTRUCT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -104,7 +104,7 @@ fn ensure_class_registered() {
 /// - `popup` — fully initialised [`SubmenuPopup`] describing this level.
 /// - `screen_x`, `screen_y` — top-left corner of the popup in screen coords.
 pub fn create_popup(
-    _toolbar_hwnd: HWND,
+    toolbar_hwnd: HWND,
     popup: Box<SubmenuPopup>,
     screen_x: i32,
     screen_y: i32,
@@ -114,6 +114,10 @@ pub fn create_popup(
     let w = popup.layout.popup_w;
     let h = popup.layout.popup_h;
     let alpha = (popup.non_chain_opacity.clamp(0.0, 1.0) * 255.0) as u8;
+
+    // Capture level before Box::into_raw so we can pass it to
+    // SubmenuDropTarget::new after window creation (option A).
+    let level_at_creation = popup.level;
 
     // SAFETY: Box::into_raw transfers ownership to the CreateWindowExW
     // lpCreateParams slot, which Win32 delivers to WM_NCCREATE as
@@ -154,6 +158,18 @@ pub fn create_popup(
             unsafe {
                 crate::warn_on_err!(ShowWindow(hwnd, SW_SHOWNOACTIVATE).ok());
             }
+            // Register the OLE drop target so drag-hover events can reach the
+            // toolbar's wndproc via WM_USER_SUBMENU_HOVER. RegisterDragDrop
+            // requires OleInitialize (see CLAUDE.md gotcha) — satisfied once in
+            // run_hook before the message pump starts.
+            let drop_target: windows::Win32::System::Ole::IDropTarget =
+                crate::dragdrop::SubmenuDropTarget::new(toolbar_hwnd, hwnd, level_at_creation)
+                    .into();
+            unsafe {
+                if let Err(e) = windows::Win32::System::Ole::RegisterDragDrop(hwnd, &drop_target) {
+                    log::warn!("submenu: RegisterDragDrop failed for hwnd={hwnd:?}: {e:?}");
+                }
+            }
             hwnd
         }
         Err(e) => {
@@ -176,7 +192,14 @@ pub fn destroy_popup(hwnd: HWND) {
         return;
     }
 
-    // TODO(task-10): RevokeDragDrop here
+    // Revoke before destroying the window. RevokeDragDrop returns
+    // DRAGDROP_E_NOTREGISTERED if registration never succeeded (e.g. OLE
+    // not yet initialised during tests) — warn-and-continue is correct.
+    unsafe {
+        if let Err(e) = windows::Win32::System::Ole::RevokeDragDrop(hwnd) {
+            log::warn!("submenu: RevokeDragDrop failed for hwnd={hwnd:?}: {e:?}");
+        }
+    }
 
     // Drop the Box before DestroyWindow so that state is freed while the
     // HWND is still technically alive (avoids any re-entrant WM_DESTROY
@@ -206,7 +229,6 @@ pub fn destroy_popup(hwnd: HWND) {
 ///   by [`submenu_wndproc`] during `WM_NCCREATE`).
 /// - Caller must be on the message-pump thread — Win32's single-threaded
 ///   message dispatch is the synchronisation boundary; no lock is taken.
-#[allow(dead_code)] // Task 10: used by paint_submenu_popup when real paint impl arrives
 pub(crate) unsafe fn popup_state<'a>(hwnd: HWND) -> Option<&'a mut SubmenuPopup> {
     // SAFETY: GetWindowLongPtrW returns the value written by SetWindowLongPtrW
     // in WM_NCCREATE; we stored a Box::into_raw pointer there.

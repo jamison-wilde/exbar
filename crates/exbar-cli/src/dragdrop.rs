@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Com::{FORMATETC, IDataObject, TYMED_HGLOBAL};
@@ -570,6 +570,152 @@ pub unsafe fn extract_paths_from_data_object(
     }
 
     paths
+}
+
+// ── SubmenuDropTarget ─────────────────────────────────────────────────────────
+
+/// `IDropTarget` for a submenu popup HWND. Drag-enter/over/leave events post
+/// `WM_USER_SUBMENU_HOVER` with WPARAM carrying the popup level (high word) and
+/// LPARAM carrying the hit item index, or -1 if the cursor is outside any
+/// painted item (e.g. in the translucent buffer band). Drop posts
+/// `WM_USER_SUBMENU_CLICK` with the same payload so the toolbar's wndproc can
+/// commit (move/copy into the hit folder) via the existing `FileOperator` path.
+///
+/// # WPARAM / LPARAM encoding
+///
+/// - `WM_USER_SUBMENU_HOVER`: `WPARAM = popup_level << 16`, `LPARAM = item_index (isize, or -1)`
+/// - `WM_USER_SUBMENU_CLICK`: `WPARAM = (popup_level << 16) | ctrl_bit`, `LPARAM = item_index`
+#[implement(IDropTarget)]
+pub struct SubmenuDropTarget {
+    toolbar_hwnd: HWND,
+    popup_hwnd: HWND,
+    popup_level: u8,
+}
+
+impl SubmenuDropTarget {
+    pub fn new(toolbar_hwnd: HWND, popup_hwnd: HWND, popup_level: u8) -> Self {
+        Self {
+            toolbar_hwnd,
+            popup_hwnd,
+            popup_level,
+        }
+    }
+
+    /// Compute the hit item index for a screen-coord point. Returns `-1` if no
+    /// item is under the point (e.g. cursor is in the buffer band).
+    fn hit_item_index(&self, screen_pt: &windows::Win32::Foundation::POINTL) -> isize {
+        let mut pt = POINT {
+            x: screen_pt.x,
+            y: screen_pt.y,
+        };
+        // SAFETY: ScreenToClient is safe on a valid HWND on the message-pump thread.
+        unsafe {
+            let _ = ScreenToClient(self.popup_hwnd, &mut pt);
+        }
+
+        // SAFETY: popup_state is safe to call on a live popup HWND on the
+        // message-pump thread. OLE drag callbacks are delivered on the HWND's
+        // owner-thread by the system.
+        let popup = match unsafe { crate::submenu_wnd::popup_state(self.popup_hwnd) } {
+            Some(p) => p,
+            None => return -1,
+        };
+
+        for (idx, rect) in popup.layout.item_rects.iter().enumerate() {
+            if pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom {
+                return idx as isize;
+            }
+        }
+        -1
+    }
+
+    fn post_hover(&self, item_idx: isize) {
+        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+        let wparam = WPARAM((self.popup_level as usize) << 16);
+        // SAFETY: PostMessageW is safe; HWND validity is upheld by message-pump thread invariant.
+        unsafe {
+            let _ = PostMessageW(
+                Some(self.toolbar_hwnd),
+                crate::wndproc::WM_USER_SUBMENU_HOVER,
+                wparam,
+                LPARAM(item_idx),
+            );
+        }
+    }
+
+    fn post_click(&self, item_idx: isize, ctrl: bool) {
+        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+        let ctrl_bit: usize = if ctrl { 1 } else { 0 };
+        let wparam = WPARAM(((self.popup_level as usize) << 16) | ctrl_bit);
+        // SAFETY: PostMessageW is safe; HWND validity is upheld by message-pump thread invariant.
+        unsafe {
+            let _ = PostMessageW(
+                Some(self.toolbar_hwnd),
+                crate::wndproc::WM_USER_SUBMENU_CLICK,
+                wparam,
+                LPARAM(item_idx),
+            );
+        }
+    }
+}
+
+// IDropTarget trait methods take `*mut DROPEFFECT` as dictated by the COM ABI;
+// they cannot be declared `unsafe fn` without breaking the trait contract.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+impl IDropTarget_Impl for SubmenuDropTarget_Impl {
+    fn DragEnter(
+        &self,
+        _pdataobj: windows_core::Ref<'_, IDataObject>,
+        _grfkeystate: MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        let idx = self.hit_item_index(pt);
+        self.post_hover(idx);
+        if !pdweffect.is_null() {
+            unsafe { *pdweffect = DROPEFFECT_COPY };
+        }
+        Ok(())
+    }
+
+    fn DragOver(
+        &self,
+        _grfkeystate: MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        let idx = self.hit_item_index(pt);
+        self.post_hover(idx);
+        if !pdweffect.is_null() {
+            unsafe { *pdweffect = DROPEFFECT_COPY };
+        }
+        Ok(())
+    }
+
+    fn DragLeave(&self) -> Result<()> {
+        // item_idx = -1 signals "cursor left the popup entirely";
+        // the toolbar's safety timer + state machine decides whether to dismiss.
+        self.post_hover(-1);
+        Ok(())
+    }
+
+    fn Drop(
+        &self,
+        _pdataobj: windows_core::Ref<'_, IDataObject>,
+        grfkeystate: MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        let idx = self.hit_item_index(pt);
+        // MK_CONTROL bit in grfkeystate → ctrl-drop. Task 14 will interpret this
+        // when handling WM_USER_SUBMENU_CLICK in the toolbar wndproc.
+        let ctrl = grfkeystate.contains(MK_CONTROL);
+        self.post_click(idx, ctrl);
+        if !pdweffect.is_null() {
+            unsafe { *pdweffect = DROPEFFECT_COPY };
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
