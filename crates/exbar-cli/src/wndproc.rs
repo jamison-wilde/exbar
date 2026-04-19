@@ -497,12 +497,26 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
                 match display_item {
                     Some(crate::submenu::DisplayItem::Subfolder { entry }) => {
+                        // Mark as toolbar-initiated before navigating so dwell
+                        // tracker skips our own submenu clicks.
+                        state.execute_tracker_event(
+                            hwnd,
+                            crate::recent_tracker::TrackerEvent::SelfInitiated,
+                        );
                         state.navigate_or_new_window_or_tab(&entry.path.to_string_lossy(), ctrl);
                     }
                     Some(crate::submenu::DisplayItem::Dotdot { parent_path, .. }) => {
+                        state.execute_tracker_event(
+                            hwnd,
+                            crate::recent_tracker::TrackerEvent::SelfInitiated,
+                        );
                         state.navigate_or_new_window_or_tab(&parent_path.to_string_lossy(), ctrl);
                     }
                     Some(crate::submenu::DisplayItem::ParentReshow { path, .. }) => {
+                        state.execute_tracker_event(
+                            hwnd,
+                            crate::recent_tracker::TrackerEvent::SelfInitiated,
+                        );
                         state.navigate_or_new_window_or_tab(&path.to_string_lossy(), ctrl);
                     }
                     _ => {
@@ -704,6 +718,41 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             } else if timer_id == crate::toolbar::TIMER_RECENT_DEBOUNCE {
                 if let Some(state) = unsafe { toolbar_state(hwnd) } {
                     state.flush_recent(hwnd);
+                }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_DWELL_TICK {
+                // 1 Hz poll: detect active-tab navigation + drive dwell tracking.
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    // Resolve borrow: clone path before calling mutable execute_tracker_event.
+                    let active_path = state.current_active_tab_path();
+                    let prev_path = state.recent_tracker.current_path.clone();
+
+                    match (active_path, prev_path) {
+                        (Some(new), Some(ref old)) if &new != old => {
+                            state.execute_tracker_event(
+                                hwnd,
+                                crate::recent_tracker::TrackerEvent::NavigationTo(new),
+                            );
+                        }
+                        (Some(new), None) => {
+                            state.execute_tracker_event(
+                                hwnd,
+                                crate::recent_tracker::TrackerEvent::NavigationTo(new),
+                            );
+                        }
+                        (None, Some(_)) => {
+                            state.execute_tracker_event(
+                                hwnd,
+                                crate::recent_tracker::TrackerEvent::ForegroundLost,
+                            );
+                        }
+                        _ => { /* same path or both None — no navigation event */ }
+                    }
+                    // DwellTick every tick regardless of path changes.
+                    state.execute_tracker_event(
+                        hwnd,
+                        crate::recent_tracker::TrackerEvent::DwellTick,
+                    );
                 }
                 LRESULT(0)
             } else {

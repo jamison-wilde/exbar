@@ -88,6 +88,9 @@ pub(crate) const TIMER_LONGPRESS: usize = 2;
 pub(crate) const TIMER_SUBMENU_SAFETY: usize = 3;
 /// Timer ID for the 2-second debounced write of recents.json.
 pub(crate) const TIMER_RECENT_DEBOUNCE: usize = 4;
+/// Timer ID for the 1-second dwell + active-tab-path polling tick.
+/// Armed when Recent is enabled; disarmed when disabled.
+pub(crate) const TIMER_DWELL_TICK: usize = 5;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -330,6 +333,12 @@ impl ToolbarState {
                 let btn_slot = folder_button + 1;
                 if btn_slot < self.buttons.len() {
                     let path = std::path::PathBuf::from(&self.buttons[btn_slot].folder.path);
+                    // Mark as toolbar-initiated so the dwell tracker skips counting
+                    // our own navigation as a user-discovered folder.
+                    self.execute_tracker_event(
+                        hwnd,
+                        crate::recent_tracker::TrackerEvent::SelfInitiated,
+                    );
                     if ctrl {
                         match self.active_target.map(|t| t.kind) {
                             Some(crate::target::TargetKind::FileDialog) => {
@@ -463,6 +472,53 @@ impl ToolbarState {
 }
 
 // ── Recent Folders adapter methods ───────────────────────────────────────────
+
+impl ToolbarState {
+    /// Returns the filesystem path of the active Explorer tab's current folder,
+    /// or `None` if no Explorer is active, the target is a file dialog, or the
+    /// path can't be resolved.
+    ///
+    /// Uses `IShellBrowser::QueryActiveShellView` → `IFolderView::GetFolder::<IPersistFolder2>`
+    /// → `GetCurFolder` → `SHGetPathFromIDListW`.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the toolbar's COM/STA thread.
+    pub(crate) fn current_active_tab_path(&self) -> Option<std::path::PathBuf> {
+        use crate::target::TargetKind;
+        let target = self.active_target.as_ref()?;
+        if target.kind != TargetKind::Explorer {
+            return None;
+        }
+        // SAFETY: get_shell_browser_for requires STA + COM init; the wndproc
+        // message-pump thread owns both.
+        let browser = unsafe { crate::shell_windows::get_shell_browser_for(target.hwnd) }?;
+        unsafe { crate::shell_windows::active_folder_path(&browser) }
+    }
+
+    /// Arm the 1 Hz dwell-tick timer. Idempotent — `SetTimer` with the same
+    /// ID replaces an existing timer, so calling this when it's already armed
+    /// is harmless.
+    pub(crate) fn arm_dwell_tick(&mut self, toolbar: HWND) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                Some(toolbar),
+                TIMER_DWELL_TICK,
+                1000,
+                None,
+            );
+        }
+    }
+
+    /// Disarm the 1 Hz dwell-tick timer. No-op if already disarmed.
+    #[allow(dead_code)]
+    pub(crate) fn disarm_dwell_tick(&mut self, toolbar: HWND) {
+        unsafe {
+            let _ =
+                windows::Win32::UI::WindowsAndMessaging::KillTimer(Some(toolbar), TIMER_DWELL_TICK);
+        }
+    }
+}
 
 #[allow(dead_code)] // callers land in Tasks 8+9
 impl ToolbarState {
