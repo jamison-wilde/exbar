@@ -61,41 +61,31 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
         return;
     }
 
-    // Capture everything needed for the closure (must be Send+Sync, no borrows on state).
-    #[derive(Clone)]
-    struct Info {
-        rect: windows::Win32::Foundation::RECT,
-        action: ActionSource,
-    }
-    #[derive(Clone)]
-    enum ActionSource {
-        Folder(String),
-        Add,
-    }
-
-    let button_info: Vec<Info> = state
-        .buttons
-        .iter()
-        .map(|b| Info {
-            rect: crate::paint::rect_to_win32(b.rect),
-            action: if b.is_add {
-                ActionSource::Add
-            } else {
-                ActionSource::Folder(b.folder.path.clone())
-            },
-        })
-        .collect();
-
+    // Read live button layout each time the resolver is called. OLE drop
+    // callbacks are delivered on the thread that called RegisterDragDrop
+    // (our toolbar message-pump thread), so toolbar_state(hwnd) is safe here.
+    // Reading live means add/remove/reorder of folders is immediately
+    // reflected without needing to revoke+re-register the drop target.
+    // HWND is !Send/!Sync; store as raw isize for the closure capture (our
+    // single-threaded dispatch invariant makes reconstituting it safe).
+    let hwnd_raw = hwnd.0 as isize;
     let resolver = move |cx: i32, cy: i32| -> Option<crate::dragdrop::DropAction> {
-        let hit = button_info.iter().find(|i| {
-            cx >= i.rect.left && cx < i.rect.right && cy >= i.rect.top && cy < i.rect.bottom
-        })?;
-        Some(match &hit.action {
-            ActionSource::Folder(p) => crate::dragdrop::DropAction::MoveCopyTo {
-                target: std::path::PathBuf::from(p),
-            },
-            ActionSource::Add => crate::dragdrop::DropAction::AddFolder,
-        })
+        let resolver_hwnd = HWND(hwnd_raw as *mut _);
+        // SAFETY: OLE callback runs on the toolbar's owner-thread.
+        let state = unsafe { crate::toolbar::toolbar_state(resolver_hwnd) }?;
+        for b in state.buttons.iter() {
+            let r = crate::paint::rect_to_win32(b.rect);
+            if cx >= r.left && cx < r.right && cy >= r.top && cy < r.bottom {
+                return Some(if b.is_add {
+                    crate::dragdrop::DropAction::AddFolder
+                } else {
+                    crate::dragdrop::DropAction::MoveCopyTo {
+                        target: std::path::PathBuf::from(&b.folder.path),
+                    }
+                });
+            }
+        }
+        None
     };
 
     match crate::dragdrop::register_drop_target(
