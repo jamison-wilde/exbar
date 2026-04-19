@@ -87,6 +87,12 @@ pub(crate) const TIMER_REPOSITION: usize = 1;
 pub(crate) const BTN_PAD_H: i32 = 10;
 /// Logical pixel width/height of the drag handle grip area.
 pub(crate) const GRIP_SIZE: i32 = 12;
+/// Submenu row height in logical pixels (DPI-scaled at render time).
+/// Matches `crate::layout::BTN_HEIGHT_LOGICAL_PX` — both derive from the
+/// same 26 px design token.
+const SUBMENU_ROW_LOGICAL_PX: i32 = 26;
+/// Submenu max content width in logical pixels.
+const SUBMENU_MAX_WIDTH_LOGICAL_PX: i32 = 320;
 
 // ── Adapter helpers ──────────────────────────────────────────────────────────
 
@@ -468,6 +474,18 @@ impl ToolbarState {
             }
         };
 
+        // Fix 3: refuse to open an empty popup for a shell alias — path
+        // resolution is a Task 15 follow-up.
+        if entries.is_empty()
+            && crate::config::is_shell_alias(folder_path.to_string_lossy().as_ref())
+        {
+            log::warn!(
+                "submenu: refusing to open empty popup for shell alias {folder_path:?}; \
+                 path resolution is a Task 15 follow-up"
+            );
+            return;
+        }
+
         let work = self.submenu_work_area();
         let cursor_y = self.last_cursor_y_on_open;
         let btn_center_y = self.last_button_center_y_on_open;
@@ -559,7 +577,15 @@ impl ToolbarState {
             self.submenu_popups
                 .resize(level as usize, HWND(std::ptr::null_mut()));
         }
-        self.submenu_popups[(level - 1) as usize] = popup_hwnd;
+        // Guard against overwriting a live popup — can happen if HoverChildItem
+        // fires at an already-open level (transition omits CloseDeeperThan when
+        // no deeper levels exist but still emits OpenLevel).
+        let slot = (level - 1) as usize;
+        let existing = self.submenu_popups[slot];
+        if !existing.0.is_null() {
+            crate::submenu_wnd::destroy_popup(existing);
+        }
+        self.submenu_popups[slot] = popup_hwnd;
     }
 
     fn close_popups_deeper_than(&mut self, level: u8) {
@@ -613,15 +639,16 @@ impl ToolbarState {
         }
     }
 
-    /// DPI-scaled per-item row height for submenus (26 logical px is the same
-    /// constant used by the toolbar button height `BTN_HEIGHT_LOGICAL_PX`).
+    /// DPI-scaled per-item row height for submenus.
+    /// Uses [`SUBMENU_ROW_LOGICAL_PX`], which matches `layout::BTN_HEIGHT_LOGICAL_PX`.
     fn submenu_item_px(&self) -> i32 {
-        theme::scale(26, self.dpi)
+        theme::scale(SUBMENU_ROW_LOGICAL_PX, self.dpi)
     }
 
-    /// DPI-scaled maximum popup width (320 logical px).
+    /// DPI-scaled maximum popup width.
+    /// Uses [`SUBMENU_MAX_WIDTH_LOGICAL_PX`].
     fn submenu_max_width_px(&self) -> i32 {
-        theme::scale(320, self.dpi)
+        theme::scale(SUBMENU_MAX_WIDTH_LOGICAL_PX, self.dpi)
     }
 
     /// Get the screen rect of a window. Returns a zero rect if hwnd is null.

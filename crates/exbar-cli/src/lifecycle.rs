@@ -233,6 +233,7 @@ pub fn refresh_toolbar(hwnd: HWND) {
         .config
         .as_ref()
         .map_or(crate::config::Orientation::Horizontal, |c| c.layout);
+    state.submenu_cfg = state.config.as_ref().map(|c| c.submenu).unwrap_or_default();
 
     // Re-apply opacity in case config changed.
     apply_opacity(hwnd, state);
