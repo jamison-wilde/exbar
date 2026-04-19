@@ -600,9 +600,14 @@ impl ToolbarState {
         let (sx, sy) = if level == 1 {
             let btn = self.last_button_screen_rect;
             let buffer = buffer_px;
-            // Empirically tuned: shift by buffer/2 (5px at default 10px buffer) rather than
-            // the full buffer_px, which over-corrects for the toolbar button's internal padding.
-            let x = btn.left - buffer / 2;
+            // Pixel-perfect alignment: popup inner text lands at btn.left + button_text_padding.
+            // Derivation: popup_text_x = popup.left + buffer_px + theme::scale(8, dpi);
+            // button_text_x ≈ btn.left + theme::scale(13, dpi). Solve for popup.left:
+            //   popup.left = btn.left + theme::scale(13-8, dpi) - buffer_px
+            //              = btn.left - (buffer_px - theme::scale(5, dpi))
+            // align_offset = theme::scale(5, dpi) = btn_inner_padding - popup_inner_padding.
+            let align_offset = crate::theme::scale(5, self.dpi);
+            let x = btn.left - (buffer - align_offset);
             let y = match reshow {
                 // Popup opens downward: reshow row (first) should align with button top.
                 ReshowPosition::First => btn.top - buffer,
@@ -661,9 +666,12 @@ impl ToolbarState {
                 }
             };
 
+            // Slide inward by buffer_px so the two popups' painted regions touch
+            // rather than being separated by a double-buffer gap. The clamp below
+            // still applies at screen edges.
             let x = match flow {
-                crate::submenu::FlowDir::Right => parent_rect.right,
-                crate::submenu::FlowDir::Left => parent_rect.left - layout.popup_w,
+                crate::submenu::FlowDir::Right => parent_rect.right - buffer_px,
+                crate::submenu::FlowDir::Left => parent_rect.left + buffer_px - layout.popup_w,
             };
 
             // Clamp both axes to the monitor work area.
