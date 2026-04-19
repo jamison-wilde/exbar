@@ -410,8 +410,14 @@ unsafe extern "system" fn foreground_event_proc(
                 }
             }
             HwndRole::Unknown => {
-                // Different unrelated process — hide.
+                // Different unrelated process — hide. Also dismiss any open
+                // submenu chain so popups don't linger after focus leaves us.
                 if let Some(tb) = tb_opt {
+                    if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
+                        && state.submenu_chain.is_open()
+                    {
+                        state.execute_submenu_event(tb, crate::submenu::SubmenuEvent::Dismiss);
+                    }
                     unsafe {
                         crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
                     }

@@ -307,6 +307,14 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         WM_LBUTTONDOWN => {
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                // If submenus are open, a toolbar click starts a new gesture.
+                // Dismiss the current chain before processing the press so the
+                // new press-release cycle works cleanly (and a subsequent
+                // long-press on the same button re-opens a fresh chain).
+                if state.submenu_chain.is_open() {
+                    state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Dismiss);
+                }
+
                 let (x, y) = lparam_point(lparam);
                 let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| pointer::HitResult {
                     button: idx,
@@ -487,22 +495,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
                 match display_item {
                     Some(crate::submenu::DisplayItem::Subfolder { entry }) => {
-                        state.navigate_or_new_window_or_tab(
-                            &entry.path.to_string_lossy(),
-                            ctrl,
-                        );
+                        state.navigate_or_new_window_or_tab(&entry.path.to_string_lossy(), ctrl);
                     }
                     Some(crate::submenu::DisplayItem::Dotdot { parent_path, .. }) => {
-                        state.navigate_or_new_window_or_tab(
-                            &parent_path.to_string_lossy(),
-                            ctrl,
-                        );
+                        state.navigate_or_new_window_or_tab(&parent_path.to_string_lossy(), ctrl);
                     }
                     Some(crate::submenu::DisplayItem::ParentReshow { path, .. }) => {
-                        state.navigate_or_new_window_or_tab(
-                            &path.to_string_lossy(),
-                            ctrl,
-                        );
+                        state.navigate_or_new_window_or_tab(&path.to_string_lossy(), ctrl);
                     }
                     _ => {
                         // Ellipsis / Empty / None — no action, but still dismiss.
@@ -527,10 +526,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             let idx = lparam.0; // signed; -1 means "no item hit"
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
                 if idx < 0 {
-                    state.execute_submenu_event(
-                        hwnd,
-                        crate::submenu::SubmenuEvent::HoverBufferAt,
-                    );
+                    state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::HoverBufferAt);
                 } else {
                     // Recover the display item at (level, idx) from the popup's state.
                     let popup_hwnd = state
