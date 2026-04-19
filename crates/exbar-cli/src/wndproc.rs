@@ -58,9 +58,13 @@ const MENU_ID_RENAME: u32 = 204;
 const MENU_ID_REMOVE: u32 = 205;
 
 /// Returns `true` if the given screen-coord cursor is inside any open popup's
-/// rendered bounds (the HWND rect already includes the buffer band, so no
-/// extra inflation is needed — spec §3.8 says the buffer is the inner padding
-/// inside the popup window, not an additional outer halo).
+/// rendered bounds OR inside the triggering toolbar button's rect.
+///
+/// - Popup HWND rect already includes the buffer band (spec §3.8).
+/// - The triggering button is included because some submenu placements (e.g.
+///   the Recent button's root submenu, which sits entirely above/below the
+///   toolbar) leave a gap between cursor-at-button and popup-bounds. Without
+///   this, the safety timer would dismiss the chain the instant it opens.
 fn cursor_inside_any_padded_popup(state: &crate::toolbar::ToolbarState, cx: i32, cy: i32) -> bool {
     use windows::Win32::Foundation::RECT;
 
@@ -75,6 +79,12 @@ fn cursor_inside_any_padded_popup(state: &crate::toolbar::ToolbarState, cx: i32,
         if cx >= rect.left && cx < rect.right && cy >= rect.top && cy < rect.bottom {
             return true;
         }
+    }
+    // Also treat the triggering toolbar button as "inside" while the chain is
+    // open — so cursor-on-button doesn't read as "cursor exited popup".
+    let btn = state.last_button_screen_rect;
+    if cx >= btn.left && cx < btn.right && cy >= btn.top && cy < btn.bottom {
+        return true;
     }
     false
 }
