@@ -10,6 +10,8 @@ use crate::dragdrop::{FileOperator, test_mocks::MockFileOp};
 use crate::error::ExbarResult;
 use crate::layout::{ButtonLayout, Rect};
 use crate::picker::{FolderPicker, test_mocks::MockFolderPicker};
+use crate::recent_list::RecentEntry;
+use crate::recent_store::{RecentStore, test_mocks::MockRecentStore};
 use crate::shell_windows::test_mocks::MockShellBrowser;
 use crate::subfolder_enum::{SubfolderEntry, SubfolderSource, test_mocks::MockSubfolderSource};
 use crate::toolbar::ToolbarState;
@@ -52,6 +54,20 @@ pub struct SubfolderArc(pub Arc<MockSubfolderSource>);
 impl SubfolderSource for SubfolderArc {
     fn list(&self, parent: &Path, max_items: usize) -> ExbarResult<Vec<SubfolderEntry>> {
         self.0.list(parent, max_items)
+    }
+}
+
+#[allow(dead_code)]
+pub struct RecentStoreArc(pub Arc<MockRecentStore>);
+impl RecentStore for RecentStoreArc {
+    fn load(&self) -> Vec<RecentEntry> {
+        self.0.load()
+    }
+    fn save(&self, entries: &[RecentEntry]) -> ExbarResult<()> {
+        self.0.save(entries)
+    }
+    fn delete(&self) -> ExbarResult<()> {
+        self.0.delete()
     }
 }
 

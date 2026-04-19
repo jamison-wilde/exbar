@@ -3,6 +3,7 @@
 //! All state lives under `~/.exbar/`:
 //! - `config.json` — folder list and runtime options.
 //! - `position.json` — per-target-kind toolbar offset.
+//! - `recents.json` — recently visited folder list.
 //!
 //! Pre-1.2 versions stored these as `~/.exbar.json` and `~/.exbar-pos.json`
 //! at the home root. [`migrate_legacy_files`] moves them into the new
@@ -31,6 +32,13 @@ pub fn config_path() -> PathBuf {
 pub fn position_path() -> PathBuf {
     let mut p = exbar_dir();
     p.push("position.json");
+    p
+}
+
+/// `~/.exbar/recents.json` — recently visited folder list.
+pub fn recents_path() -> PathBuf {
+    let mut p = exbar_dir();
+    p.push("recents.json");
     p
 }
 
@@ -107,5 +115,12 @@ mod tests {
         let p = position_path();
         assert_eq!(p.file_name().unwrap().to_str(), Some("position.json"));
         assert!(p.parent().unwrap().ends_with(".exbar"));
+    }
+
+    #[test]
+    fn recents_path_in_exbar_dir() {
+        let p = recents_path();
+        assert!(p.ends_with("recents.json"));
+        assert!(p.parent().map(|d| d.ends_with(".exbar")).unwrap_or(false));
     }
 }
