@@ -100,6 +100,9 @@ pub fn make_test_state(deps: &TestDeps, config: Option<Config>) -> ToolbarState 
         Box::new(ClipArc(deps.clipboard.clone())),
         Box::new(CfgArc(deps.cfg_store.clone())),
         Box::new(DlgNavRc(Rc::clone(&deps.dialog_nav))),
+        Box::new(SubfolderArc(Arc::new(
+            crate::subfolder_enum::test_mocks::MockSubfolderSource::default(),
+        ))),
     )
 }
 

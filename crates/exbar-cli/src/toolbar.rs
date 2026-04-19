@@ -25,12 +25,14 @@
 //! `unsafe { toolbar_state(hwnd) }` helper relies on this invariant
 //! for soundness — it does not lock.
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GWLP_USERDATA, GetWindowLongPtrW, PostMessageW};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, GetWindowRect, PostMessageW,
+};
 
 use std::sync::Arc;
 
@@ -42,6 +44,7 @@ use crate::layout::ButtonLayout;
 use crate::picker::{FolderPicker, Win32Picker};
 use crate::pointer;
 use crate::shell_windows::{ShellBrowser, Win32Shell};
+use crate::subfolder_enum::{SubfolderSource, Win32SubfolderSource};
 use crate::theme;
 
 // ── Safe wrappers for repetitive patterns ───────────────────────────────────
@@ -124,6 +127,19 @@ pub(crate) struct ToolbarState {
     /// repositioning during drag — MOVESIZEEND handles that instead.
     pub(crate) explorer_moving: bool,
     pub(crate) rename_state: Option<rename::RenameState>,
+    // Submenu subsystem (SP-submenu Task 10):
+    pub(crate) submenu_chain: crate::submenu::SubmenuChain,
+    /// Popup HWND per open level. Index 0 = level 1. Null HWND means "slot vacated, will refill".
+    pub(crate) submenu_popups: Vec<HWND>,
+    pub(crate) subfolder_source: Box<dyn SubfolderSource>,
+    /// Cached at construction from Config.submenu; mutated only on config reload.
+    pub(crate) submenu_cfg: crate::config::SubmenuConfig,
+    /// Cursor X at the moment long-press / drag-hover fired — used by level-1 placement.
+    pub(crate) last_cursor_x_on_open: i32,
+    /// Cursor Y at the moment long-press / drag-hover fired — used by level-1 reshow placement.
+    pub(crate) last_cursor_y_on_open: i32,
+    /// Triggering folder button center-Y — used by resolve_level1_orientation.
+    pub(crate) last_button_center_y_on_open: i32,
 }
 
 impl ToolbarState {
@@ -137,6 +153,7 @@ impl ToolbarState {
             Box::new(Win32Clipboard::new()),
             Box::new(JsonFileStore::new()),
             Box::new(KeybdDialogNavigator::new()),
+            Box::new(Win32SubfolderSource::new()),
         )
     }
 
@@ -150,10 +167,12 @@ impl ToolbarState {
         clipboard: Box<dyn Clipboard>,
         config_store: Box<dyn ConfigStore>,
         dialog_nav: Box<dyn DialogNavigator>,
+        subfolder_source: Box<dyn SubfolderSource>,
     ) -> Self {
         let layout = config
             .as_ref()
             .map_or(Orientation::Horizontal, |c| c.layout);
+        let submenu_cfg = config.as_ref().map(|c| c.submenu).unwrap_or_default();
         ToolbarState {
             buttons: Vec::new(),
             dpi,
@@ -174,6 +193,13 @@ impl ToolbarState {
             last_explorer_origin: None,
             explorer_moving: false,
             rename_state: None,
+            submenu_chain: crate::submenu::SubmenuChain::default(),
+            submenu_popups: Vec::new(),
+            subfolder_source,
+            submenu_cfg,
+            last_cursor_x_on_open: 0,
+            last_cursor_y_on_open: 0,
+            last_button_center_y_on_open: 0,
         }
     }
 }
@@ -297,9 +323,44 @@ impl ToolbarState {
                 crate::actions::commit_reorder(self, hwnd, from_folder, to_folder);
             }
             FireLongPress { folder_button } => {
-                // Placeholder: open submenu for folder_button.
-                // Full implementation wired in the submenu feature task.
-                log::debug!("FireLongPress: folder_button={folder_button}");
+                // folder_button is a folder-index (0-based); buttons[0] is the + button,
+                // so the folder slot is at buttons[folder_button + 1].
+                let Some(cfg) = self.config.as_ref() else {
+                    return;
+                };
+                let Some(folder) = cfg.folders.get(folder_button) else {
+                    return;
+                };
+                let raw_path = folder.path.clone();
+                // Shell aliases (e.g. "shell:downloads") are not resolved here;
+                // Task 15 will refine. Pass the raw string as the path.
+                let resolved = raw_path.clone();
+
+                // Record the trigger context before the mutable borrow below.
+                let btn_slot = folder_button + 1;
+                let button_center_y = if btn_slot < self.buttons.len() {
+                    let r = &self.buttons[btn_slot].rect;
+                    r.top + r.height() / 2
+                } else {
+                    0
+                };
+
+                let mut pt = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut pt);
+                }
+
+                self.last_button_center_y_on_open = button_center_y;
+                self.last_cursor_x_on_open = pt.x;
+                self.last_cursor_y_on_open = pt.y;
+
+                self.execute_submenu_event(
+                    hwnd,
+                    crate::submenu::SubmenuEvent::OpenRoot {
+                        path: std::path::PathBuf::from(resolved),
+                        button_center_y,
+                    },
+                );
             }
         }
     }
@@ -350,6 +411,241 @@ impl ToolbarState {
 // ── Inline rename glue ───────────────────────────────────────────────────────
 
 use crate::rename::{self, RenameAction, RenameEvent};
+
+// ── Submenu adapter (Task 10a) ────────────────────────────────────────────────
+
+impl ToolbarState {
+    /// Translate a `SubmenuEvent` into pure state-machine transitions + Win32 side effects.
+    pub(crate) fn execute_submenu_event(
+        &mut self,
+        toolbar: HWND,
+        ev: crate::submenu::SubmenuEvent,
+    ) {
+        let cmds = crate::submenu::transition(&mut self.submenu_chain, ev);
+        for cmd in cmds {
+            self.dispatch_submenu_command(toolbar, cmd);
+        }
+    }
+
+    fn dispatch_submenu_command(&mut self, toolbar: HWND, cmd: crate::submenu::SubmenuCommand) {
+        match cmd {
+            crate::submenu::SubmenuCommand::OpenLevel {
+                level,
+                path,
+                ancestor_mode,
+            } => {
+                self.open_popup_level(toolbar, level, path, ancestor_mode);
+            }
+            crate::submenu::SubmenuCommand::CloseDeeperThan { level } => {
+                self.close_popups_deeper_than(level);
+            }
+            crate::submenu::SubmenuCommand::CloseAll => {
+                self.close_all_popups();
+            }
+            crate::submenu::SubmenuCommand::SetHighlight { level, index } => {
+                self.set_popup_highlight(level, index);
+            }
+        }
+    }
+
+    fn open_popup_level(
+        &mut self,
+        toolbar: HWND,
+        level: u8,
+        folder_path: std::path::PathBuf,
+        ancestor_mode: bool,
+    ) {
+        use crate::submenu::{
+            ReshowPosition, VertOrient, build_display_list, resolve_level1_orientation,
+        };
+
+        let max_items = 200;
+        let entries = match self.subfolder_source.list(&folder_path, max_items) {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!("subfolder list failed for {folder_path:?}: {e:?}");
+                Vec::new()
+            }
+        };
+
+        let work = self.submenu_work_area();
+        let cursor_y = self.last_cursor_y_on_open;
+        let btn_center_y = self.last_button_center_y_on_open;
+
+        let item_px = self.submenu_item_px();
+        let max_width_px = self.submenu_max_width_px();
+        let buffer_px = self.submenu_cfg.hover_buffer_px as i32;
+
+        let reshow = if level == 1 {
+            let orient = resolve_level1_orientation(
+                btn_center_y,
+                entries.len() as i32,
+                item_px,
+                cursor_y,
+                work,
+            );
+            match orient {
+                VertOrient::Upward => ReshowPosition::Last,
+                VertOrient::Downward => ReshowPosition::First,
+            }
+        } else {
+            ReshowPosition::None
+        };
+
+        let folder_display_name = folder_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| folder_path.to_string_lossy().to_string());
+
+        let display_items = build_display_list(
+            level,
+            &folder_path,
+            &folder_display_name,
+            ancestor_mode,
+            &entries,
+            reshow,
+        );
+
+        let layout = crate::layout::compute_submenu_layout(
+            display_items.len(),
+            item_px,
+            max_width_px,
+            buffer_px,
+        );
+
+        // Popup placement: level-1 near cursor; deeper levels right of parent.
+        // Task 13 refines with flow-direction lock and edge overflow.
+        let (sx, sy) = if level == 1 {
+            let cursor_x = self.last_cursor_x_on_open;
+            let x = cursor_x - layout.popup_w / 2;
+            let y = match reshow {
+                // Reshow at First means popup opens downward: cursor is near the top item.
+                ReshowPosition::First => cursor_y - buffer_px - item_px / 2,
+                // Reshow at Last means popup opens upward: cursor is near the bottom item.
+                ReshowPosition::Last => cursor_y - layout.popup_h + buffer_px + item_px / 2,
+                ReshowPosition::None => cursor_y,
+            };
+            (
+                x.max(work.left),
+                y.max(work.top).min(work.bottom - layout.popup_h),
+            )
+        } else {
+            // Deeper level: to the right of its parent popup (Task 13 refines).
+            let parent_idx = (level as usize) - 2; // parent is one level shallower
+            let parent_hwnd = self
+                .submenu_popups
+                .get(parent_idx)
+                .copied()
+                .unwrap_or(HWND(std::ptr::null_mut()));
+            let parent_rect = self.get_window_screen_rect(parent_hwnd);
+            (parent_rect.right, parent_rect.top)
+        };
+
+        let popup = Box::new(crate::submenu_wnd::SubmenuPopup {
+            level,
+            folder_path,
+            display_items,
+            layout,
+            highlighted_index: None,
+            non_chain_opacity: self.submenu_cfg.non_chain_item_opacity,
+            dpi: self.dpi,
+            toolbar_hwnd: toolbar,
+        });
+
+        let popup_hwnd = crate::submenu_wnd::create_popup(toolbar, popup, sx, sy);
+
+        // Grow submenu_popups Vec to accommodate this level (1-indexed → vec index = level-1).
+        if self.submenu_popups.len() < level as usize {
+            self.submenu_popups
+                .resize(level as usize, HWND(std::ptr::null_mut()));
+        }
+        self.submenu_popups[(level - 1) as usize] = popup_hwnd;
+    }
+
+    fn close_popups_deeper_than(&mut self, level: u8) {
+        while self.submenu_popups.len() > level as usize {
+            if let Some(h) = self.submenu_popups.pop()
+                && !h.0.is_null()
+            {
+                crate::submenu_wnd::destroy_popup(h);
+            }
+        }
+    }
+
+    fn close_all_popups(&mut self) {
+        while let Some(h) = self.submenu_popups.pop() {
+            if !h.0.is_null() {
+                crate::submenu_wnd::destroy_popup(h);
+            }
+        }
+    }
+
+    fn set_popup_highlight(&mut self, level: u8, index: Option<usize>) {
+        let Some(&h) = self.submenu_popups.get((level as usize).saturating_sub(1)) else {
+            return;
+        };
+        if h.0.is_null() {
+            return;
+        }
+        // Update the per-popup state and trigger a repaint.
+        unsafe {
+            if let Some(popup) = crate::submenu_wnd::popup_state(h) {
+                popup.highlighted_index = index;
+            }
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(h), None, true);
+        }
+    }
+
+    /// Return the work area of the primary monitor (via `SPI_GETWORKAREA`).
+    /// A per-monitor variant using `active_target` can replace this in Task 13.
+    fn submenu_work_area(&self) -> crate::submenu::WorkArea {
+        // Reuse the existing work_area_for helper (which calls MonitorFromWindow when
+        // given an HWND, or falls back to SPI_GETWORKAREA for the primary monitor).
+        let ref_hwnd = self.active_target.map(|t| t.hwnd);
+        let rect = crate::position::work_area_for(ref_hwnd);
+        crate::submenu::WorkArea {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        }
+    }
+
+    /// DPI-scaled per-item row height for submenus (26 logical px is the same
+    /// constant used by the toolbar button height `BTN_HEIGHT_LOGICAL_PX`).
+    fn submenu_item_px(&self) -> i32 {
+        theme::scale(26, self.dpi)
+    }
+
+    /// DPI-scaled maximum popup width (320 logical px).
+    fn submenu_max_width_px(&self) -> i32 {
+        theme::scale(320, self.dpi)
+    }
+
+    /// Get the screen rect of a window. Returns a zero rect if hwnd is null.
+    fn get_window_screen_rect(&self, hwnd: HWND) -> crate::submenu::WorkArea {
+        if hwnd.0.is_null() {
+            return crate::submenu::WorkArea {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+        }
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(hwnd, &mut r);
+        }
+        crate::submenu::WorkArea {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        }
+    }
+}
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
