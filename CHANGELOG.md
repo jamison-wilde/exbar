@@ -2,8 +2,6 @@
 
 All notable changes to Exbar are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
 ## [1.2.0] - 2026-04-19
 
 ### Added
