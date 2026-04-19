@@ -602,11 +602,13 @@ impl ToolbarState {
             let buffer = buffer_px;
             // Pixel-perfect alignment: popup inner text lands at btn.left + button_text_padding.
             // Derivation: popup_text_x = popup.left + buffer_px + theme::scale(8, dpi);
-            // button_text_x ≈ btn.left + theme::scale(13, dpi). Solve for popup.left:
-            //   popup.left = btn.left + theme::scale(13-8, dpi) - buffer_px
-            //              = btn.left - (buffer_px - theme::scale(5, dpi))
-            // align_offset = theme::scale(5, dpi) = btn_inner_padding - popup_inner_padding.
-            let align_offset = crate::theme::scale(5, self.dpi);
+            // button_text_x ≈ btn.left + theme::scale(20, dpi). Solve for popup.left:
+            //   popup.left = btn.left + theme::scale(20-8, dpi) - buffer_px
+            //              = btn.left - (buffer_px - theme::scale(12, dpi))
+            // align_offset = theme::scale(12, dpi) = btn_inner_padding - popup_inner_padding.
+            // Empirically tuned: initial value 5 left a constant 7px rightward drift at
+            // every tested buffer (0/10/30); actual button inner padding is 12 not 5.
+            let align_offset = crate::theme::scale(12, self.dpi);
             let x = btn.left - (buffer - align_offset);
             let y = match reshow {
                 // Popup opens downward: reshow row (first) should align with button top.
