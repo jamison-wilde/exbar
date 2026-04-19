@@ -13,17 +13,14 @@ use std::path::PathBuf;
 use std::sync::Once;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_BTNFACE, CreateSolidBrush, DeleteObject, EndPaint, FillRect, PAINTSTRUCT,
-};
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, IDC_ARROW, LWA_ALPHA, LoadCursorW,
-    PostMessageW, RegisterClassExW, SW_SHOWNOACTIVATE, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, ShowWindow, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_POPUP,
+    GWLP_USERDATA, GetWindowLongPtrW, IDC_ARROW, LWA_ALPHA, LoadCursorW, PostMessageW,
+    RegisterClassExW, SW_SHOWNOACTIVATE, SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow,
+    WM_DESTROY, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows_core::PCWSTR;
 
@@ -266,30 +263,6 @@ pub(crate) unsafe fn popup_state<'a>(hwnd: HWND) -> Option<&'a mut SubmenuPopup>
     Some(unsafe { &mut *ptr })
 }
 
-// ── Paint helpers ─────────────────────────────────────────────────────────────
-
-/// Stub fill — paints the popup client area with the system button-face color
-/// (light mode) or a dark neutral (dark mode) so the window renders visibly
-/// during the Task 9 scaffold. Replaced by `paint::paint_submenu_popup` in
-/// Task 10.
-unsafe fn stub_fill_rect(hwnd: HWND, hdc: windows::Win32::Graphics::Gdi::HDC) {
-    let mut client_rect = windows::Win32::Foundation::RECT::default();
-    let _ = unsafe { GetClientRect(hwnd, &mut client_rect) };
-
-    let bg_color = if crate::theme::is_dark_mode() {
-        windows::Win32::Foundation::COLORREF(0x00_2B_2B_2B)
-    } else {
-        windows::Win32::Foundation::COLORREF(unsafe {
-            windows::Win32::Graphics::Gdi::GetSysColor(COLOR_BTNFACE)
-        })
-    };
-    let bg_brush = unsafe { CreateSolidBrush(bg_color) };
-    unsafe { FillRect(hdc, &client_rect, bg_brush) };
-    unsafe {
-        let _ = DeleteObject(bg_brush.into());
-    }
-}
-
 // ── Window procedure ──────────────────────────────────────────────────────────
 
 /// Window procedure for `ExbarSubmenuPopup` windows.
@@ -323,11 +296,15 @@ unsafe extern "system" fn submenu_wndproc(
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-
-            // Task 9: stub FillRect only. Task 10 replaces this call (not adds alongside!)
-            // with paint::paint_submenu_popup(hdc, &popup.layout, ...) once that fn has a real body.
-            unsafe { stub_fill_rect(hwnd, hdc) };
-
+            if let Some(popup) = unsafe { popup_state(hwnd) } {
+                crate::paint::paint_submenu_popup(
+                    hdc,
+                    &popup.layout,
+                    &popup.display_items,
+                    popup.highlighted_index,
+                    popup.dpi,
+                );
+            }
             unsafe {
                 let _ = EndPaint(hwnd, &ps);
             }

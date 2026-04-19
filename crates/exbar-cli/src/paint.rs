@@ -358,13 +358,13 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
 ///
 /// Not unit-tested (pure GDI) — covered by manual smoke in Task 17.
 ///
-/// Design (implemented in Task 9): fills the popup with bg_color under the
-/// layered-window alpha set at popup creation. Iterates `display_items` in
-/// parallel with `layout.item_rects`, drawing each row; the
-/// `highlighted_index` row gets an opaque accent bar. Rows with
-/// `has_children` paint a right-aligned `▸` glyph. Parent-reshow and Dotdot
-/// items get distinctive markers. `Ellipsis` / `Empty` rows render disabled.
-#[allow(unused_variables)]
+/// Design: fills the popup with bg_color under the layered-window alpha set at
+/// popup creation. Iterates `display_items` in parallel with
+/// `layout.item_rects`, drawing each row; the `highlighted_index` row gets an
+/// opaque accent bar. Rows with `has_children` paint a right-aligned `▸` glyph.
+/// Parent-reshow and Dotdot items get distinctive markers. `Ellipsis` / `Empty`
+/// rows render disabled. Font obtained via `GetStockObject(DEFAULT_GUI_FONT)`,
+/// consistent with the toolbar button paint.
 pub fn paint_submenu_popup(
     hdc: HDC,
     layout: &crate::layout::SubmenuLayout,
@@ -372,6 +372,143 @@ pub fn paint_submenu_popup(
     highlighted_index: Option<usize>,
     dpi: u32,
 ) {
-    // Stub. Task 9 wires the popup HWND and implements this body using the
-    // existing GDI helpers in this module (paint primitives, theme palette).
+    use windows::Win32::Graphics::Gdi::{
+        DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT, GetStockObject,
+    };
+
+    let dark = theme::is_dark_mode();
+
+    let bg_color = if dark {
+        COLORREF(0x00_26_26_26)
+    } else {
+        COLORREF(0x00_F0_F0_F0)
+    };
+    let text_color = if dark {
+        COLORREF(0x00_E0_E0_E0)
+    } else {
+        COLORREF(0x00_20_20_20)
+    };
+    let text_color_dim = if dark {
+        COLORREF(0x00_80_80_80)
+    } else {
+        COLORREF(0x00_A0_A0_A0)
+    };
+    let accent_bg = if dark {
+        COLORREF(0x00_50_50_50)
+    } else {
+        COLORREF(0x00_D8_E4_F0)
+    };
+
+    // Background fill (full popup area).
+    let full_rect = RECT {
+        left: 0,
+        top: 0,
+        right: layout.popup_w,
+        bottom: layout.popup_h,
+    };
+    let bg_brush = unsafe { CreateSolidBrush(bg_color) };
+    unsafe {
+        FillRect(hdc, &full_rect, bg_brush);
+        let _ = DeleteObject(bg_brush.into());
+    }
+
+    // Use the same stock font as the toolbar button paint.
+    let hfont = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+    let old_font = unsafe { SelectObject(hdc, hfont) };
+
+    unsafe { SetBkMode(hdc, TRANSPARENT) };
+
+    for (i, item) in display_items.iter().enumerate() {
+        let Some(rect) = layout.item_rects.get(i) else {
+            continue;
+        };
+        let win_rect = RECT {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        };
+
+        // Accent background for the highlighted row.
+        if highlighted_index == Some(i) {
+            let accent_brush = unsafe { CreateSolidBrush(accent_bg) };
+            unsafe {
+                FillRect(hdc, &win_rect, accent_brush);
+                let _ = DeleteObject(accent_brush.into());
+            }
+        }
+
+        // Build label text and determine display properties.
+        let (label, is_disabled, has_children) = match item {
+            DisplayItem::Subfolder { entry } => (
+                format!("\u{1F4C1}  {}", entry.name),
+                false,
+                entry.has_children,
+            ),
+            DisplayItem::Dotdot { parent_name, .. } => {
+                (format!("\u{2B06}  {}", parent_name), false, false)
+            }
+            DisplayItem::ParentReshow { name, .. } => {
+                (format!("\u{2022}  \u{1F4C1}  {}", name), false, false)
+            }
+            DisplayItem::Ellipsis => ("\u{2026}(more)".to_string(), true, false),
+            DisplayItem::Empty { message } => (message.clone(), true, false),
+        };
+
+        let color = if is_disabled {
+            text_color_dim
+        } else {
+            text_color
+        };
+        unsafe { SetTextColor(hdc, color) };
+
+        // Draw label with left padding and end-ellipsis on overflow.
+        let pad = theme::scale(8, dpi);
+        let arrow_w = theme::scale(20, dpi);
+        let text_right = if has_children {
+            win_rect.right - arrow_w
+        } else {
+            win_rect.right - theme::scale(8, dpi)
+        };
+        let mut text_rect = RECT {
+            left: win_rect.left + pad,
+            top: win_rect.top,
+            right: text_right,
+            bottom: win_rect.bottom,
+        };
+        let mut wide: Vec<u16> = label.encode_utf16().collect();
+        unsafe {
+            DrawTextW(
+                hdc,
+                &mut wide,
+                &mut text_rect,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
+            );
+        }
+
+        // Trailing ▸ arrow for items that have children.
+        if has_children {
+            let mut arrow_rect = RECT {
+                left: win_rect.right - arrow_w,
+                top: win_rect.top,
+                right: win_rect.right - theme::scale(4, dpi),
+                bottom: win_rect.bottom,
+            };
+            let mut arrow: Vec<u16> = "\u{25B8}".encode_utf16().collect();
+            unsafe {
+                DrawTextW(
+                    hdc,
+                    &mut arrow,
+                    &mut arrow_rect,
+                    DT_SINGLELINE | DT_VCENTER | DT_RIGHT,
+                );
+            }
+        }
+    }
+
+    if !old_font.is_invalid() {
+        unsafe {
+            SelectObject(hdc, old_font);
+        }
+    }
 }
