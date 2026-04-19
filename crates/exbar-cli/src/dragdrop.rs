@@ -600,11 +600,8 @@ pub struct SubmenuDropTarget {
     toolbar_hwnd: HWND,
     popup_hwnd: HWND,
     popup_level: u8,
-    /// File-op executor for drop handling. Task 14 uses this in `Drop` to
-    /// move/copy the dragged paths into the hit folder synchronously —
-    /// must happen while the IDataObject is still alive (i.e., inside the
-    /// `Drop` method body, before returning).
-    #[allow(dead_code)]
+    /// File-op executor for drop handling. Invoked synchronously in `Drop`
+    /// while the `IDataObject` is still alive (before returning to the caller).
     file_operator: std::sync::Arc<dyn crate::dragdrop::FileOperator>,
 }
 
@@ -723,19 +720,75 @@ impl IDropTarget_Impl for SubmenuDropTarget_Impl {
 
     fn Drop(
         &self,
-        _pdataobj: windows_core::Ref<'_, IDataObject>,
+        pdataobj: windows_core::Ref<'_, IDataObject>,
         grfkeystate: MODIFIERKEYS_FLAGS,
         pt: &windows::Win32::Foundation::POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
         let idx = self.hit_item_index(pt);
-        // MK_CONTROL bit in grfkeystate → ctrl-drop. Task 14 will interpret this
-        // when handling WM_USER_SUBMENU_CLICK in the toolbar wndproc.
         let ctrl = grfkeystate.contains(MK_CONTROL);
-        self.post_click(idx, ctrl);
+
+        // Resolve destination path from the hit display item.
+        let dest_path: Option<std::path::PathBuf> = unsafe {
+            crate::submenu_wnd::popup_state(self.popup_hwnd).and_then(|p| {
+                if idx < 0 {
+                    return None;
+                }
+                p.display_items.get(idx as usize).and_then(|item| match item {
+                    crate::submenu::DisplayItem::Subfolder { entry } => Some(entry.path.clone()),
+                    crate::submenu::DisplayItem::Dotdot { parent_path, .. } => {
+                        Some(parent_path.clone())
+                    }
+                    crate::submenu::DisplayItem::ParentReshow { path, .. } => Some(path.clone()),
+                    _ => None,
+                })
+            })
+        };
+
+        let Some(dest) = dest_path else {
+            // No valid drop target (buffer band, Ellipsis, Empty, or out-of-bounds).
+            if !pdweffect.is_null() {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+            }
+            self.post_click(idx, ctrl);
+            return Ok(());
+        };
+
+        let Some(data_obj) = pdataobj.as_ref() else {
+            if !pdweffect.is_null() {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+            }
+            self.post_click(idx, ctrl);
+            return Ok(());
+        };
+
+        // Determine move vs copy using drive-letter heuristic (same as FolderDropTarget).
+        // SAFETY: extract_paths_from_data_object is safe to call while the IDataObject is live.
+        let sources = unsafe { extract_paths_from_data_object(data_obj) };
+        let source_drive = sources
+            .first()
+            .and_then(|p| drive_letter(&p.to_string_lossy()));
+        let real_dest = resolve_to_real_path(&dest.to_string_lossy());
+        let dest_drive = drive_letter(&real_dest);
+        let effect =
+            drop_effect::determine_effect(keystate_from(grfkeystate), source_drive, dest_drive);
+        let dropeffect = effect_to_dropeffect(effect);
         if !pdweffect.is_null() {
-            unsafe { *pdweffect = DROPEFFECT_COPY };
+            unsafe { *pdweffect = dropeffect };
         }
+
+        if !sources.is_empty() {
+            log::info!(
+                "submenu drop: dest={dest:?} effect={effect:?} sources={}",
+                sources.len()
+            );
+            if let Err(e) = execute_drop_via(&*self.file_operator, effect, &sources, &dest) {
+                log::error!("submenu drop: file operation failed: {e}");
+            }
+        }
+
+        // Post click message to dismiss the chain regardless of success/failure.
+        self.post_click(idx, ctrl);
         Ok(())
     }
 }

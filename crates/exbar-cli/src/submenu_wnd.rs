@@ -16,12 +16,14 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_BTNFACE, CreateSolidBrush, DeleteObject, EndPaint, FillRect, PAINTSTRUCT,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, IDC_ARROW, LWA_ALPHA, LoadCursorW,
     PostMessageW, RegisterClassExW, SW_SHOWNOACTIVATE, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, ShowWindow, WM_DESTROY, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    SetWindowLongPtrW, ShowWindow, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_NCCREATE, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_POPUP,
 };
 use windows_core::PCWSTR;
 
@@ -353,6 +355,56 @@ unsafe extern "system" fn submenu_wndproc(
                 );
             }
             LRESULT(0)
+        }
+
+        WM_LBUTTONUP => {
+            let Some(popup) = (unsafe { popup_state(hwnd) }) else {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            };
+            let x = (lparam.0 as i16) as i32;
+            let y = ((lparam.0 >> 16) as i16) as i32;
+            let item_idx = hit_test_inner(&popup.layout, x, y);
+            if item_idx < 0 {
+                // Click outside any item — ignore; toolbar's click-outside handler fires separately.
+                return windows::Win32::Foundation::LRESULT(0);
+            }
+            // Ctrl detection: bit 15 of GetKeyState is 1 when the key is down.
+            let ctrl = unsafe { (GetKeyState(VK_CONTROL.0 as i32) as u16) & 0x8000 != 0 };
+            let level = popup.level;
+            let toolbar_hwnd = popup.toolbar_hwnd;
+            let wparam_encoded = ((level as usize) << 16) | if ctrl { 1 } else { 0 };
+            unsafe {
+                let _ = PostMessageW(
+                    Some(toolbar_hwnd),
+                    crate::wndproc::WM_USER_SUBMENU_CLICK,
+                    windows::Win32::Foundation::WPARAM(wparam_encoded),
+                    windows::Win32::Foundation::LPARAM(item_idx),
+                );
+            }
+            LRESULT(0)
+        }
+
+        WM_KEYDOWN => {
+            // Best-effort: popups use WS_EX_NOACTIVATE so WM_KEYDOWN may never arrive
+            // here in practice. Primary dismissal mechanisms are click-outside (Task 16)
+            // and cursor-exit safety timer (Task 11).
+            if wparam.0 == VK_ESCAPE.0 as usize {
+                let Some(popup) = (unsafe { popup_state(hwnd) }) else {
+                    return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+                };
+                let toolbar_hwnd = popup.toolbar_hwnd;
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(toolbar_hwnd),
+                        crate::wndproc::WM_USER_SUBMENU_DISMISS,
+                        windows::Win32::Foundation::WPARAM(0),
+                        windows::Win32::Foundation::LPARAM(0),
+                    );
+                }
+                return LRESULT(0);
+            }
+            // Fall through for other keys.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
         WM_DESTROY => {

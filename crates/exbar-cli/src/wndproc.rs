@@ -461,6 +461,66 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
+        x if x == WM_USER_SUBMENU_CLICK => {
+            // WPARAM: high 16 bits = popup level, bit 0 = ctrl held.
+            // LPARAM: item index (usize).
+            let level = (wparam.0 >> 16) as u8;
+            let ctrl = (wparam.0 & 1) != 0;
+            let idx = lparam.0 as usize;
+
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                // Look up the popup HWND for this level (level is 1-based, vec is 0-based).
+                let popup_hwnd = state
+                    .submenu_popups
+                    .get((level as usize).saturating_sub(1))
+                    .copied();
+
+                let display_item = popup_hwnd.and_then(|h| {
+                    if h.0.is_null() {
+                        return None;
+                    }
+                    unsafe {
+                        crate::submenu_wnd::popup_state(h)
+                            .and_then(|p| p.display_items.get(idx).cloned())
+                    }
+                });
+
+                match display_item {
+                    Some(crate::submenu::DisplayItem::Subfolder { entry }) => {
+                        state.navigate_or_new_window_or_tab(
+                            &entry.path.to_string_lossy(),
+                            ctrl,
+                        );
+                    }
+                    Some(crate::submenu::DisplayItem::Dotdot { parent_path, .. }) => {
+                        state.navigate_or_new_window_or_tab(
+                            &parent_path.to_string_lossy(),
+                            ctrl,
+                        );
+                    }
+                    Some(crate::submenu::DisplayItem::ParentReshow { path, .. }) => {
+                        state.navigate_or_new_window_or_tab(
+                            &path.to_string_lossy(),
+                            ctrl,
+                        );
+                    }
+                    _ => {
+                        // Ellipsis / Empty / None — no action, but still dismiss.
+                    }
+                }
+
+                state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Commit);
+            }
+            LRESULT(0)
+        }
+
+        x if x == WM_USER_SUBMENU_DISMISS => {
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Dismiss);
+            }
+            LRESULT(0)
+        }
+
         x if x == WM_USER_SUBMENU_HOVER => {
             // WPARAM high 16 bits = popup level (u8); LPARAM = item index (isize, -1 = buffer).
             let level = (wparam.0 >> 16) as u8;

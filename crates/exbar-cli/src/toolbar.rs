@@ -433,6 +433,38 @@ use crate::rename::{self, RenameAction, RenameEvent};
 // ── Submenu adapter (Task 10a) ────────────────────────────────────────────────
 
 impl ToolbarState {
+    /// Navigate the active target to `path`, or open a new window (FileDialog mode)
+    /// or new tab (Explorer mode with ctrl held).
+    ///
+    /// Used by the submenu click handler in `wndproc` to dispatch `WM_USER_SUBMENU_CLICK`.
+    pub(crate) fn navigate_or_new_window_or_tab(&self, path: &str, ctrl: bool) {
+        use crate::target::TargetKind;
+        let path = std::path::Path::new(path);
+        match (self.active_target.map(|t| t.kind), ctrl) {
+            (Some(TargetKind::FileDialog), _) => {
+                // Dialogs have no tabs; always open a new Explorer window.
+                self.shell_browser.open_in_new_window(path);
+            }
+            (Some(TargetKind::Explorer), true) => {
+                let active_hwnd = self.active_target.map(|t| t.hwnd).unwrap_or_default();
+                let timeout = self
+                    .config
+                    .as_ref()
+                    .map(|c| c.new_tab_timeout_ms_zero_disables)
+                    .unwrap_or(500);
+                self.shell_browser.open_in_new_tab(active_hwnd, path, timeout);
+            }
+            (Some(TargetKind::Explorer), false) => {
+                let active_hwnd = self.active_target.map(|t| t.hwnd).unwrap_or_default();
+                crate::warn_on_err!(self.shell_browser.navigate(active_hwnd, path));
+            }
+            (None, _) => {
+                // No active target — best-effort, open new window.
+                self.shell_browser.open_in_new_window(path);
+            }
+        }
+    }
+
     /// Translate a `SubmenuEvent` into pure state-machine transitions + Win32 side effects.
     pub(crate) fn execute_submenu_event(
         &mut self,
