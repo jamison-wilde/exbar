@@ -91,6 +91,9 @@ pub(crate) const TIMER_RECENT_DEBOUNCE: usize = 4;
 /// Timer ID for the 1-second dwell + active-tab-path polling tick.
 /// Armed when Recent is enabled; disarmed when disabled.
 pub(crate) const TIMER_DWELL_TICK: usize = 5;
+/// One-shot timer that fires after springOpenDelayMs ms of cursor rest on a
+/// folder button, opening its submenu without requiring a mouse press.
+pub(crate) const TIMER_HOVER_OPEN: usize = 6;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -177,6 +180,8 @@ pub(crate) struct ToolbarState {
     pub(crate) recent_dirty: bool,
     /// Set when SetTimer(TIMER_RECENT_DEBOUNCE) is armed but not yet fired.
     pub(crate) recent_debounce_pending: bool,
+    /// Button index the hover-open timer is waiting on. `None` when no wait is active.
+    pub(crate) hover_open_pending_button: Option<usize>,
 }
 
 impl ToolbarState {
@@ -258,6 +263,7 @@ impl ToolbarState {
             clock,
             recent_dirty: false,
             recent_debounce_pending: false,
+            hover_open_pending_button: None,
         }
     }
 }
@@ -1047,7 +1053,11 @@ impl ToolbarState {
 
     /// Convert the toolbar-client-coord button rect at `folder_button` (folder index,
     /// 0-based) to screen coordinates. Returns a zero rect if the index is out of range.
-    fn button_screen_rect(&self, toolbar: HWND, folder_button: usize) -> crate::layout::Rect {
+    pub(crate) fn button_screen_rect(
+        &self,
+        toolbar: HWND,
+        folder_button: usize,
+    ) -> crate::layout::Rect {
         use windows::Win32::Graphics::Gdi::ClientToScreen;
         let Some(btn) = self.buttons.get(folder_button + 1) else {
             return crate::layout::Rect {

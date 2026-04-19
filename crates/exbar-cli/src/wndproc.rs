@@ -279,6 +279,49 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         insertion_if_reordering,
                     },
                 );
+
+                // Hover-open: arm a one-shot timer when the cursor rests on a folder button.
+                // If already waiting on the same button, do nothing. If on a different button,
+                // reset. If not on any button, cancel.
+                match state.pointer {
+                    pointer::PointerState::Hovering { button } if button >= 1 => {
+                        // button 0 is the '+' button — only fire for folder buttons.
+                        if state.hover_open_pending_button != Some(button) {
+                            // Kill any previous timer.
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                                    Some(hwnd),
+                                    crate::toolbar::TIMER_HOVER_OPEN,
+                                );
+                            }
+                            state.hover_open_pending_button = Some(button);
+                            // Don't arm if a submenu chain is already open (avoid re-opening on hover drift).
+                            if !state.submenu_chain.is_open() {
+                                let delay = state.submenu_cfg.spring_open_delay_ms;
+                                unsafe {
+                                    let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                                        Some(hwnd),
+                                        crate::toolbar::TIMER_HOVER_OPEN,
+                                        delay,
+                                        None,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // Cursor no longer on a folder button — cancel pending hover-open.
+                        if state.hover_open_pending_button.is_some() {
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                                    Some(hwnd),
+                                    crate::toolbar::TIMER_HOVER_OPEN,
+                                );
+                            }
+                            state.hover_open_pending_button = None;
+                        }
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -287,6 +330,16 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
                 state.mouse_tracking_started = false; // next hover will need to re-arm.
                 state.apply_pointer_event(hwnd, pointer::PointerEvent::Leave);
+                // Cancel pending hover-open.
+                if state.hover_open_pending_button.is_some() {
+                    unsafe {
+                        let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                            Some(hwnd),
+                            crate::toolbar::TIMER_HOVER_OPEN,
+                        );
+                    }
+                    state.hover_open_pending_button = None;
+                }
             }
             LRESULT(0)
         }
@@ -747,6 +800,60 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             } else if timer_id == crate::toolbar::TIMER_RECENT_DEBOUNCE {
                 if let Some(state) = unsafe { toolbar_state(hwnd) } {
                     state.flush_recent(hwnd);
+                }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_HOVER_OPEN {
+                // Kill the one-shot timer regardless.
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_HOVER_OPEN);
+                }
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    let pending = state.hover_open_pending_button.take();
+                    // Verify cursor is still on the same button we were waiting for.
+                    let still_same = match state.pointer {
+                        pointer::PointerState::Hovering { button } => Some(button) == pending,
+                        _ => false,
+                    };
+                    if !still_same {
+                        return LRESULT(0);
+                    }
+                    let Some(button_idx) = pending else {
+                        return LRESULT(0);
+                    };
+                    // Don't open if chain already open or user is pressing.
+                    if state.submenu_chain.is_open() {
+                        return LRESULT(0);
+                    }
+                    // Translate button index → folder index (button 0 is '+').
+                    let folder_button = button_idx.saturating_sub(1);
+                    let Some(cfg) = state.config.as_ref() else {
+                        return LRESULT(0);
+                    };
+                    let Some(folder) = cfg.folders.get(folder_button) else {
+                        return LRESULT(0);
+                    };
+                    let is_recent = matches!(folder.kind, crate::config::FolderKind::Recent);
+                    let raw_path = folder.path.clone();
+
+                    // Record trigger context (same as FireLongPress arm in execute_pointer_command).
+                    let btn_rect = state.button_screen_rect(hwnd, folder_button);
+                    state.last_button_screen_rect = btn_rect;
+                    state.last_button_center_y_on_open = (btn_rect.top + btn_rect.bottom) / 2;
+                    let mut cursor = POINT::default();
+                    unsafe {
+                        let _ = GetCursorPos(&mut cursor);
+                    }
+                    state.last_cursor_x_on_open = cursor.x;
+                    state.last_cursor_y_on_open = cursor.y;
+
+                    state.execute_submenu_event(
+                        hwnd,
+                        crate::submenu::SubmenuEvent::OpenRoot {
+                            path: std::path::PathBuf::from(raw_path),
+                            button_center_y: state.last_button_center_y_on_open,
+                            is_recent,
+                        },
+                    );
                 }
                 LRESULT(0)
             } else if timer_id == crate::toolbar::TIMER_DWELL_TICK {

@@ -276,8 +276,15 @@ pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuComm
                 return cmds;
             }
             let parent_mode = chain.levels[idx].ancestor_mode;
+            let parent_is_recent = chain.levels[idx].is_recent;
             let new_level = level + 1;
-            let ancestor_mode = parent_mode && is_dotdot;
+            let ancestor_mode = if parent_is_recent {
+                // Recent's children are fresh browsing roots: each item is a real
+                // filesystem folder, and ".." into its parent is meaningful.
+                true
+            } else {
+                parent_mode && is_dotdot
+            };
             chain.levels.push(ChainLevel {
                 level: new_level,
                 path: child_path.clone(),
@@ -941,6 +948,57 @@ mod tests_chain {
                 .iter()
                 .all(|c| !matches!(c, SubmenuCommand::CloseDeeperThan { .. }))
         );
+    }
+
+    #[test]
+    fn hover_from_recent_root_enables_ancestor_mode_on_child() {
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: std::path::PathBuf::new(),
+                button_center_y: 0,
+                is_recent: true,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: std::path::PathBuf::from("C:\\Users\\wix"),
+                is_dotdot: false,
+            },
+        );
+        assert_eq!(chain.depth(), 2);
+        assert!(
+            chain.levels[1].ancestor_mode,
+            "child of recent root should be in ancestor mode"
+        );
+    }
+
+    #[test]
+    fn hover_from_non_recent_root_clears_ancestor_mode_on_concrete_descent() {
+        // Regression: regular folder path still works.
+        let mut chain = SubmenuChain::default();
+        transition(
+            &mut chain,
+            SubmenuEvent::OpenRoot {
+                path: std::path::PathBuf::from("C:\\A"),
+                button_center_y: 0,
+                is_recent: false,
+            },
+        );
+        transition(
+            &mut chain,
+            SubmenuEvent::HoverChildItem {
+                level: 1,
+                index: 0,
+                child_path: std::path::PathBuf::from("C:\\A\\B"),
+                is_dotdot: false,
+            },
+        );
+        assert!(!chain.levels[1].ancestor_mode);
     }
 
     #[test]
