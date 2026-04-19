@@ -91,6 +91,62 @@ where
     Ok(v.clamp(0.2, 1.0))
 }
 
+fn default_recent_max_count() -> u32 {
+    5
+}
+fn default_recent_dwell_seconds() -> u32 {
+    10
+}
+
+fn deserialize_recent_max_count<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(u32::deserialize(d)?.clamp(1, 20))
+}
+
+fn deserialize_recent_dwell<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(u32::deserialize(d)?.clamp(1, 300))
+}
+
+/// Recent Folders tracking config. All fields optional with sensible defaults.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RecentConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(
+        rename = "maxCount",
+        default = "default_recent_max_count",
+        deserialize_with = "deserialize_recent_max_count"
+    )]
+    pub max_count: u32,
+    #[serde(rename = "includePinned", default)]
+    pub include_pinned: bool,
+    #[serde(
+        rename = "dwellSecondsToTrack",
+        default = "default_recent_dwell_seconds",
+        deserialize_with = "deserialize_recent_dwell"
+    )]
+    pub dwell_seconds_to_track: u32,
+    #[serde(rename = "excludedPaths", default)]
+    pub excluded_paths: Vec<String>,
+}
+
+impl Default for RecentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_count: default_recent_max_count(),
+            include_pinned: false,
+            dwell_seconds_to_track: default_recent_dwell_seconds(),
+            excluded_paths: Vec::new(),
+        }
+    }
+}
+
 /// Submenu/spring-open UX knobs. All fields have defaults and clamps.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 pub struct SubmenuConfig {
@@ -153,6 +209,8 @@ pub struct Config {
     pub enable_file_dialogs: bool,
     #[serde(default)]
     pub submenu: SubmenuConfig,
+    #[serde(default)]
+    pub recent: RecentConfig,
 }
 
 /// Discriminator for toolbar button kinds. Omitted in JSON = `Folder` (backward compat).
@@ -702,5 +760,51 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let cfg2 = Config::from_str(&json).unwrap();
         assert_eq!(cfg2.folders[0].kind, FolderKind::Recent);
+    }
+
+    #[test]
+    fn recent_config_defaults_when_missing() {
+        let cfg: Config = Config::from_str(r#"{"folders":[]}"#).unwrap();
+        assert!(!cfg.recent.enabled);
+        assert_eq!(cfg.recent.max_count, 5);
+        assert!(!cfg.recent.include_pinned);
+        assert_eq!(cfg.recent.dwell_seconds_to_track, 10);
+        assert!(cfg.recent.excluded_paths.is_empty());
+    }
+
+    #[test]
+    fn recent_max_count_clamped_low() {
+        let cfg: Config = Config::from_str(r#"{"folders":[],"recent":{"maxCount":0}}"#).unwrap();
+        assert_eq!(cfg.recent.max_count, 1);
+    }
+
+    #[test]
+    fn recent_max_count_clamped_high() {
+        let cfg: Config = Config::from_str(r#"{"folders":[],"recent":{"maxCount":99}}"#).unwrap();
+        assert_eq!(cfg.recent.max_count, 20);
+    }
+
+    #[test]
+    fn recent_dwell_seconds_clamped() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[],"recent":{"dwellSecondsToTrack":500}}"#).unwrap();
+        assert_eq!(cfg.recent.dwell_seconds_to_track, 300);
+    }
+
+    #[test]
+    fn recent_round_trips() {
+        let cfg: Config = Config::from_str(
+            r#"{"folders":[],"recent":{"enabled":true,"maxCount":10,"includePinned":true,"dwellSecondsToTrack":30,"excludedPaths":["C:\\private"]}}"#,
+        ).unwrap();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let cfg2 = Config::from_str(&json).unwrap();
+        assert_eq!(cfg.recent.enabled, cfg2.recent.enabled);
+        assert_eq!(cfg.recent.max_count, cfg2.recent.max_count);
+        assert_eq!(cfg.recent.include_pinned, cfg2.recent.include_pinned);
+        assert_eq!(
+            cfg.recent.dwell_seconds_to_track,
+            cfg2.recent.dwell_seconds_to_track
+        );
+        assert_eq!(cfg.recent.excluded_paths, cfg2.recent.excluded_paths);
     }
 }
