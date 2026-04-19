@@ -379,13 +379,15 @@ unsafe extern "system" fn submenu_wndproc(
             let visible = popup.layout.visible_count;
             let can_up = popup.scroll_offset > 0;
             let can_down = popup.scroll_offset + visible < total;
-            let buffer = popup.layout.buffer_px;
-            let trigger = popup.layout.scroll_trigger_px;
-            // Top trigger band: [buffer - trigger, buffer)
-            let in_top_band = y >= buffer - trigger && y < buffer;
-            // Bottom trigger band: [popup_h - buffer, popup_h - buffer + trigger)
-            let in_bottom_band =
-                y >= popup.layout.popup_h - buffer && y < popup.layout.popup_h - buffer + trigger;
+            let buffer_top = popup.layout.buffer_top_px;
+            let buffer_bottom = popup.layout.buffer_bottom_px;
+            let trigger_top = popup.layout.scroll_trigger_top_px;
+            let trigger_bottom = popup.layout.scroll_trigger_bottom_px;
+            // Top trigger band: [buffer_top - trigger_top, buffer_top)
+            let in_top_band = y >= buffer_top - trigger_top && y < buffer_top;
+            // Bottom trigger band: [popup_h - buffer_bottom, popup_h - buffer_bottom + trigger_bottom)
+            let in_bottom_band = y >= popup.layout.popup_h - buffer_bottom
+                && y < popup.layout.popup_h - buffer_bottom + trigger_bottom;
             let dir: isize = if in_top_band && can_up {
                 -1
             } else if in_bottom_band && can_down {

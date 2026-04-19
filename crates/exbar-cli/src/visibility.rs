@@ -386,9 +386,8 @@ unsafe extern "system" fn foreground_event_proc(
                 }
             } else {
                 log::debug!(
-                    "foreground: explorer-process class={class:?} root={root:?} != active={active:?}, hiding (task switcher?)"
+                    "foreground: explorer-process class={class:?} root={root:?} != active={active:?}, ignoring (task switcher?)"
                 );
-                update_toolbar_visibility(tb);
             }
         }
     } else if in_our_process {

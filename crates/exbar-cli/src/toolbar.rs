@@ -836,26 +836,42 @@ impl ToolbarState {
             .max(crate::theme::scale(100, self.dpi));
 
         let max_popup_h = work.bottom - work.top;
+
+        // For level-1 popups, collapse the buffer on the toolbar-facing side to 0.
+        // The toolbar-facing side is determined by the reshow/orient:
+        //   Downward (First) → popup opens below toolbar → top edge is flush → top buffer = 0.
+        //   Upward   (Last)  → popup opens above toolbar → bottom edge is flush → bottom buffer = 0.
+        // For levels 2+, use symmetric buffers (no guaranteed screen edge).
+        let (buffer_top, buffer_bottom) = if level == 1 {
+            match reshow {
+                ReshowPosition::First => (0, buffer_px), // downward: top is flush
+                ReshowPosition::Last => (buffer_px, 0),  // upward: bottom is flush
+                ReshowPosition::None => (buffer_px, buffer_px),
+            }
+        } else {
+            (buffer_px, buffer_px)
+        };
+
         let layout = crate::layout::compute_submenu_layout(
             display_items.len(),
             item_px,
             max_width_px,
-            buffer_px,
+            buffer_top,
+            buffer_bottom,
             max_popup_h,
         );
 
         // Popup placement: level-1 left-edge aligns to triggering button; deeper levels right of parent.
         let (sx, sy) = if level == 1 {
             let btn = self.last_button_screen_rect;
-            let buffer = buffer_px;
             // Pixel-perfect alignment. Derived directly from the paint code:
             //   Button text_x  = btn.left + scale(BTN_PAD_H=10, dpi)          [paint.rs:304]
-            //   Popup text_x   = popup.left + buffer + scale(8, dpi)          [paint.rs:537]
+            //   Popup text_x   = popup.left + buffer_top + scale(8, dpi)      [paint.rs:537]
             // Setting them equal and solving:
-            //   popup.left = btn.left + scale(10 - 8, dpi) - buffer
-            //              = btn.left + scale(2, dpi) - buffer
+            //   popup.left = btn.left + scale(10 - 8, dpi) - buffer_top
+            //              = btn.left + scale(2, dpi) - buffer_top
             let align_offset = crate::theme::scale(BTN_PAD_H - 8, self.dpi);
-            let x = btn.left + align_offset - buffer;
+            let x = btn.left + align_offset - buffer_top;
             // TODO(vertical toolbar): if layout is Vertical, horizontal offset should
             // push the Recent popup left/right of the toolbar instead. For now assume
             // horizontal toolbars — the dominant case.
@@ -865,19 +881,23 @@ impl ToolbarState {
                 // ParentReshow row that is meant to sit "in place" over the toolbar
                 // button; Recent has no such row, so overlapping serves no purpose.
                 match reshow {
-                    // Popup opens downward: sit below the button entirely.
-                    ReshowPosition::First => btn.bottom,
-                    // Popup opens upward: sit above the button entirely.
-                    ReshowPosition::Last => btn.top - layout.popup_h,
+                    // Popup opens downward: sit below the button entirely. buffer_top=0,
+                    // so popup.top = btn.bottom + 0 = btn.bottom (flush).
+                    ReshowPosition::First => btn.bottom + buffer_top,
+                    // Popup opens upward: sit above the button entirely. buffer_bottom=0,
+                    // so popup.bottom = btn.top - 0 = btn.top (flush).
+                    ReshowPosition::Last => btn.top - layout.popup_h + buffer_bottom,
                     // Defensive — Recent at level 1 always resolves First or Last.
                     ReshowPosition::None => btn.top,
                 }
             } else {
                 match reshow {
-                    // Popup opens downward: reshow row (first) should align with button top.
-                    ReshowPosition::First => btn.top - buffer,
-                    // Popup opens upward: reshow row (last) should align with button bottom.
-                    ReshowPosition::Last => btn.bottom - layout.popup_h + buffer,
+                    // Popup opens downward: reshow row (first) aligns with button top.
+                    // buffer_top=0 → popup.top = btn.top (reshow row flush at top).
+                    ReshowPosition::First => btn.top - buffer_top,
+                    // Popup opens upward: reshow row (last) aligns with button bottom.
+                    // buffer_bottom=0 → popup.bottom = btn.bottom (reshow row flush at bottom).
+                    ReshowPosition::Last => btn.bottom - layout.popup_h + buffer_bottom,
                     ReshowPosition::None => btn.top,
                 }
             };
