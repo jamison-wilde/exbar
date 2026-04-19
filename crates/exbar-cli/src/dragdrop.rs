@@ -574,30 +574,52 @@ pub unsafe fn extract_paths_from_data_object(
 
 // ── SubmenuDropTarget ─────────────────────────────────────────────────────────
 
-/// `IDropTarget` for a submenu popup HWND. Drag-enter/over/leave events post
-/// `WM_USER_SUBMENU_HOVER` with WPARAM carrying the popup level (high word) and
-/// LPARAM carrying the hit item index, or -1 if the cursor is outside any
-/// painted item (e.g. in the translucent buffer band). Drop posts
-/// `WM_USER_SUBMENU_CLICK` with the same payload so the toolbar's wndproc can
-/// commit (move/copy into the hit folder) via the existing `FileOperator` path.
+/// `IDropTarget` for a submenu popup HWND.
 ///
-/// # WPARAM / LPARAM encoding
+/// Message routing:
 ///
-/// - `WM_USER_SUBMENU_HOVER`: `WPARAM = popup_level << 16`, `LPARAM = item_index (isize, or -1)`
-/// - `WM_USER_SUBMENU_CLICK`: `WPARAM = (popup_level << 16) | ctrl_bit`, `LPARAM = item_index`
+/// - **WM_USER_SUBMENU_HOVER** (sent on DragEnter/DragOver/DragLeave):
+///   - `WPARAM = (popup_level as usize) << 16`  — level in bits 16..=23.
+///   - `LPARAM = item_index as isize`  — index of hit item, or `-1` if
+///     cursor is outside all painted items (in the buffer band).
+///
+/// - **WM_USER_SUBMENU_CLICK** (sent on Drop):
+///   - `WPARAM = ((popup_level as usize) << 16) | (ctrl as usize)`
+///     — level in bits 16..=23, ctrl in bit 0.
+///     Decode: `level = (wparam >> 16) as u8; ctrl = (wparam & 1) != 0`.
+///     **Do NOT** use `MK_CONTROL` (0x0008) to decode this bit — that mask
+///     is for native mouse-message flags, not our synthetic encoding.
+///   - `LPARAM = item_index as isize`  — index of hit item on drop.
+///
+/// Drop data lifetime: the `IDataObject` passed to `Drop` is only valid
+/// during the call. Task 14 will extract paths and invoke `file_operator`
+/// synchronously from inside `Drop` — posting `WM_USER_SUBMENU_CLICK` is
+/// a dismissal-only signal and carries no file data.
 #[implement(IDropTarget)]
 pub struct SubmenuDropTarget {
     toolbar_hwnd: HWND,
     popup_hwnd: HWND,
     popup_level: u8,
+    /// File-op executor for drop handling. Task 14 uses this in `Drop` to
+    /// move/copy the dragged paths into the hit folder synchronously —
+    /// must happen while the IDataObject is still alive (i.e., inside the
+    /// `Drop` method body, before returning).
+    #[allow(dead_code)]
+    file_operator: std::sync::Arc<dyn crate::dragdrop::FileOperator>,
 }
 
 impl SubmenuDropTarget {
-    pub fn new(toolbar_hwnd: HWND, popup_hwnd: HWND, popup_level: u8) -> Self {
+    pub fn new(
+        toolbar_hwnd: HWND,
+        popup_hwnd: HWND,
+        popup_level: u8,
+        file_operator: std::sync::Arc<dyn crate::dragdrop::FileOperator>,
+    ) -> Self {
         Self {
             toolbar_hwnd,
             popup_hwnd,
             popup_level,
+            file_operator,
         }
     }
 

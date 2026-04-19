@@ -58,6 +58,10 @@ pub struct SubmenuPopup {
     pub dpi: u32,
     /// HWND of the main toolbar that owns this popup chain (for message routing).
     pub toolbar_hwnd: HWND,
+    /// Set to `true` after `RegisterDragDrop` succeeds. Gates `RevokeDragDrop`
+    /// in [`destroy_popup`] so we don't log spurious `DRAGDROP_E_NOTREGISTERED`
+    /// warnings in test contexts where OleInitialize was never called.
+    pub drop_registered: bool,
 }
 
 // ── Class registration ────────────────────────────────────────────────────────
@@ -103,11 +107,14 @@ fn ensure_class_registered() {
 /// - `toolbar_hwnd` — the main toolbar window (for message routing).
 /// - `popup` — fully initialised [`SubmenuPopup`] describing this level.
 /// - `screen_x`, `screen_y` — top-left corner of the popup in screen coords.
+/// - `file_operator` — passed to [`crate::dragdrop::SubmenuDropTarget`] so
+///   Task 14 can execute move/copy synchronously inside `IDropTarget::Drop`.
 pub fn create_popup(
     toolbar_hwnd: HWND,
     popup: Box<SubmenuPopup>,
     screen_x: i32,
     screen_y: i32,
+    file_operator: std::sync::Arc<dyn crate::dragdrop::FileOperator>,
 ) -> HWND {
     ensure_class_registered();
 
@@ -163,11 +170,23 @@ pub fn create_popup(
             // requires OleInitialize (see CLAUDE.md gotcha) — satisfied once in
             // run_hook before the message pump starts.
             let drop_target: windows::Win32::System::Ole::IDropTarget =
-                crate::dragdrop::SubmenuDropTarget::new(toolbar_hwnd, hwnd, level_at_creation)
-                    .into();
+                crate::dragdrop::SubmenuDropTarget::new(
+                    toolbar_hwnd,
+                    hwnd,
+                    level_at_creation,
+                    file_operator,
+                )
+                .into();
             unsafe {
-                if let Err(e) = windows::Win32::System::Ole::RegisterDragDrop(hwnd, &drop_target) {
-                    log::warn!("submenu: RegisterDragDrop failed for hwnd={hwnd:?}: {e:?}");
+                match windows::Win32::System::Ole::RegisterDragDrop(hwnd, &drop_target) {
+                    Ok(()) => {
+                        if let Some(popup) = popup_state(hwnd) {
+                            popup.drop_registered = true;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("submenu: RegisterDragDrop failed for hwnd={hwnd:?}: {e:?}");
+                    }
                 }
             }
             hwnd
@@ -192,11 +211,15 @@ pub fn destroy_popup(hwnd: HWND) {
         return;
     }
 
-    // Revoke before destroying the window. RevokeDragDrop returns
-    // DRAGDROP_E_NOTREGISTERED if registration never succeeded (e.g. OLE
-    // not yet initialised during tests) — warn-and-continue is correct.
+    // Revoke before destroying the window. Only call RevokeDragDrop when we
+    // know registration succeeded (tracked by drop_registered) to avoid
+    // DRAGDROP_E_NOTREGISTERED noise in tests where OleInitialize was never
+    // called.
     unsafe {
-        if let Err(e) = windows::Win32::System::Ole::RevokeDragDrop(hwnd) {
+        let should_revoke = popup_state(hwnd)
+            .map(|p| p.drop_registered)
+            .unwrap_or(false);
+        if should_revoke && let Err(e) = windows::Win32::System::Ole::RevokeDragDrop(hwnd) {
             log::warn!("submenu: RevokeDragDrop failed for hwnd={hwnd:?}: {e:?}");
         }
     }

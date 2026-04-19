@@ -568,9 +568,11 @@ impl ToolbarState {
             non_chain_opacity: self.submenu_cfg.non_chain_item_opacity,
             dpi: self.dpi,
             toolbar_hwnd: toolbar,
+            drop_registered: false,
         });
 
-        let popup_hwnd = crate::submenu_wnd::create_popup(toolbar, popup, sx, sy);
+        let popup_hwnd =
+            crate::submenu_wnd::create_popup(toolbar, popup, sx, sy, self.file_operator.clone());
 
         // Grow submenu_popups Vec to accommodate this level (1-indexed → vec index = level-1).
         if self.submenu_popups.len() < level as usize {
