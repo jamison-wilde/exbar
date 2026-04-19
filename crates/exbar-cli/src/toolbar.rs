@@ -84,6 +84,8 @@ pub(crate) const WM_USER_RELOAD: u32 = 0x0401;
 pub(crate) const TIMER_REPOSITION: usize = 1;
 /// Timer ID for long-press detection — 50 ms tick while a folder button is pressed.
 pub(crate) const TIMER_LONGPRESS: usize = 2;
+/// Timer ID for submenu cursor-tracking + dismiss countdown (30 ms tick while any popup is open).
+pub(crate) const TIMER_SUBMENU_SAFETY: usize = 3;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -151,6 +153,9 @@ pub(crate) struct ToolbarState {
     /// Instant when the last `WM_LBUTTONDOWN` landed on a folder button.
     /// Drives elapsed-ms computation for `LongPressTick` timer ticks.
     pub(crate) last_press_instant: Option<std::time::Instant>,
+    /// True while the 30 ms submenu cursor-tracking timer is armed.
+    /// Prevents double-arming if `open_popup_level` is called rapidly.
+    pub(crate) submenu_timer_active: bool,
 }
 
 impl ToolbarState {
@@ -212,6 +217,7 @@ impl ToolbarState {
             last_cursor_y_on_open: 0,
             last_button_center_y_on_open: 0,
             last_press_instant: None,
+            submenu_timer_active: false,
         }
     }
 }
@@ -449,10 +455,10 @@ impl ToolbarState {
                 self.open_popup_level(toolbar, level, path, ancestor_mode);
             }
             crate::submenu::SubmenuCommand::CloseDeeperThan { level } => {
-                self.close_popups_deeper_than(level);
+                self.close_popups_deeper_than(toolbar, level);
             }
             crate::submenu::SubmenuCommand::CloseAll => {
-                self.close_all_popups();
+                self.close_all_popups(toolbar);
             }
             crate::submenu::SubmenuCommand::SetHighlight { level, index } => {
                 self.set_popup_highlight(level, index);
@@ -594,9 +600,22 @@ impl ToolbarState {
             crate::submenu_wnd::destroy_popup(existing);
         }
         self.submenu_popups[slot] = popup_hwnd;
+
+        // Arm the cursor-tracking safety timer if this is the first popup to open.
+        if !self.submenu_timer_active {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                    Some(toolbar),
+                    TIMER_SUBMENU_SAFETY,
+                    30,
+                    None,
+                );
+            }
+            self.submenu_timer_active = true;
+        }
     }
 
-    fn close_popups_deeper_than(&mut self, level: u8) {
+    fn close_popups_deeper_than(&mut self, toolbar: HWND, level: u8) {
         while self.submenu_popups.len() > level as usize {
             if let Some(h) = self.submenu_popups.pop()
                 && !h.0.is_null()
@@ -604,13 +623,28 @@ impl ToolbarState {
                 crate::submenu_wnd::destroy_popup(h);
             }
         }
+        self.maybe_kill_safety_timer(toolbar);
     }
 
-    fn close_all_popups(&mut self) {
+    fn close_all_popups(&mut self, toolbar: HWND) {
         while let Some(h) = self.submenu_popups.pop() {
             if !h.0.is_null() {
                 crate::submenu_wnd::destroy_popup(h);
             }
+        }
+        self.maybe_kill_safety_timer(toolbar);
+    }
+
+    /// Stop the cursor-tracking timer when no popups remain open.
+    fn maybe_kill_safety_timer(&mut self, toolbar: HWND) {
+        if self.submenu_timer_active && self.submenu_popups.is_empty() {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                    Some(toolbar),
+                    TIMER_SUBMENU_SAFETY,
+                );
+            }
+            self.submenu_timer_active = false;
         }
     }
 

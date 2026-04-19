@@ -15,11 +15,11 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, DefWindowProcW, GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW,
-    HTCAPTION, KillTimer, PostMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP,
-    WM_TIMER,
+    CREATESTRUCTW, DefWindowProcW, GWLP_USERDATA, GetCursorPos, GetForegroundWindow,
+    GetWindowLongPtrW, GetWindowRect, HTCAPTION, KillTimer, PostMessageW, SW_HIDE, SWP_NOACTIVATE,
+    SWP_NOZORDER, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED,
+    WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST,
+    WM_PAINT, WM_RBUTTONUP, WM_TIMER,
 };
 
 use crate::hit_test;
@@ -51,6 +51,28 @@ const MENU_ID_OPEN_NEW_TAB: u32 = 202;
 const MENU_ID_COPY_PATH: u32 = 203;
 const MENU_ID_RENAME: u32 = 204;
 const MENU_ID_REMOVE: u32 = 205;
+
+/// Returns `true` if the given screen-coord cursor is inside any open popup's
+/// rendered bounds (the HWND rect already includes the buffer band, so no
+/// extra inflation is needed — spec §3.8 says the buffer is the inner padding
+/// inside the popup window, not an additional outer halo).
+fn cursor_inside_any_padded_popup(state: &crate::toolbar::ToolbarState, cx: i32, cy: i32) -> bool {
+    use windows::Win32::Foundation::RECT;
+
+    for &h in state.submenu_popups.iter() {
+        if h.0.is_null() {
+            continue;
+        }
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(h, &mut rect).is_err() } {
+            continue;
+        }
+        if cx >= rect.left && cx < rect.right && cy >= rect.top && cy < rect.bottom {
+            return true;
+        }
+    }
+    false
+}
 
 /// Extract `(x, y)` from a WM_* LPARAM whose layout is
 /// `(y << 16) | (x & 0xFFFF)` with signed 16-bit components.
@@ -479,6 +501,35 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_LONGPRESS);
                         }
                         state.last_press_instant = None;
+                    }
+                }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_SUBMENU_SAFETY {
+                // Cursor-tracking safety tick — fires at 30 ms while any popup is open.
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    let mut cursor = POINT::default();
+                    let cursor_ok = unsafe { GetCursorPos(&mut cursor).is_ok() };
+
+                    let inside_any =
+                        cursor_ok && cursor_inside_any_padded_popup(state, cursor.x, cursor.y);
+
+                    let cursor_event = if inside_any {
+                        crate::submenu::SubmenuEvent::CursorReenter
+                    } else {
+                        crate::submenu::SubmenuEvent::CursorExit
+                    };
+                    state.execute_submenu_event(hwnd, cursor_event);
+                    state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::SafetyTick);
+
+                    // If CloseAll was dispatched, the chain is now empty — kill timer here
+                    // too (belt-and-suspenders; maybe_kill_safety_timer already ran via
+                    // close_all_popups, but the flag may still be set if chain cleared by
+                    // a different code path that bypassed close_all_popups).
+                    if !state.submenu_chain.is_open() && state.submenu_timer_active {
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_SAFETY);
+                        }
+                        state.submenu_timer_active = false;
                     }
                 }
                 LRESULT(0)
