@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 // Newtypes bridging Arc<Concrete> → Box<dyn Trait>.
 pub struct PickerArc(pub Arc<MockFolderPicker>);
 impl FolderPicker for PickerArc {
-    fn pick_folder(&self) -> Option<PathBuf> {
-        self.0.pick_folder()
+    fn pick_folder(&self, start_folder: Option<&std::path::Path>) -> Option<PathBuf> {
+        self.0.pick_folder(start_folder)
     }
 }
 pub struct ClipArc(pub Arc<MockClipboard>);

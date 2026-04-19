@@ -337,7 +337,11 @@ impl ToolbarState {
             }
             CancelInlineRename => cancel_inline_rename(self, hwnd),
             FireAddClick => {
-                if let Some(path) = self.folder_picker.pick_folder() {
+                // Start the picker in the active Explorer tab's folder if we
+                // can resolve it; otherwise fall back to the picker's default
+                // (%SystemDrive%\).
+                let start = self.current_active_tab_path();
+                if let Some(path) = self.folder_picker.pick_folder(start.as_deref()) {
                     crate::actions::append_folder_and_reload(self, &path);
                 }
             }
