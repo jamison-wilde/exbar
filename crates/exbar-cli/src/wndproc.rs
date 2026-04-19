@@ -953,6 +953,11 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                     };
                                     if new_offset != popup.scroll_offset {
                                         popup.scroll_offset = new_offset;
+                                        // TEMP-DIAG: log autoscroll tick to trace offset drift.
+                                        log::debug!(
+                                            "TIMER_AUTOSCROLL popup={popup_hwnd:?} dir={dir} new_offset={new_offset} done={}",
+                                            new_offset == 0 || new_offset == max_offset
+                                        );
                                         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
                                             Some(popup_hwnd),
                                             None,

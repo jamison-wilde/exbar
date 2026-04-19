@@ -1031,7 +1031,7 @@ impl ToolbarState {
     }
 
     fn set_popup_highlight(&mut self, level: u8, index: Option<usize>) {
-        use windows::Win32::Foundation::RECT as WinRect;
+        use windows::Win32::Graphics::Gdi::InvalidateRect as InvalidateRectFn;
 
         let Some(&h) = self.submenu_popups.get((level as usize).saturating_sub(1)) else {
             return;
@@ -1043,25 +1043,59 @@ impl ToolbarState {
         // Collect the old + new item rects that need repainting, updating the
         // highlighted_index in the same pass. Only fires when the index actually
         // changed, so mouse micro-motion at the same item is a no-op.
-        let dirty: Option<Vec<crate::layout::Rect>> = unsafe {
+        //
+        // highlighted_index is in display-items space (0..total_count).
+        // layout.item_rects is in visible-window space (0..visible_count).
+        // When scroll_offset > 0 these spaces don't match — passing a display-space
+        // index directly to item_rects.get() returns the WRONG row or silently
+        // misses (causing stuck highlights or multi-highlight artifacts).
+        // We map display→visible before lookup; off-screen items fall back to a
+        // full InvalidateRect so no repaint is ever missed.
+        enum Action {
+            None,
+            Full,
+            Partial(Vec<crate::layout::Rect>),
+        }
+
+        let action = unsafe {
             match crate::submenu_wnd::popup_state(h) {
                 Some(popup) if popup.highlighted_index != index => {
                     let old = popup.highlighted_index;
                     popup.highlighted_index = index;
                     let mut rects = Vec::new();
-                    if let Some(i) = old
-                        && let Some(r) = popup.layout.item_rects.get(i)
-                    {
-                        rects.push(*r);
+                    let mut any_offscreen = false;
+                    for display_idx in [old, index].into_iter().flatten() {
+                        // Map display-space index → visible-space index.
+                        let vis = display_idx
+                            .checked_sub(popup.scroll_offset)
+                            .filter(|&v| v < popup.layout.visible_count);
+                        match vis {
+                            Some(v) => {
+                                if let Some(r) = popup.layout.item_rects.get(v) {
+                                    rects.push(*r);
+                                }
+                            }
+                            None => any_offscreen = true,
+                        }
                     }
-                    if let Some(i) = index
-                        && let Some(r) = popup.layout.item_rects.get(i)
-                    {
-                        rects.push(*r);
+                    // TEMP-DIAG: triangulate highlight/scroll mismatches.
+                    log::debug!(
+                        "set_popup_highlight level={level} old={old:?} new={index:?} \
+                         scroll={} visible={} rects={} any_offscreen={}",
+                        popup.scroll_offset,
+                        popup.layout.visible_count,
+                        rects.len(),
+                        any_offscreen
+                    );
+                    if any_offscreen {
+                        Action::Full
+                    } else if rects.is_empty() {
+                        Action::None
+                    } else {
+                        Action::Partial(rects)
                     }
-                    Some(rects)
                 }
-                _ => None,
+                _ => Action::None,
             }
         };
 
@@ -1069,16 +1103,24 @@ impl ToolbarState {
         // GDI's update region clips the paint loop in paint_submenu_popup so
         // unaffected rows are skipped with zero GDI work.
         // erase=false: WM_PAINT fills its own background, so no OS erase needed.
-        if let Some(rects) = dirty {
-            for r in rects {
-                let win_rect = WinRect {
-                    left: r.left,
-                    top: r.top,
-                    right: r.right,
-                    bottom: r.bottom,
-                };
-                unsafe {
-                    let _ = InvalidateRect(Some(h), Some(&win_rect), false);
+        // When either index is off-screen, fall back to full invalidation so no
+        // repaint is ever missed.
+        match action {
+            Action::None => {}
+            Action::Full => unsafe {
+                let _ = InvalidateRectFn(Some(h), None, false);
+            },
+            Action::Partial(rects) => {
+                for r in rects {
+                    let win_rect = windows::Win32::Foundation::RECT {
+                        left: r.left,
+                        top: r.top,
+                        right: r.right,
+                        bottom: r.bottom,
+                    };
+                    unsafe {
+                        let _ = InvalidateRectFn(Some(h), Some(&win_rect), false);
+                    }
                 }
             }
         }
