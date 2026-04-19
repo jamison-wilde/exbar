@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, HTCAPTION, KillTimer, PostMessageW, SW_HIDE, SWP_NOACTIVATE,
     SWP_NOZORDER, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED,
     WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST,
-    WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
 };
 
 use crate::hit_test;
@@ -297,7 +297,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             state.hover_open_pending_button = Some(button);
                             // Don't arm if a submenu chain is already open (avoid re-opening on hover drift).
                             if !state.submenu_chain.is_open() {
-                                let delay = state.submenu_cfg.spring_open_delay_ms;
+                                let delay = state.submenu_cfg.long_hover_open_ms;
                                 unsafe {
                                     let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
                                         Some(hwnd),
@@ -408,8 +408,38 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
+        WM_RBUTTONDOWN => {
+            // Cancel any pending hover-open timer before the right-click cascades
+            // into a context-menu modal loop. Win32 dispatches WM_TIMER inside
+            // TrackPopupMenu's modal pump, so without this cancel the hover-open
+            // timer would fire and open a submenu on top of the context menu.
+            if let Some(state) = unsafe { toolbar_state(hwnd) }
+                && state.hover_open_pending_button.is_some()
+            {
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                        Some(hwnd),
+                        crate::toolbar::TIMER_HOVER_OPEN,
+                    );
+                }
+                state.hover_open_pending_button = None;
+            }
+            LRESULT(0)
+        }
+
         WM_RBUTTONUP => {
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                // Defense-in-depth: also cancel here in case WM_RBUTTONDOWN was
+                // missed (e.g. mouse was captured elsewhere when the button went down).
+                if state.hover_open_pending_button.is_some() {
+                    unsafe {
+                        let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                            Some(hwnd),
+                            crate::toolbar::TIMER_HOVER_OPEN,
+                        );
+                    }
+                    state.hover_open_pending_button = None;
+                }
                 let (x, y) = lparam_point(lparam);
                 if let Some(idx) = hit_test::hit_test(&state.buttons, x, y) {
                     let mut pt = POINT { x, y };
@@ -845,6 +875,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     }
                     state.last_cursor_x_on_open = cursor.x;
                     state.last_cursor_y_on_open = cursor.y;
+
+                    log::info!(
+                        "hover_open: fire folder_button={} at cursor=({},{})",
+                        folder_button,
+                        cursor.x,
+                        cursor.y
+                    );
 
                     state.execute_submenu_event(
                         hwnd,
