@@ -335,6 +335,17 @@ unsafe extern "system" fn foreground_event_proc(
             reposition_and_show(tb, hwnd);
         }
     } else if in_explorer {
+        // Desktop (Progman / WorkerW) lives in explorer.exe but is NOT a
+        // file-browser window. Hide the toolbar when the desktop takes
+        // foreground so exbar doesn't ride on top of the wallpaper.
+        if class == "Progman" || class == "WorkerW" {
+            log::debug!("foreground: desktop class={class:?} hwnd={hwnd:?} — hiding toolbar");
+            if let Some(tb) = tb_opt {
+                update_toolbar_visibility(tb);
+            }
+            return;
+        }
+
         // Explorer-process window that isn't CabinetWClass. Only show the
         // toolbar if it's related to the active Explorer file browser —
         // check that its root ancestor is the active CabinetWClass.
@@ -366,8 +377,9 @@ unsafe extern "system" fn foreground_event_proc(
                 }
             } else {
                 log::debug!(
-                    "foreground: explorer-process class={class:?} root={root:?} != active={active:?}, ignoring (task switcher?)"
+                    "foreground: explorer-process class={class:?} root={root:?} != active={active:?}, hiding (task switcher?)"
                 );
+                update_toolbar_visibility(tb);
             }
         }
     } else if in_our_process {
