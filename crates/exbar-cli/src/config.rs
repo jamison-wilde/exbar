@@ -60,6 +60,9 @@ where
 fn default_spring_open_delay_ms() -> u32 {
     500
 }
+fn default_long_hover_open_ms() -> u32 {
+    1200
+}
 fn default_hover_buffer_px() -> u32 {
     30
 }
@@ -73,6 +76,13 @@ where
 {
     let v = u32::deserialize(d)?;
     Ok(v.clamp(100, 2000))
+}
+
+fn deserialize_long_hover_open<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(u32::deserialize(d)?.clamp(500, 5000))
 }
 
 fn deserialize_hover_buffer<'de, D>(d: D) -> Result<u32, D::Error>
@@ -171,6 +181,16 @@ pub struct SubmenuConfig {
         deserialize_with = "deserialize_non_chain_opacity"
     )]
     pub non_chain_item_opacity: f32,
+    /// How long (ms) the cursor must rest on a folder button before hover-open
+    /// fires. Deliberately longer than `springOpenDelayMs` (which controls
+    /// spring-open inside an already-open submenu chain) to reduce accidental
+    /// triggers and narrow the right-click race window. Clamped 500..=5000.
+    #[serde(
+        rename = "longHoverOpenMs",
+        default = "default_long_hover_open_ms",
+        deserialize_with = "deserialize_long_hover_open"
+    )]
+    pub long_hover_open_ms: u32,
 }
 
 impl Default for SubmenuConfig {
@@ -179,6 +199,7 @@ impl Default for SubmenuConfig {
             spring_open_delay_ms: default_spring_open_delay_ms(),
             hover_buffer_px: default_hover_buffer_px(),
             non_chain_item_opacity: default_non_chain_item_opacity(),
+            long_hover_open_ms: default_long_hover_open_ms(),
         }
     }
 }
@@ -709,6 +730,26 @@ mod tests {
         let cfg: Config =
             Config::from_str(r#"{"folders":[],"submenu":{"hoverBufferPx":999}}"#).unwrap();
         assert_eq!(cfg.submenu.hover_buffer_px, 64);
+    }
+
+    #[test]
+    fn submenu_long_hover_default_when_missing() {
+        let cfg: Config = Config::from_str(r#"{"folders":[]}"#).unwrap();
+        assert_eq!(cfg.submenu.long_hover_open_ms, 1200);
+    }
+
+    #[test]
+    fn submenu_long_hover_clamped_low() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[],"submenu":{"longHoverOpenMs":100}}"#).unwrap();
+        assert_eq!(cfg.submenu.long_hover_open_ms, 500);
+    }
+
+    #[test]
+    fn submenu_long_hover_clamped_high() {
+        let cfg: Config =
+            Config::from_str(r#"{"folders":[],"submenu":{"longHoverOpenMs":99999}}"#).unwrap();
+        assert_eq!(cfg.submenu.long_hover_open_ms, 5000);
     }
 
     #[test]
