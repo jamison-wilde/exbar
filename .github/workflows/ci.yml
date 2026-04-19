@@ -2,13 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [main]
     tags: ["v*.*.*"]
   pull_request:
     branches: [main]
 
-# Prevent duplicate runs: a tag push on main would otherwise trigger
-# both the branch and tag workflows. This cancels the branch run.
+# One run per ref (tag or PR). Main pushes don't trigger CI anymore —
+# feature work flows through PRs (which run lint/test/doc-check) and
+# releases flow through tags (which also build the MSI + create the
+# GitHub Release). Keeps CI minutes spent only on meaningful events.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
