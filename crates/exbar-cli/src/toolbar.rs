@@ -82,6 +82,8 @@ pub(crate) fn wide_null(s: &str) -> Vec<u16> {
 pub(crate) const WM_USER_RELOAD: u32 = 0x0401;
 /// Timer ID for deferred reposition after maximize/restore animation.
 pub(crate) const TIMER_REPOSITION: usize = 1;
+/// Timer ID for long-press detection — 50 ms tick while a folder button is pressed.
+pub(crate) const TIMER_LONGPRESS: usize = 2;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -146,6 +148,9 @@ pub(crate) struct ToolbarState {
     pub(crate) last_cursor_y_on_open: i32,
     /// Triggering folder button center-Y — used by resolve_level1_orientation.
     pub(crate) last_button_center_y_on_open: i32,
+    /// Instant when the last `WM_LBUTTONDOWN` landed on a folder button.
+    /// Drives elapsed-ms computation for `LongPressTick` timer ticks.
+    pub(crate) last_press_instant: Option<std::time::Instant>,
 }
 
 impl ToolbarState {
@@ -206,6 +211,7 @@ impl ToolbarState {
             last_cursor_x_on_open: 0,
             last_cursor_y_on_open: 0,
             last_button_center_y_on_open: 0,
+            last_press_instant: None,
         }
     }
 }

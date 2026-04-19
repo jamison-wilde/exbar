@@ -16,9 +16,10 @@ use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, DefWindowProcW, GWLP_USERDATA, GetForegroundWindow, GetWindowLongPtrW,
-    HTCAPTION, KillTimer, PostMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+    HTCAPTION, KillTimer, PostMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP,
+    WM_TIMER,
 };
 
 use crate::hit_test;
@@ -271,7 +272,11 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     // Our own ReleaseCapture() dispatched this; consume the flag.
                     state.self_release_pending = false;
                 } else {
-                    // External capture loss — feed to machine.
+                    // External capture loss — kill long-press timer and feed to machine.
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_LONGPRESS);
+                    }
+                    state.last_press_instant = None;
                     state.apply_pointer_event(hwnd, pointer::PointerEvent::CaptureLost);
                 }
             }
@@ -286,12 +291,26 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     is_folder: !state.buttons[idx].is_add,
                 });
                 state.apply_pointer_event(hwnd, pointer::PointerEvent::Press { x, y, hit });
+
+                // If we landed in PressedFolder, start the long-press detection timer.
+                if matches!(state.pointer, pointer::PointerState::PressedFolder { .. }) {
+                    state.last_press_instant = Some(std::time::Instant::now());
+                    unsafe {
+                        let _ = SetTimer(Some(hwnd), crate::toolbar::TIMER_LONGPRESS, 50, None);
+                    }
+                }
             }
             LRESULT(0)
         }
 
         WM_LBUTTONUP => {
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                // Stop the long-press timer — release ends the gesture regardless of outcome.
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_LONGPRESS);
+                }
+                state.last_press_instant = None;
+
                 let (x, y) = lparam_point(lparam);
                 let hit = hit_test::hit_test(&state.buttons, x, y).map(|idx| pointer::HitResult {
                     button: idx,
@@ -420,19 +439,52 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             LRESULT(0)
         }
 
-        WM_TIMER if wparam.0 == crate::toolbar::TIMER_REPOSITION => {
-            // Deferred reposition after Explorer maximize/restore animation.
-            // Kill the timer (one-shot) then reposition.
-            unsafe {
-                let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_REPOSITION);
+        WM_TIMER => {
+            let timer_id = wparam.0;
+            if timer_id == crate::toolbar::TIMER_REPOSITION {
+                // Deferred reposition after Explorer maximize/restore animation.
+                // Kill the timer (one-shot) then reposition.
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_REPOSITION);
+                }
+                if let Some(state) = unsafe { toolbar_state(hwnd) }
+                    && let Some(explorer) = state.active_target.map(|t| t.hwnd)
+                {
+                    log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
+                    crate::visibility::reposition_and_show(hwnd, explorer);
+                }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_LONGPRESS {
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    let elapsed_ms = state
+                        .last_press_instant
+                        .map(|t| t.elapsed().as_millis() as u32)
+                        .unwrap_or(0);
+
+                    state.apply_pointer_event(
+                        hwnd,
+                        pointer::PointerEvent::LongPressTick { elapsed_ms },
+                    );
+
+                    // Stop the timer if long-press has fired OR state left PressedFolder
+                    // (e.g. drag-reorder kicked in via Move events).
+                    let should_stop = match &state.pointer {
+                        pointer::PointerState::PressedFolder {
+                            long_press_fired, ..
+                        } => *long_press_fired,
+                        _ => true,
+                    };
+                    if should_stop {
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_LONGPRESS);
+                        }
+                        state.last_press_instant = None;
+                    }
+                }
+                LRESULT(0)
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
-            if let Some(state) = unsafe { toolbar_state(hwnd) }
-                && let Some(explorer) = state.active_target.map(|t| t.hwnd)
-            {
-                log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
-                crate::visibility::reposition_and_show(hwnd, explorer);
-            }
-            LRESULT(0)
         }
 
         x if x == WM_DPICHANGED => {
