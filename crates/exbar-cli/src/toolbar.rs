@@ -852,12 +852,30 @@ impl ToolbarState {
             //              = btn.left + scale(2, dpi) - buffer
             let align_offset = crate::theme::scale(BTN_PAD_H - 8, self.dpi);
             let x = btn.left + align_offset - buffer;
-            let y = match reshow {
-                // Popup opens downward: reshow row (first) should align with button top.
-                ReshowPosition::First => btn.top - buffer,
-                // Popup opens upward: reshow row (last) should align with button bottom.
-                ReshowPosition::Last => btn.bottom - layout.popup_h + buffer,
-                ReshowPosition::None => btn.top,
+            // TODO(vertical toolbar): if layout is Vertical, horizontal offset should
+            // push the Recent popup left/right of the toolbar instead. For now assume
+            // horizontal toolbars — the dominant case.
+            let y = if is_recent {
+                // Recent's root submenu sits entirely above or below the toolbar —
+                // never overlapping the Recent button itself. Regular folders have a
+                // ParentReshow row that is meant to sit "in place" over the toolbar
+                // button; Recent has no such row, so overlapping serves no purpose.
+                match reshow {
+                    // Popup opens downward: sit below the button entirely.
+                    ReshowPosition::First => btn.bottom,
+                    // Popup opens upward: sit above the button entirely.
+                    ReshowPosition::Last => btn.top - layout.popup_h,
+                    // Defensive — Recent at level 1 always resolves First or Last.
+                    ReshowPosition::None => btn.top,
+                }
+            } else {
+                match reshow {
+                    // Popup opens downward: reshow row (first) should align with button top.
+                    ReshowPosition::First => btn.top - buffer,
+                    // Popup opens upward: reshow row (last) should align with button bottom.
+                    ReshowPosition::Last => btn.bottom - layout.popup_h + buffer,
+                    ReshowPosition::None => btn.top,
+                }
             };
             (
                 x.max(work.left).min(work.right - layout.popup_w),
