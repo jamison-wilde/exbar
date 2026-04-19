@@ -600,15 +600,13 @@ impl ToolbarState {
         let (sx, sy) = if level == 1 {
             let btn = self.last_button_screen_rect;
             let buffer = buffer_px;
-            // Pixel-perfect alignment: popup inner text lands at btn.left + btn_text_padding.
-            // Derivation: popup_text_x = popup.left + buffer_px + popup_text_padding;
-            // button_text_x = btn.left + btn_text_padding. Solve for popup.left:
-            //   popup.left = btn.left + (btn_text_padding - popup_text_padding) - buffer_px
-            //              = btn.left + align_offset - buffer_px
-            // Empirically tuned at 0/10/30 buffer — the button's internal text padding is
-            // about 2px LESS than the popup's, so align_offset is negative. Previous
-            // iterations (5, then 12) drifted right by constant 7px; -2 cancels that drift.
-            let align_offset = -crate::theme::scale(2, self.dpi);
+            // Pixel-perfect alignment. Derived directly from the paint code:
+            //   Button text_x  = btn.left + scale(BTN_PAD_H=10, dpi)          [paint.rs:304]
+            //   Popup text_x   = popup.left + buffer + scale(8, dpi)          [paint.rs:537]
+            // Setting them equal and solving:
+            //   popup.left = btn.left + scale(10 - 8, dpi) - buffer
+            //              = btn.left + scale(2, dpi) - buffer
+            let align_offset = crate::theme::scale(BTN_PAD_H - 8, self.dpi);
             let x = btn.left + align_offset - buffer;
             let y = match reshow {
                 // Popup opens downward: reshow row (first) should align with button top.
