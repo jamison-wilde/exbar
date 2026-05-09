@@ -248,6 +248,10 @@ pub fn refresh_toolbar(hwnd: HWND) {
         ));
         let _ = InvalidateRect(Some(hwnd), None, true);
     }
+
+    // Re-probe network roots: drop entries for removed folders, fire probes
+    // for newly-added network roots not yet in the cache.
+    state.request_probes_for_current_folders();
 }
 
 /// Apply `apply_opacity` and `register_drop_targets` to the toolbar window.

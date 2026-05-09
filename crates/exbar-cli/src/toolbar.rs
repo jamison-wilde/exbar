@@ -353,13 +353,44 @@ impl ToolbarState {
 
     /// Mark `root` as `Probing` and send a probe request to the worker.
     /// No-op if the worker isn't spawned (test states).
-    #[allow(dead_code)] // Wired in by Task 7; remove allow when first caller lands.
     pub(crate) fn request_probe(&self, root: &str) {
         if let Ok(mut c) = self.reachability.write() {
             c.set(root, crate::reachability::Reachability::Probing);
         }
         if let Some(tx) = self.probe_tx.as_ref() {
             let _ = tx.send(root.to_owned());
+        }
+    }
+
+    /// Walk current `config.folders`, classify each path's network root,
+    /// drop unreferenced cache entries, and fire a probe for any root that
+    /// `needs_probe`. Idempotent — safe to call on every reload.
+    pub(crate) fn request_probes_for_current_folders(&self) {
+        let Some(cfg) = self.config.as_ref() else {
+            return;
+        };
+        let mut roots: Vec<String> = Vec::new();
+        for f in &cfg.folders {
+            if let Some(r) = crate::reachability::classify_root(&f.path)
+                && !roots.contains(&r)
+            {
+                roots.push(r);
+            }
+        }
+        // Drop entries no longer referenced.
+        if let Ok(mut c) = self.reachability.write() {
+            c.drop_unreferenced(&roots);
+        }
+        // Fire probes for any root that's currently Unknown (i.e. no entry).
+        for r in &roots {
+            let needs = self
+                .reachability
+                .read()
+                .map(|c| c.needs_probe(r))
+                .unwrap_or(false);
+            if needs {
+                self.request_probe(r);
+            }
         }
     }
 }
@@ -1339,6 +1370,28 @@ mod tests {
     use windows::Win32::Foundation::HWND;
 
     // ── Tests ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn request_probes_marks_unc_root_probing_and_skips_local() {
+        // Non-UNC paths classify_root → None and are never added to the cache.
+        // UNC paths classify deterministically (no host-state dependency on
+        // GetDriveTypeW), so we only assert about the UNC root here.
+        use crate::reachability::Reachability;
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[
+            ("UNC1", "\\\\srv\\share\\foo"),
+            ("UNC2", "\\\\srv\\share\\other"), // same root → still 1 probe
+            ("Local", "C:\\Users\\me"),
+        ]);
+        let state = make_test_state(&deps, Some(cfg));
+
+        state.request_probes_for_current_folders();
+
+        let cache = state.reachability.read().unwrap();
+        assert_eq!(cache.get("\\\\srv\\share"), Reachability::Probing);
+        // Local path was never classified as a network root → not in cache.
+        assert_eq!(cache.get("C:"), Reachability::Unknown);
+    }
 
     #[test]
     fn fire_folder_click_without_ctrl_calls_navigate_with_folder_path() {

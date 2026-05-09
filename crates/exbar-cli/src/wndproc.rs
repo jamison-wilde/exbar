@@ -170,6 +170,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             let probe: std::sync::Arc<dyn crate::reachability_probe::ReachabilityProbe> =
                 std::sync::Arc::new(crate::reachability_probe::Win32Probe::new());
             state.spawn_reachability_worker(hwnd, probe);
+            // Initial probe pass for any network folders in the loaded config.
+            state.request_probes_for_current_folders();
 
             // active_target is seeded in create_toolbar before Box::into_raw,
             // so it's always Some here. Fall back to GetForegroundWindow() only
