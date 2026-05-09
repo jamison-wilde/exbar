@@ -476,6 +476,20 @@ impl ToolbarState {
                         hwnd,
                         crate::recent_tracker::TrackerEvent::SelfInitiated,
                     );
+                    // Reachability gate: skip navigation entirely if the
+                    // folder's network root is currently Unreachable.
+                    let path_str = path.to_string_lossy();
+                    if let Some(root) = crate::reachability::classify_root(&path_str) {
+                        let r = self
+                            .reachability
+                            .read()
+                            .map(|c| c.get(&root))
+                            .unwrap_or(crate::reachability::Reachability::Unknown);
+                        if r == crate::reachability::Reachability::Unreachable {
+                            log::info!("click on unreachable folder: {path_str}");
+                            return;
+                        }
+                    }
                     if ctrl {
                         match self.active_target.map(|t| t.kind) {
                             Some(crate::target::TargetKind::FileDialog) => {
@@ -1370,6 +1384,36 @@ mod tests {
     use windows::Win32::Foundation::HWND;
 
     // ── Tests ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fire_folder_click_on_unreachable_does_not_navigate() {
+        use crate::reachability::Reachability;
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("UNC", "\\\\srv\\share\\foo")]);
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.active_target = Some(crate::target::ActiveTarget::explorer(HWND(42 as *mut _)));
+        state.buttons = vec![
+            mk_add_button(),
+            mk_folder_button("UNC", "\\\\srv\\share\\foo", 42),
+        ];
+        // Pre-seed cache as Unreachable for the network root.
+        state
+            .reachability
+            .write()
+            .unwrap()
+            .set("\\\\srv\\share", Reachability::Unreachable);
+
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireFolderClick {
+                folder_button: 0,
+                ctrl: false,
+            },
+        );
+
+        // navigate should NOT have been called.
+        assert_eq!(deps.navigate_calls.lock().unwrap().len(), 0);
+    }
 
     #[test]
     fn request_probes_marks_unc_root_probing_and_skips_local() {
