@@ -62,6 +62,7 @@ const MENU_ID_OPEN_NEW_TAB: u32 = 202;
 const MENU_ID_COPY_PATH: u32 = 203;
 const MENU_ID_RENAME: u32 = 204;
 const MENU_ID_REMOVE: u32 = 205;
+const MENU_ID_RETRY_CONNECTION: u32 = 206;
 
 /// Returns `true` if the given screen-coord cursor is inside any open popup's
 /// rendered bounds OR inside the triggering toolbar button's rect.
@@ -490,15 +491,18 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_EDIT_CONFIG,
                                 label: "Edit config",
+                                disabled: false,
                             },
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_RELOAD_CONFIG,
                                 label: "Reload config",
+                                disabled: false,
                             },
                             crate::contextmenu::SEPARATOR,
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_TOGGLE_RECENT,
                                 label: toggle_label,
+                                disabled: false,
                             },
                         ];
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
@@ -518,35 +522,51 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         let items = [crate::contextmenu::MenuItem {
                             id: MENU_ID_REMOVE,
                             label: "Remove",
+                            disabled: false,
                         }];
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
                         if chosen == MENU_ID_REMOVE {
                             handle_toggle_recent(state, hwnd);
                         }
                     } else {
-                        let items = [
+                        let folder_index = idx - 1; // + button at index 0
+                        let is_unreachable = state.folder_is_unreachable(folder_index);
+                        let mut items = vec![
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_OPEN,
                                 label: "Open",
+                                disabled: is_unreachable,
                             },
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_OPEN_NEW_TAB,
                                 label: "Open in new tab",
+                                disabled: is_unreachable,
                             },
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_COPY_PATH,
                                 label: "Copy path",
+                                disabled: false,
                             },
                             crate::contextmenu::SEPARATOR,
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_RENAME,
                                 label: "Rename",
+                                disabled: false,
                             },
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_REMOVE,
                                 label: "Remove",
+                                disabled: false,
                             },
                         ];
+                        if is_unreachable {
+                            items.push(crate::contextmenu::SEPARATOR);
+                            items.push(crate::contextmenu::MenuItem {
+                                id: MENU_ID_RETRY_CONNECTION,
+                                label: "Retry connection",
+                                disabled: false,
+                            });
+                        }
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
                         let path = std::path::PathBuf::from(&state.buttons[idx].folder.path);
                         match chosen {
@@ -598,6 +618,17 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             }
                             MENU_ID_REMOVE => {
                                 crate::actions::remove_folder_at(state, hwnd, idx);
+                            }
+                            MENU_ID_RETRY_CONNECTION => {
+                                if let Some(p) = state
+                                    .config
+                                    .as_ref()
+                                    .and_then(|c| c.folders.get(folder_index))
+                                    .map(|f| f.path.clone())
+                                    && let Some(root) = crate::reachability::classify_root(&p)
+                                {
+                                    state.request_probe(&root);
+                                }
                             }
                             _ => {}
                         }

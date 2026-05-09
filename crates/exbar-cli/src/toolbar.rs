@@ -854,9 +854,9 @@ impl ToolbarState {
 
     /// True iff the folder button at `folder_button_index` (folder-space, not
     /// button-space) points at a network root currently `Unreachable`. Used by
-    /// paint, the right-click context menu (to disable Open / show Retry), and
-    /// the submenu suppression gate.
-    #[allow(dead_code)] // Wired in by Tasks 11/12.
+    /// the right-click context menu (to disable Open / show Retry).
+    /// (Paint reads the cache directly via `classify_root` instead of calling
+    /// this — the indirection isn't worth the extra method call there.)
     pub(crate) fn folder_is_unreachable(&self, folder_button_index: usize) -> bool {
         let Some(cfg) = self.config.as_ref() else {
             return false;

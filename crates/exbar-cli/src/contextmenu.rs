@@ -2,17 +2,22 @@
 
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, MF_SEPARATOR, MF_STRING, SetForegroundWindow,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
 };
 use windows_core::PCWSTR;
 
 pub struct MenuItem {
     pub id: u32,
     pub label: &'static str,
+    pub disabled: bool,
 }
 
-pub const SEPARATOR: MenuItem = MenuItem { id: 0, label: "" };
+pub const SEPARATOR: MenuItem = MenuItem {
+    id: 0,
+    label: "",
+    disabled: false,
+};
 
 /// Show a popup menu at screen coords `pt`. Returns the selected item id,
 /// or 0 if the user dismissed the menu.
@@ -33,8 +38,13 @@ pub fn show_menu(owner: HWND, pt: POINT, items: &[MenuItem]) -> u32 {
                 .encode_utf16()
                 .chain(std::iter::once(0))
                 .collect();
+            let flags = if item.disabled {
+                MF_STRING | MF_GRAYED
+            } else {
+                MF_STRING
+            };
             unsafe {
-                let _ = AppendMenuW(hmenu, MF_STRING, item.id as usize, PCWSTR(wide.as_ptr()));
+                let _ = AppendMenuW(hmenu, flags, item.id as usize, PCWSTR(wide.as_ptr()));
             }
         }
     }
