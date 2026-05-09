@@ -92,6 +92,7 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
         hwnd,
         Box::new(resolver),
         std::sync::Arc::clone(&state.file_operator),
+        std::sync::Arc::clone(&state.reachability),
     ) {
         Ok(()) => {
             state.drop_registered = true;
