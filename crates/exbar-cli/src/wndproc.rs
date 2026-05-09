@@ -48,6 +48,12 @@ pub const WM_USER_SUBMENU_SAFETY_TICK: u32 = 0x040D; // WM_USER + 13
 /// (-1 = up band, 0 = none/cancel, 1 = down band).
 pub const WM_USER_SUBMENU_BANDHOVER: u32 = 0x040F; // WM_USER + 15
 
+/// Posted by the reachability worker thread when one or more cache
+/// entries change. Triggers a full toolbar repaint (cheap; no per-button
+/// payload). `WPARAM` and `LPARAM` are unused — wndproc invalidates the
+/// whole client area.
+pub const WM_USER_REACHABILITY_UPDATED: u32 = 0x0407; // WM_USER + 7
+
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
 const MENU_ID_TOGGLE_RECENT: u32 = 103;
@@ -594,6 +600,14 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         x if x == WM_USER_RELOAD => {
             crate::lifecycle::refresh_toolbar(hwnd);
+            LRESULT(0)
+        }
+
+        x if x == WM_USER_REACHABILITY_UPDATED => {
+            // Full repaint — cheap, no per-button bookkeeping.
+            unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, true);
+            }
             LRESULT(0)
         }
 
