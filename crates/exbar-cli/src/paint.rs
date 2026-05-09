@@ -246,7 +246,20 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
         let is_pressed = pressed_button == Some(i);
         let is_dragging_source = drag_source == Some(i);
 
-        if is_dragging_source {
+        // Compute reachability disabled flag — only meaningful for non-add
+        // folder buttons whose path classifies as a network root.
+        let is_disabled = if btn.is_add {
+            false
+        } else {
+            crate::reachability::classify_root(&btn.folder.path)
+                .and_then(|root| state.reachability.read().ok().map(|c| c.get(&root)))
+                .map(|r| r == crate::reachability::Reachability::Unreachable)
+                .unwrap_or(false)
+        };
+
+        if is_disabled {
+            // No highlight for disabled (greyed) buttons.
+        } else if is_dragging_source {
             // Don't draw hover/pressed highlight for the dragged button.
         } else if is_pressed {
             let hl = if is_dark {
@@ -285,8 +298,9 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
             }
         };
 
-        // Dim text for the button being dragged.
-        let text_cr_this = if is_dragging_source {
+        // Disabled (Unreachable) and drag-source buttons render at mid-grey
+        // on both themes (same shade — the visual cue is "inactive").
+        let text_cr_this = if is_disabled || is_dragging_source {
             if is_dark {
                 COLORREF(0x00808080)
             } else {
