@@ -26,14 +26,23 @@ fn post_reload(hwnd: HWND) {
 /// Core: load → append → save → assign. Returns `true` on success.
 /// Does not post `WM_USER_RELOAD` or touch any HWND.
 pub(crate) fn append_folder_to_state(state: &mut ToolbarState, path: &Path) -> bool {
-    let name = match path.file_name().and_then(|s| s.to_str()) {
-        Some(n) if !n.is_empty() => n.to_owned(),
-        _ => return false,
-    };
     let path_str = match path.to_str() {
         Some(s) => s.to_owned(),
         None => return false,
     };
+    // Prefer the leaf name; fall back to the path itself with trailing `\` stripped.
+    // Drive roots (`C:\`) and UNC share roots (`\\server\share`) have no `file_name`,
+    // so without the fallback they'd silently fail to add. User can right-click-rename.
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| path_str.trim_end_matches('\\').to_owned());
+    if name.is_empty() {
+        log::warn!("append_folder: empty name derived from path {path_str:?}");
+        return false;
+    }
 
     // Load → mutate → save. If load fails (no file yet), start from a minimal config.
     let mut cfg = state.config_store.load().unwrap_or_else(|| {
@@ -288,6 +297,52 @@ mod tests {
 
         assert!(!saved);
         assert!(deps.cfg_store.save_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn append_folder_drive_root_uses_path_as_name() {
+        // `Path::new("C:\\").file_name()` is None — without the fallback this
+        // would silently fail. Should use "C:" as the name.
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        let saved = append_folder_to_state(&mut state, Path::new("C:\\"));
+
+        assert!(saved);
+        assert_eq!(last_saved_folders(&deps), vec!["C:"]);
+    }
+
+    #[test]
+    fn append_folder_mapped_drive_root_uses_path_as_name() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        let saved = append_folder_to_state(&mut state, Path::new("Z:\\"));
+
+        assert!(saved);
+        assert_eq!(last_saved_folders(&deps), vec!["Z:"]);
+    }
+
+    #[test]
+    fn append_folder_unc_share_root_uses_path_as_name() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        let saved = append_folder_to_state(&mut state, Path::new("\\\\server\\share"));
+
+        assert!(saved);
+        assert_eq!(last_saved_folders(&deps), vec!["\\\\server\\share"]);
+    }
+
+    #[test]
+    fn append_folder_unc_share_root_with_trailing_slash_strips_it() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        let saved = append_folder_to_state(&mut state, Path::new("\\\\server\\share\\"));
+
+        assert!(saved);
+        assert_eq!(last_saved_folders(&deps), vec!["\\\\server\\share"]);
     }
 
     #[test]
