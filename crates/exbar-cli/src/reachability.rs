@@ -71,6 +71,43 @@ fn is_remote_drive(drive: &str) -> bool {
     kind == DRIVE_REMOTE
 }
 
+use std::collections::HashMap;
+
+/// Per-root reachability cache. Owns no I/O — read/written by the wndproc
+/// thread (reads) and the worker thread (writes), wrapped in a `RwLock`
+/// at the call site (`ToolbarState`).
+#[derive(Debug, Default)]
+pub struct ReachabilityCache {
+    map: HashMap<String, Reachability>,
+}
+
+impl ReachabilityCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the cached state for `root`, or `Unknown` if absent.
+    pub fn get(&self, root: &str) -> Reachability {
+        self.map.get(root).copied().unwrap_or(Reachability::Unknown)
+    }
+
+    /// Set or overwrite the state for `root`.
+    pub fn set(&mut self, root: &str, value: Reachability) {
+        self.map.insert(root.to_owned(), value);
+    }
+
+    /// `true` iff `root` has no entry — the caller should fire a fresh probe.
+    pub fn needs_probe(&self, root: &str) -> bool {
+        !self.map.contains_key(root)
+    }
+
+    /// Drop entries not present in `current_roots`. Called after config edits
+    /// so the cache doesn't accumulate stale shares from removed folders.
+    pub fn drop_unreferenced(&mut self, current_roots: &[String]) {
+        self.map.retain(|k, _| current_roots.iter().any(|r| r == k));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +149,44 @@ mod tests {
     fn classify_shell_alias_returns_none() {
         assert_eq!(classify_root("shell:downloads"), None);
         assert_eq!(classify_root(""), None);
+    }
+
+    #[test]
+    fn cache_get_absent_returns_unknown() {
+        let c = ReachabilityCache::new();
+        assert_eq!(c.get("Z:"), Reachability::Unknown);
+    }
+
+    #[test]
+    fn cache_set_then_get_returns_value() {
+        let mut c = ReachabilityCache::new();
+        c.set("Z:", Reachability::Reachable);
+        assert_eq!(c.get("Z:"), Reachability::Reachable);
+    }
+
+    #[test]
+    fn cache_needs_probe_true_when_absent() {
+        let c = ReachabilityCache::new();
+        assert!(c.needs_probe("Z:"));
+    }
+
+    #[test]
+    fn cache_needs_probe_false_when_present() {
+        let mut c = ReachabilityCache::new();
+        c.set("Z:", Reachability::Probing);
+        assert!(!c.needs_probe("Z:"));
+    }
+
+    #[test]
+    fn cache_drop_unreferenced_evicts_unlisted() {
+        let mut c = ReachabilityCache::new();
+        c.set("Z:", Reachability::Reachable);
+        c.set("\\\\srv\\share", Reachability::Unreachable);
+        c.set("Y:", Reachability::Unknown);
+        c.drop_unreferenced(&["Z:".to_string(), "\\\\srv\\share".to_string()]);
+        assert_eq!(c.get("Z:"), Reachability::Reachable);
+        assert_eq!(c.get("\\\\srv\\share"), Reachability::Unreachable);
+        assert_eq!(c.get("Y:"), Reachability::Unknown); // evicted → default
+        assert!(c.needs_probe("Y:"));
     }
 }
