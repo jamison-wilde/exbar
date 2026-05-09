@@ -104,6 +104,7 @@ pub mod picker;
 pub mod pointer;
 pub mod position;
 pub mod reachability;
+pub mod reachability_probe;
 pub mod recent_list;
 pub mod recent_store;
 pub mod recent_tracker;
