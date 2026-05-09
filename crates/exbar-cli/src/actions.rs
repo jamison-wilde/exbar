@@ -60,10 +60,23 @@ pub(crate) fn append_folder_to_state(state: &mut ToolbarState, path: &Path) -> b
 /// Append a folder to `~/.exbar.json` using its basename as the label, then reload.
 /// No-op on empty / invalid paths.
 pub(crate) fn append_folder_and_reload(state: &mut ToolbarState, path: &Path) {
-    if append_folder_to_state(state, path)
-        && let Some(hwnd) = crate::visibility::get_global_toolbar_hwnd()
-    {
-        post_reload(hwnd);
+    if append_folder_to_state(state, path) {
+        // If the new folder is on a network root not yet in the cache, fire
+        // a probe so the button doesn't render Unknown indefinitely.
+        let path_str = path.to_string_lossy();
+        if let Some(root) = crate::reachability::classify_root(&path_str) {
+            let needs = state
+                .reachability
+                .read()
+                .map(|c| c.needs_probe(&root))
+                .unwrap_or(false);
+            if needs {
+                state.request_probe(&root);
+            }
+        }
+        if let Some(hwnd) = crate::visibility::get_global_toolbar_hwnd() {
+            post_reload(hwnd);
+        }
     }
 }
 
@@ -343,6 +356,30 @@ mod tests {
 
         assert!(saved);
         assert_eq!(last_saved_folders(&deps), vec!["\\\\server\\share"]);
+    }
+
+    #[test]
+    fn append_folder_unc_path_marks_root_probing() {
+        use crate::reachability::Reachability;
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        crate::actions::append_folder_and_reload(&mut state, Path::new("\\\\srv\\share\\foo"));
+
+        let r = state.reachability.read().unwrap().get("\\\\srv\\share");
+        assert_eq!(r, Reachability::Probing);
+    }
+
+    #[test]
+    fn append_folder_local_path_does_not_touch_cache() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        crate::actions::append_folder_and_reload(&mut state, Path::new("C:\\Users\\me"));
+
+        // Local path → classify_root returns None → no cache mutation.
+        let cache = state.reachability.read().unwrap();
+        assert!(cache.needs_probe("C:")); // never added
     }
 
     #[test]
