@@ -53,6 +53,8 @@ exbar/
 │       │   ├── recent_tracker.rs       # Pure dwell+action state machine for Recent Folders
 │       │   ├── recent_store.rs         # RecentStore trait + JsonRecentStore → ~/.exbar/recents.json
 │       │   ├── clock.rs                # Clock trait + SystemClock + MockClock (time-source seam)
+│       │   ├── reachability.rs         # Pure ReachabilityCache + classify_root for network paths
+│       │   ├── reachability_probe.rs   # ReachabilityProbe trait + Win32Probe (GetFileAttributesW + 3s timeout)
 │       │   └── bin/uia_spike.rs        # Diagnostic: dump UIA tree of a live file dialog (kept for future selector changes)
 │       ├── tests/                      # integration tests
 │       └── wix/
@@ -146,8 +148,9 @@ All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` 
 | `subfolder_enum::SubfolderSource` | `Win32SubfolderSource` | Directory enumeration + ▸ has-children probe for submenus |
 | `recent_store::RecentStore` | `JsonRecentStore` | `~/.exbar/recents.json` load/save/delete for Recent Folders |
 | `clock::Clock` | `SystemClock` | Time source for dwell timestamps + debounced writes |
+| `reachability_probe::ReachabilityProbe` | `Win32Probe` | Network reachability probe with 3 s wall-clock budget |
 
-Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView`, `MockSubfolderSource`, `MockRecentStore`, `MockClock` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
+Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView`, `MockSubfolderSource`, `MockRecentStore`, `MockClock`, `MockProbe` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
 
 ### Error handling (SP5)
 
@@ -190,6 +193,18 @@ Opt-in tracking of folders where the user spends time or acts.
 - **Persistence** — `RecentStore` trait; `JsonRecentStore` writes `recents.json` with a 2 s debounced `TIMER_RECENT_DEBOUNCE` on each `CommitRecent`. `flush_recent` called on toolbar `WM_DESTROY` so a clean shutdown doesn't lose pending commits.
 - **LRU semantics** — `recent_list::push` dedupes case-insensitively (normalized via `path_norm::normalize`), trims to `maxCount`. `for_display` filters pinned folders at render time when `includePinned == false`. `excludedPaths` is a prefix match with `\` boundary.
 - **UI** — Recent button renders `🕘 Recent` (fixed label); its root submenu uses `build_recent_display_list` (no parent-reshow, no `..`, empty state shows `(no recent folders yet)`). Hovering a recent folder opens level 2 as a normal subfolder chain with `..` enabled from there down. Right-click the 🕘 button → `Remove` (same effect as Disable).
+
+### Network folder reachability
+
+Mapped-drive (`Z:\…`) and UNC (`\\server\share\…`) folder buttons may point at shares that are unreachable. To avoid blocking the UI thread on the standard SMB timeout (~30 s), reachability is determined lazily on a worker thread and cached for the session.
+
+- **Pure cache** — `reachability::ReachabilityCache` keyed by network root (`Z:` or `\\server\share`); `classify_root` separates network paths from local. Local paths and shell aliases never touch the cache. Mapped drives are detected via `GetDriveTypeW == DRIVE_REMOTE` (cheap, no network IO).
+- **Worker thread** — one persistent thread spawned in `WM_CREATE`, consumes `mpsc::Receiver<String>` (root), invokes `ReachabilityProbe`, writes result to `Arc<RwLock<ReachabilityCache>>`, posts `WM_USER_REACHABILITY_UPDATED` to trigger a repaint. Worker exits when the channel sender drops on toolbar destroy.
+- **Probe primitive** — `Win32Probe` spawns a fresh helper thread per request, calls `GetFileAttributesW` on the root with trailing `\`, joins via `mpsc::recv_timeout(3 s)`. Late helpers complete in background and discard their result.
+- **Startup probe** — `request_probes_for_current_folders` walks `config.folders`, classifies each root, and for each distinct network root not yet in the cache fires a probe. Re-run on every `WM_USER_RELOAD` (drops cache entries for removed folders, fires probes for newly-added). Also called after `actions::append_folder_and_reload` so a drag-add of a network folder probes immediately.
+- **UI integration** — paint, click, drop-target hover, drop fire, and submenu spring-open all consult the cache. `Unreachable` → text greyed (mid-grey on both themes), no hover highlight, click no-op, drop effect overridden to `DROPEFFECT_NONE` (cursor shows ⊘), submenu open suppressed (read_dir would hang).
+- **Recovery** — `Unreachable` buttons get a "Retry connection" right-click context-menu entry and have Open / Open-in-new-tab greyed (`MF_GRAYED`). Retry calls `request_probe(root)` to re-run the probe.
+- **Limitations** — mid-session disconnect of a previously-`Reachable` share will hang once on the next click before the user can retry; Recent submenu items are not reachability-greyed in v1; the brief Unknown window between toolbar create and probe completion (≤3 s) treats network roots as Reachable.
 
 ### Context menus and inline rename
 
