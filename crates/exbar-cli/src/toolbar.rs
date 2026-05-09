@@ -830,10 +830,47 @@ impl ToolbarState {
         toolbar: HWND,
         ev: crate::submenu::SubmenuEvent,
     ) {
+        // Reachability gate: suppress root-popup opens on Unreachable network
+        // folders so we never trigger the read_dir hang on a disconnected share.
+        if let crate::submenu::SubmenuEvent::OpenRoot { ref path, .. } = ev {
+            let path_str = path.to_string_lossy();
+            if let Some(root) = crate::reachability::classify_root(&path_str) {
+                let r = self
+                    .reachability
+                    .read()
+                    .map(|c| c.get(&root))
+                    .unwrap_or(crate::reachability::Reachability::Unknown);
+                if r == crate::reachability::Reachability::Unreachable {
+                    log::info!("submenu open suppressed (unreachable): {path_str}");
+                    return;
+                }
+            }
+        }
         let cmds = crate::submenu::transition(&mut self.submenu_chain, ev);
         for cmd in cmds {
             self.dispatch_submenu_command(toolbar, cmd);
         }
+    }
+
+    /// True iff the folder button at `folder_button_index` (folder-space, not
+    /// button-space) points at a network root currently `Unreachable`. Used by
+    /// paint, the right-click context menu (to disable Open / show Retry), and
+    /// the submenu suppression gate.
+    #[allow(dead_code)] // Wired in by Tasks 11/12.
+    pub(crate) fn folder_is_unreachable(&self, folder_button_index: usize) -> bool {
+        let Some(cfg) = self.config.as_ref() else {
+            return false;
+        };
+        let Some(entry) = cfg.folders.get(folder_button_index) else {
+            return false;
+        };
+        let Some(root) = crate::reachability::classify_root(&entry.path) else {
+            return false;
+        };
+        self.reachability
+            .read()
+            .map(|c| c.get(&root) == crate::reachability::Reachability::Unreachable)
+            .unwrap_or(false)
     }
 
     fn dispatch_submenu_command(&mut self, toolbar: HWND, cmd: crate::submenu::SubmenuCommand) {
@@ -1384,6 +1421,45 @@ mod tests {
     use windows::Win32::Foundation::HWND;
 
     // ── Tests ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn folder_is_unreachable_true_for_unreachable_unc_button() {
+        use crate::reachability::Reachability;
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("UNC", "\\\\srv\\share\\foo")]);
+        let state = make_test_state(&deps, Some(cfg));
+        state
+            .reachability
+            .write()
+            .unwrap()
+            .set("\\\\srv\\share", Reachability::Unreachable);
+
+        assert!(state.folder_is_unreachable(0));
+    }
+
+    #[test]
+    fn folder_is_unreachable_false_for_reachable_unc_button() {
+        use crate::reachability::Reachability;
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("UNC", "\\\\srv\\share\\foo")]);
+        let state = make_test_state(&deps, Some(cfg));
+        state
+            .reachability
+            .write()
+            .unwrap()
+            .set("\\\\srv\\share", Reachability::Reachable);
+
+        assert!(!state.folder_is_unreachable(0));
+    }
+
+    #[test]
+    fn folder_is_unreachable_false_for_local_path() {
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("Local", "C:\\Users\\me")]);
+        let state = make_test_state(&deps, Some(cfg));
+        // Local paths classify_root → None → never unreachable.
+        assert!(!state.folder_is_unreachable(0));
+    }
 
     #[test]
     fn fire_folder_click_on_unreachable_does_not_navigate() {
