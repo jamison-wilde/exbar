@@ -196,6 +196,15 @@ pub(crate) struct ToolbarState {
     pub(crate) autoscroll_popup: Option<HWND>,
     /// Auto-scroll direction: -1 = scroll up (decrease offset), +1 = scroll down. 0 = inactive.
     pub(crate) autoscroll_dir: i32,
+    // Reachability subsystem (Plan: network-folder-reachability):
+    /// Shared cache of per-root reachability state. Read by wndproc on
+    /// every paint/click/drop; written by the worker thread.
+    pub(crate) reachability:
+        std::sync::Arc<std::sync::RwLock<crate::reachability::ReachabilityCache>>,
+    /// Sender end of the probe-request channel. The worker thread holds
+    /// the receiver; dropping the sender on `WM_DESTROY` causes the worker
+    /// to exit cleanly. `None` in test states (no worker spawned).
+    pub(crate) probe_tx: Option<std::sync::mpsc::Sender<String>>,
 }
 
 impl ToolbarState {
@@ -281,6 +290,76 @@ impl ToolbarState {
             hover_open_pending_button: None,
             autoscroll_popup: None,
             autoscroll_dir: 0,
+            reachability: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::reachability::ReachabilityCache::new(),
+            )),
+            probe_tx: None,
+        }
+    }
+}
+
+// ── Reachability adapter methods ─────────────────────────────────────────────
+
+impl ToolbarState {
+    /// Spawn the reachability worker thread. Idempotent: returns immediately
+    /// if `probe_tx` is already populated. Called from `WM_CREATE`.
+    ///
+    /// `toolbar_hwnd` is captured by the worker so it can `PostMessageW`
+    /// `WM_USER_REACHABILITY_UPDATED` after each probe completes.
+    pub(crate) fn spawn_reachability_worker(
+        &mut self,
+        toolbar_hwnd: HWND,
+        probe: std::sync::Arc<dyn crate::reachability_probe::ReachabilityProbe>,
+    ) {
+        if self.probe_tx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let cache = std::sync::Arc::clone(&self.reachability);
+        // HWND is `Send`-unsafe; pass as raw isize and reconstruct in worker.
+        let hwnd_raw = toolbar_hwnd.0 as isize;
+        let _ = std::thread::Builder::new()
+            .name("exbar-reachability".into())
+            .spawn(move || {
+                while let Ok(root) = rx.recv() {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        probe.probe(&root)
+                    }))
+                    .unwrap_or(false);
+                    let r = if result {
+                        crate::reachability::Reachability::Reachable
+                    } else {
+                        crate::reachability::Reachability::Unreachable
+                    };
+                    if let Ok(mut c) = cache.write() {
+                        c.set(&root, r);
+                    }
+                    // PostMessage is thread-safe; HWND validity is the wndproc
+                    // thread's responsibility (we exit via channel disconnect
+                    // before the toolbar is destroyed).
+                    let hwnd = HWND(hwnd_raw as *mut _);
+                    unsafe {
+                        let _ = PostMessageW(
+                            Some(hwnd),
+                            crate::wndproc::WM_USER_REACHABILITY_UPDATED,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    }
+                }
+            });
+        self.probe_tx = Some(tx);
+    }
+
+    /// Mark `root` as `Probing` and send a probe request to the worker.
+    /// No-op if the worker isn't spawned (test states).
+    #[allow(dead_code)] // Wired in by Task 7; remove allow when first caller lands.
+    pub(crate) fn request_probe(&self, root: &str) {
+        if let Ok(mut c) = self.reachability.write() {
+            c.set(root, crate::reachability::Reachability::Probing);
+        }
+        if let Some(tx) = self.probe_tx.as_ref() {
+            let _ = tx.send(root.to_owned());
         }
     }
 }

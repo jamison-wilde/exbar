@@ -164,6 +164,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // Apply layered window transparency and register drop target.
             crate::lifecycle::setup_on_create(hwnd, state);
 
+            // Spawn the reachability worker thread. The worker reads probe
+            // requests from a channel, runs Win32Probe (with a 3 s timeout),
+            // and posts WM_USER_REACHABILITY_UPDATED back here on completion.
+            let probe: std::sync::Arc<dyn crate::reachability_probe::ReachabilityProbe> =
+                std::sync::Arc::new(crate::reachability_probe::Win32Probe::new());
+            state.spawn_reachability_worker(hwnd, probe);
+
             // active_target is seeded in create_toolbar before Box::into_raw,
             // so it's always Some here. Fall back to GetForegroundWindow() only
             // as defence-in-depth in case that invariant is ever broken.
