@@ -57,6 +57,7 @@ pub const WM_USER_REACHABILITY_UPDATED: u32 = 0x0407; // WM_USER + 7
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
 const MENU_ID_TOGGLE_RECENT: u32 = 103;
+const MENU_ID_TOGGLE_ICONS: u32 = 104;
 const MENU_ID_OPEN: u32 = 201;
 const MENU_ID_OPEN_NEW_TAB: u32 = 202;
 const MENU_ID_COPY_PATH: u32 = 203;
@@ -487,6 +488,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         } else {
                             "Enable Recent Folders"
                         };
+                        let show_icons =
+                            state.config.as_ref().map(|c| c.show_icons).unwrap_or(true);
+                        let icons_label = if show_icons {
+                            "Hide icons"
+                        } else {
+                            "Show icons"
+                        };
                         let items = [
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_EDIT_CONFIG,
@@ -496,6 +504,11 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_RELOAD_CONFIG,
                                 label: "Reload config",
+                                disabled: false,
+                            },
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_TOGGLE_ICONS,
+                                label: icons_label,
                                 disabled: false,
                             },
                             crate::contextmenu::SEPARATOR,
@@ -514,6 +527,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             },
                             MENU_ID_TOGGLE_RECENT => {
                                 handle_toggle_recent(state, hwnd);
+                            }
+                            MENU_ID_TOGGLE_ICONS => {
+                                handle_toggle_icons(state, hwnd);
                             }
                             _ => {}
                         }
@@ -1147,6 +1163,13 @@ fn handle_toggle_recent(state: &mut crate::toolbar::ToolbarState, toolbar: HWND)
         state.execute_submenu_event(toolbar, crate::submenu::SubmenuEvent::Dismiss);
     }
 
+    crate::lifecycle::refresh_toolbar(toolbar);
+}
+
+fn handle_toggle_icons(state: &mut crate::toolbar::ToolbarState, toolbar: HWND) {
+    if crate::actions::toggle_icons_in_state(state).is_err() {
+        return; // no config or save failed; already logged
+    }
     crate::lifecycle::refresh_toolbar(toolbar);
 }
 

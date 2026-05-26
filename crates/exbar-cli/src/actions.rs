@@ -225,6 +225,29 @@ pub(crate) fn toggle_recent_in_state(state: &mut ToolbarState) -> Result<bool, (
     Ok(now_enabled)
 }
 
+/// Flip `config.show_icons`, persist via `config_store`, and return the new
+/// value. On save failure, revert the in-memory flip so memory matches disk
+/// and return `Err(())`. Returns `Err(())` if no config is loaded.
+pub(crate) fn toggle_icons_in_state(state: &mut ToolbarState) -> Result<bool, ()> {
+    let cfg = match state.config.as_mut() {
+        Some(c) => c,
+        None => return Err(()),
+    };
+
+    cfg.show_icons = !cfg.show_icons;
+    let now = cfg.show_icons;
+
+    let cfg_snapshot = cfg.clone();
+    if let Err(e) = state.config_store.save(&cfg_snapshot) {
+        log::warn!("toggle icons: config save failed: {e:?}");
+        if let Some(c) = state.config.as_mut() {
+            c.show_icons = !now; // revert
+        }
+        return Err(());
+    }
+    Ok(now)
+}
+
 // ── Edit config ──────────────────────────────────────────────────────
 
 pub(crate) fn open_config_in_editor() {
@@ -483,5 +506,46 @@ mod tests {
 
         assert!(!saved);
         assert!(state.config.is_none());
+    }
+
+    // ── toggle icons ──────────────────────────────────────────────────
+
+    #[test]
+    fn toggle_icons_flips_and_persists() {
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("A", "C:\\a")]);
+        let mut state = make_test_state(&deps, Some(cfg));
+        // Default is true; first toggle should turn it off.
+        assert!(state.config.as_ref().unwrap().show_icons);
+
+        let now = toggle_icons_in_state(&mut state).expect("ok");
+
+        assert!(!now);
+        assert!(!state.config.as_ref().unwrap().show_icons);
+        let saved = deps.cfg_store.save_calls.lock().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(!saved.last().unwrap().show_icons);
+    }
+
+    #[test]
+    fn toggle_icons_save_error_reverts_in_memory() {
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("A", "C:\\a")]);
+        *deps.cfg_store.save_should_err.lock().unwrap() = true;
+        let mut state = make_test_state(&deps, Some(cfg));
+
+        let result = toggle_icons_in_state(&mut state);
+
+        assert!(result.is_err());
+        // Flip reverted, so memory matches the (failed) on-disk state.
+        assert!(state.config.as_ref().unwrap().show_icons);
+    }
+
+    #[test]
+    fn toggle_icons_no_config_returns_err() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        assert!(toggle_icons_in_state(&mut state).is_err());
     }
 }
