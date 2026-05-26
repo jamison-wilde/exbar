@@ -210,7 +210,7 @@ Mapped-drive (`Z:\…`) and UNC (`\\server\share\…`) folder buttons may point 
 
 - The `+` button (first slot) has three interactions:
   - **Left-click** → `picker.rs` opens `IFileOpenDialog` with `FOS_PICKFOLDERS`, starting at `%SystemDrive%\`; selected folder appended via `Config::add_folder` + `save()`
-  - **Right-click** → `Edit config` (ShellExecute opens `~/.exbar/config.json` in default handler) / `Reload config` (posts `WM_USER_RELOAD`)
+  - **Right-click** → `Edit config` (ShellExecute opens `~/.exbar/config.json` in default handler) / `Reload config` (posts `WM_USER_RELOAD`) / `Show icons` (flip-label, toggles `Config.show_icons` via `actions::toggle_icons_in_state` — hides the `📁`/`🕘` button-label emoji for a denser toolbar) / `Enable`/`Disable Recent Folders`
   - **Drop a single directory** → same path as click-picker result
 - Folder buttons:
   - **Left-click** → navigate active Explorer via `IShellBrowser::BrowseObject`

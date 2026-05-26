@@ -73,6 +73,7 @@ Edit `~\.exbar\config.json` (in your user home folder):
   "log_level": "info", // exbar.log in %TEMP% usually in AppData\Local\Temp
   "repositionDelayMs": 250, // dial in the time the exbar reappears after a max/unmax
   "enableFileDialogs": true,
+  "showIcons": true, // false hides the 📁/🕘 emoji on toolbar buttons (toggle via + right-click)
   "submenu": {
     "springOpenDelayMs": 500,   // long-press threshold to open a subfolder submenu
     "longHoverOpenMs": 1200,    // cursor-rest threshold to open without pressing
@@ -96,6 +97,7 @@ Edit `~\.exbar\config.json` (in your user home folder):
 - `layout` — `"horizontal"` (default) or `"vertical"`
 - `background_opacity` — 0.0 (transparent) to 1.0 (opaque). Default: 0.8
 - `enableFileDialogs` — `true` (default) to light up the toolbar over Save As / Open dialogs. Set to `false` for Explorer-only behavior.
+- `showIcons` — `true` (default) shows the `📁`/`🕘` emoji prefix on folder buttons; `false` drops it for a narrower toolbar. Toggle via the `+` button's right-click menu (`Show icons` / `Hide icons`).
 - `submenu.*` — spring-open submenu tuning. Omit the block for defaults.
 - `recent.*` — Recent Folders tracking (opt-in). Enable via the `+` right-click menu; `recent.excludedPaths` is a prefix match on folder paths (any descendant is also excluded). `recents.json` lives under `~/.exbar/` and is deleted when Recent is disabled.
 
