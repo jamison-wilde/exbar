@@ -48,6 +48,9 @@ fn default_reposition_delay() -> u32 {
 fn default_enable_file_dialogs() -> bool {
     true
 }
+fn default_show_icons() -> bool {
+    true
+}
 
 fn deserialize_clamped_timeout<'de, D>(d: D) -> Result<u32, D::Error>
 where
@@ -232,6 +235,10 @@ pub struct Config {
     pub submenu: SubmenuConfig,
     #[serde(default)]
     pub recent: RecentConfig,
+    /// When `false`, toolbar folder buttons render without the leading
+    /// `📁`/`🕘` emoji (denser layout). Defaults `true` (icons shown).
+    #[serde(rename = "showIcons", default = "default_show_icons")]
+    pub show_icons: bool,
 }
 
 /// Discriminator for toolbar button kinds. Omitted in JSON = `Folder` (backward compat).
@@ -450,6 +457,21 @@ mod tests {
         let json = r#"{"folders": []}"#;
         let cfg = Config::from_str(json).unwrap();
         assert!(cfg.folders.is_empty());
+    }
+
+    #[test]
+    fn show_icons_defaults_true_when_absent() {
+        let cfg = Config::from_str(r#"{"folders":[]}"#).expect("parses");
+        assert!(cfg.show_icons);
+    }
+
+    #[test]
+    fn show_icons_false_round_trips() {
+        let cfg = Config::from_str(r#"{"folders":[],"showIcons":false}"#).expect("parses");
+        assert!(!cfg.show_icons);
+        let json = serde_json::to_string(&cfg).expect("serializes");
+        let reparsed = Config::from_str(&json).expect("reparses");
+        assert!(!reparsed.show_icons);
     }
 
     #[test]
