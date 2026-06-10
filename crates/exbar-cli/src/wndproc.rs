@@ -846,12 +846,16 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 unsafe {
                     let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_REPOSITION);
                 }
-                if let Some(state) = unsafe { toolbar_state(hwnd) }
-                    && let Some(explorer) = state.active_target.map(|t| t.hwnd)
-                {
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    // Clear unconditionally — the timer fired, so the pending
+                    // window is over whether or not we have a target to reposition
+                    // to. Gating this on active_target could strand the flag and
+                    // permanently disable the watchdog.
                     state.reposition_pending = false;
-                    log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
-                    crate::visibility::reposition_and_show(hwnd, explorer);
+                    if let Some(explorer) = state.active_target.map(|t| t.hwnd) {
+                        log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
+                        crate::visibility::reposition_and_show(hwnd, explorer);
+                    }
                 }
                 LRESULT(0)
             } else if timer_id == crate::toolbar::TIMER_FOREGROUND_WATCHDOG {
