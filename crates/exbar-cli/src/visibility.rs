@@ -164,6 +164,30 @@ pub fn classify_foreground(target_pid: u32, target_exe: Option<&str>, our_pid: u
     }
 }
 
+/// Pure: decide whether the watchdog should HIDE a currently-visible toolbar,
+/// given the foreground window's classification.
+///
+/// `fg_is_ours`        — foreground window is in exbar's own process.
+/// `fg_class`          — class name of the foreground window.
+/// `fg_root_is_active` — `GetAncestor(fg, GA_ROOT)` equals the active target HWND
+///                       (covers Explorer XAML islands/tooltips and the file
+///                       dialog plus its child popups).
+///
+/// Keep (return `false`) for our process, any `CabinetWClass`, or a window
+/// rooted in the active target. Hide (return `true`) otherwise.
+pub fn watchdog_should_hide(fg_is_ours: bool, fg_class: &str, fg_root_is_active: bool) -> bool {
+    if fg_is_ours {
+        return false;
+    }
+    if fg_class == "CabinetWClass" {
+        return false;
+    }
+    if fg_root_is_active {
+        return false;
+    }
+    true
+}
+
 // ── Win32 process helpers ─────────────────────────────────────────────────────
 
 /// Return the full exe path for a given PID, or `None` on failure.
@@ -798,6 +822,37 @@ mod tests {
             classify_foreground(7, Some("C:/Windows/explorer.exe"), 1),
             Foreground::Explorer
         );
+    }
+
+    #[test]
+    fn watchdog_keeps_when_foreground_is_ours() {
+        assert!(!watchdog_should_hide(true, "RandomClass", false));
+    }
+
+    #[test]
+    fn watchdog_keeps_when_foreground_is_cabinet() {
+        assert!(!watchdog_should_hide(false, "CabinetWClass", false));
+    }
+
+    #[test]
+    fn watchdog_keeps_when_foreground_root_is_active_target() {
+        // e.g. an Explorer XAML island or a dialog child popup.
+        assert!(!watchdog_should_hide(
+            false,
+            "Microsoft.UI.Content.IslandWindow",
+            true
+        ));
+    }
+
+    #[test]
+    fn watchdog_hides_foreign_app() {
+        assert!(watchdog_should_hide(false, "Chrome_WidgetWin_1", false));
+    }
+
+    #[test]
+    fn watchdog_hides_desktop() {
+        // Progman is neither ours, nor cabinet, nor rooted in the active target.
+        assert!(watchdog_should_hide(false, "Progman", false));
     }
 
     struct MockDefView(bool);
