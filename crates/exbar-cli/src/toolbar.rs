@@ -98,6 +98,10 @@ pub(crate) const TIMER_HOVER_OPEN: usize = 6;
 /// ~150 ms while the cursor rests in a scrollable band (top or bottom buffer
 /// of a popup with off-screen items).
 pub(crate) const TIMER_SUBMENU_AUTOSCROLL: usize = 7;
+/// Timer ID for the periodic foreground watchdog. Armed once in WM_CREATE
+/// when `foreground_watchdog_ms > 0`; hides a toolbar left visible over a
+/// foreign app (and optionally re-shows it). Fires every `foreground_watchdog_ms`.
+pub(crate) const TIMER_FOREGROUND_WATCHDOG: usize = 8;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;

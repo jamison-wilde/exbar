@@ -678,7 +678,6 @@ pub(crate) fn reposition_and_show(toolbar: HWND, explorer: HWND) {
 ///
 /// Hide-only by default; if `Config.watchdog_reshow` is set it also re-shows
 /// the toolbar when it is hidden but the active target is genuinely foreground.
-#[allow(dead_code)] // wired in Task 6 (TIMER_FOREGROUND_WATCHDOG in wndproc)
 pub(crate) fn watchdog_tick(toolbar: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, IsWindowVisible};
 
