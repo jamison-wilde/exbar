@@ -426,7 +426,22 @@ unsafe extern "system" fn foreground_event_proc(
             let _ = crate::lifecycle::create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
         }
         if let Some(tb) = get_global_toolbar_hwnd() {
-            reposition_and_show(tb, hwnd);
+            // Direction-1 guard: Win11 fires spurious EVENT_SYSTEM_FOREGROUND for
+            // Explorer windows during transition animations while a foreign app is
+            // the real foreground. Only show if Explorer is genuinely foreground —
+            // symmetric with the actual_fg guard in the in_explorer branch below.
+            let actual_fg = unsafe { GetForegroundWindow() };
+            if actual_fg == hwnd
+                || crate::explorer::get_class_name(actual_fg) == "CabinetWClass"
+                || hwnd_in_explorer_process(actual_fg)
+                || hwnd_in_our_process(actual_fg)
+            {
+                reposition_and_show(tb, hwnd);
+            } else {
+                log::debug!(
+                    "is_explorer foreground but actual_fg={actual_fg:?} is foreign — skipping show"
+                );
+            }
         }
     } else if in_explorer {
         // Desktop (Progman / WorkerW) lives in explorer.exe but is NOT a
