@@ -98,6 +98,10 @@ pub(crate) const TIMER_HOVER_OPEN: usize = 6;
 /// ~150 ms while the cursor rests in a scrollable band (top or bottom buffer
 /// of a popup with off-screen items).
 pub(crate) const TIMER_SUBMENU_AUTOSCROLL: usize = 7;
+/// Timer ID for the periodic foreground watchdog. Armed once in WM_CREATE
+/// when `foreground_watchdog_ms > 0`; hides a toolbar left visible over a
+/// foreign app (and optionally re-shows it). Fires every `foreground_watchdog_ms`.
+pub(crate) const TIMER_FOREGROUND_WATCHDOG: usize = 8;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -146,6 +150,11 @@ pub(crate) struct ToolbarState {
     /// MOVESIZESTART and MOVESIZEEND). Used to suppress CAPTUREEND
     /// repositioning during drag — MOVESIZEEND handles that instead.
     pub(crate) explorer_moving: bool,
+    /// True between scheduling a deferred reposition (TIMER_REPOSITION, on
+    /// Explorer maximize/restore/snap) and that timer firing. The foreground
+    /// watchdog skips while set so its opt-in re-show can't flash the toolbar
+    /// at a half-settled position mid-animation.
+    pub(crate) reposition_pending: bool,
     /// Count of shell popup windows currently visible (e.g. Win11 context
     /// menus, class "Microsoft.UI.Content.PopupWindowSiteBridge"). While > 0
     /// the toolbar drops from HWND_TOPMOST to HWND_NOTOPMOST so the popups
@@ -262,6 +271,7 @@ impl ToolbarState {
             active_target: None,
             last_explorer_origin: None,
             explorer_moving: false,
+            reposition_pending: false,
             popup_open_count: 0,
             rename_state: None,
             submenu_chain: crate::submenu::SubmenuChain::default(),
@@ -799,9 +809,18 @@ impl ToolbarState {
         use crate::target::TargetKind;
         let path = std::path::Path::new(path);
         match (self.active_target.map(|t| t.kind), ctrl) {
-            (Some(TargetKind::FileDialog), _) => {
-                // Dialogs have no tabs; always open a new Explorer window.
+            (Some(TargetKind::FileDialog), true) => {
+                // Dialogs have no tabs; ctrl degrades to a new Explorer window.
                 self.shell_browser.open_in_new_window(path);
+            }
+            (Some(TargetKind::FileDialog), false) => {
+                // Plain click: drive the dialog's folder via Ctrl+L injection,
+                // matching the top-level folder-button click behaviour.
+                if let Some(target) = self.active_target
+                    && let Err(e) = self.dialog_nav.navigate(target.hwnd, path)
+                {
+                    log::warn!("dialog navigate failed: {e:?}");
+                }
             }
             (Some(TargetKind::Explorer), true) => {
                 let active_hwnd = self.active_target.map(|t| t.hwnd).unwrap_or_default();
@@ -1584,6 +1603,40 @@ mod tests {
         assert_eq!(calls[0], PathBuf::from("C:\\D"));
         assert!(deps.new_tab_calls.lock().unwrap().is_empty());
         assert!(deps.navigate_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn submenu_click_in_dialog_mode_navigates_dialog_not_new_window() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+        state.active_target = Some(ActiveTarget::file_dialog(HWND(99 as *mut _)));
+
+        // Plain (non-ctrl) submenu click should set the dialog's folder.
+        state.navigate_or_new_window_or_tab("C:\\Sub\\Folder", false);
+
+        let dlg_calls = deps.dialog_nav.calls.borrow();
+        assert_eq!(dlg_calls.len(), 1, "dialog_nav should be called once");
+        assert_eq!(dlg_calls[0].0, 99, "dialog_nav gets the file-dialog HWND");
+        assert_eq!(dlg_calls[0].1, PathBuf::from("C:\\Sub\\Folder"));
+        assert!(
+            deps.new_window_calls.lock().unwrap().is_empty(),
+            "must NOT open a new Explorer window for a plain dialog click"
+        );
+    }
+
+    #[test]
+    fn ctrl_submenu_click_in_dialog_mode_opens_new_window() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+        state.active_target = Some(ActiveTarget::file_dialog(HWND(99 as *mut _)));
+
+        // Ctrl submenu click: dialogs have no tabs → degrade to a new window.
+        state.navigate_or_new_window_or_tab("C:\\Sub\\Folder", true);
+
+        let calls = deps.new_window_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], PathBuf::from("C:\\Sub\\Folder"));
+        assert!(deps.dialog_nav.calls.borrow().is_empty());
     }
 
     #[test]

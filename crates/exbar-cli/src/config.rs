@@ -125,6 +125,20 @@ where
     Ok(u32::deserialize(d)?.clamp(1, 300))
 }
 
+pub(crate) fn default_foreground_watchdog_ms() -> u32 {
+    2000
+}
+
+/// Clamp the watchdog interval. `0` passes through (disables the watchdog);
+/// any positive value is clamped into a sane 500 ms..=60 s band.
+fn deserialize_watchdog_ms<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = u32::deserialize(d)?;
+    Ok(if v == 0 { 0 } else { v.clamp(500, 60_000) })
+}
+
 /// Recent Folders tracking config. All fields optional with sensible defaults.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RecentConfig {
@@ -239,6 +253,22 @@ pub struct Config {
     /// `📁`/`🕘` emoji (denser layout). Defaults `true` (icons shown).
     #[serde(rename = "showIcons", default = "default_show_icons")]
     pub show_icons: bool,
+    /// Interval (ms) for the foreground watchdog that hides a toolbar left
+    /// visible over a foreign app after a spurious Explorer foreground event.
+    /// `0` disables the watchdog. Clamped to 500..=60000 otherwise.
+    /// Applied at toolbar creation; changing this value takes effect only after
+    /// the hook restarts (Reload config does not re-arm the timer).
+    #[serde(
+        rename = "foregroundWatchdogMs",
+        default = "default_foreground_watchdog_ms",
+        deserialize_with = "deserialize_watchdog_ms"
+    )]
+    pub foreground_watchdog_ms: u32,
+    /// When `true`, the watchdog also re-shows the toolbar if it is hidden
+    /// while the active Explorer/dialog target is foreground. Default `false`
+    /// (hide-only).
+    #[serde(rename = "watchdogReshow", default)]
+    pub watchdog_reshow: bool,
 }
 
 /// Discriminator for toolbar button kinds. Omitted in JSON = `Folder` (backward compat).
@@ -869,5 +899,36 @@ mod tests {
             cfg2.recent.dwell_seconds_to_track
         );
         assert_eq!(cfg.recent.excluded_paths, cfg2.recent.excluded_paths);
+    }
+
+    #[test]
+    fn watchdog_ms_defaults_to_2000() {
+        let cfg = Config::from_str(r#"{"folders":[]}"#).unwrap();
+        assert_eq!(cfg.foreground_watchdog_ms, 2000);
+        assert!(!cfg.watchdog_reshow);
+    }
+
+    #[test]
+    fn watchdog_ms_zero_passes_through_as_disabled() {
+        let cfg = Config::from_str(r#"{"folders":[],"foregroundWatchdogMs":0}"#).unwrap();
+        assert_eq!(cfg.foreground_watchdog_ms, 0);
+    }
+
+    #[test]
+    fn watchdog_ms_clamped_low() {
+        let cfg = Config::from_str(r#"{"folders":[],"foregroundWatchdogMs":50}"#).unwrap();
+        assert_eq!(cfg.foreground_watchdog_ms, 500);
+    }
+
+    #[test]
+    fn watchdog_ms_clamped_high() {
+        let cfg = Config::from_str(r#"{"folders":[],"foregroundWatchdogMs":999999}"#).unwrap();
+        assert_eq!(cfg.foreground_watchdog_ms, 60_000);
+    }
+
+    #[test]
+    fn watchdog_reshow_parses_true() {
+        let cfg = Config::from_str(r#"{"folders":[],"watchdogReshow":true}"#).unwrap();
+        assert!(cfg.watchdog_reshow);
     }
 }

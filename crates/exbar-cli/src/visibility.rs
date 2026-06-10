@@ -164,6 +164,30 @@ pub fn classify_foreground(target_pid: u32, target_exe: Option<&str>, our_pid: u
     }
 }
 
+/// Pure: decide whether the watchdog should HIDE a currently-visible toolbar,
+/// given the foreground window's classification.
+///
+/// `fg_is_ours`        — foreground window is in exbar's own process.
+/// `fg_class`          — class name of the foreground window.
+/// `fg_root_is_active` — `GetAncestor(fg, GA_ROOT)` equals the active target HWND
+///                       (covers Explorer XAML islands/tooltips and the file
+///                       dialog plus its child popups).
+///
+/// Keep (return `false`) for our process, any `CabinetWClass`, or a window
+/// rooted in the active target. Hide (return `true`) otherwise.
+pub fn watchdog_should_hide(fg_is_ours: bool, fg_class: &str, fg_root_is_active: bool) -> bool {
+    if fg_is_ours {
+        return false;
+    }
+    if fg_class == "CabinetWClass" {
+        return false;
+    }
+    if fg_root_is_active {
+        return false;
+    }
+    true
+}
+
 // ── Win32 process helpers ─────────────────────────────────────────────────────
 
 /// Return the full exe path for a given PID, or `None` on failure.
@@ -353,6 +377,7 @@ unsafe extern "system" fn foreground_event_proc(
             log::debug!(
                 "LOCATIONCHANGE: explorer={hwnd:?}, hiding + scheduling reposition ({delay}ms)"
             );
+            state.reposition_pending = true;
             unsafe {
                 // Hide immediately so the toolbar doesn't sit in the wrong
                 // spot during the maximize/restore animation.
@@ -402,7 +427,22 @@ unsafe extern "system" fn foreground_event_proc(
             let _ = crate::lifecycle::create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
         }
         if let Some(tb) = get_global_toolbar_hwnd() {
-            reposition_and_show(tb, hwnd);
+            // Direction-1 guard: Win11 fires spurious EVENT_SYSTEM_FOREGROUND for
+            // Explorer windows during transition animations while a foreign app is
+            // the real foreground. Only show if Explorer is genuinely foreground —
+            // symmetric with the actual_fg guard in the in_explorer branch below.
+            let actual_fg = unsafe { GetForegroundWindow() };
+            if actual_fg == hwnd
+                || crate::explorer::get_class_name(actual_fg) == "CabinetWClass"
+                || hwnd_in_explorer_process(actual_fg)
+                || hwnd_in_our_process(actual_fg)
+            {
+                reposition_and_show(tb, hwnd);
+            } else {
+                log::debug!(
+                    "is_explorer foreground but actual_fg={actual_fg:?} is foreign — skipping show"
+                );
+            }
         }
     } else if in_explorer {
         // Desktop (Progman / WorkerW) lives in explorer.exe but is NOT a
@@ -633,6 +673,78 @@ pub(crate) fn reposition_and_show(toolbar: HWND, explorer: HWND) {
     }
 }
 
+/// Periodic safety net (driven by `TIMER_FOREGROUND_WATCHDOG`). Corrects a
+/// toolbar that was left visible over a foreign app by a spurious Explorer
+/// foreground event with no subsequent corrective event.
+///
+/// Hide-only by default; if `Config.watchdog_reshow` is set it also re-shows
+/// the toolbar when it is hidden but the active target is genuinely foreground.
+pub(crate) fn watchdog_tick(toolbar: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, IsWindowVisible};
+
+    // Read all needed fields from state, then drop the borrow before calling
+    // any function (like show_above) that re-enters toolbar_state internally.
+    let (skip, should_hide, visible, active, reshow) = {
+        let Some(state) = (unsafe { crate::toolbar::toolbar_state(toolbar) }) else {
+            return;
+        };
+
+        // Skip during transient/modal states — a popup menu, open submenu chain,
+        // active inline rename, or an in-progress Explorer move all legitimately
+        // change which window is foreground.
+        if state.popup_open_count > 0
+            || state.submenu_chain.is_open()
+            || state.rename_state.is_some()
+            || state.explorer_moving
+            || state.reposition_pending
+        {
+            (true, false, false, None, false)
+        } else {
+            let fg = unsafe { GetForegroundWindow() };
+            let fg_is_ours = hwnd_in_our_process(fg);
+            let fg_class = crate::explorer::get_class_name(fg);
+            let active = state.active_target.map(|t| t.hwnd);
+            let fg_root_is_active = active.is_some_and(|a| {
+                let root = unsafe { GetAncestor(fg, GA_ROOT) };
+                root == a
+            });
+
+            let should_hide = watchdog_should_hide(fg_is_ours, &fg_class, fg_root_is_active);
+            let visible = unsafe { IsWindowVisible(toolbar).as_bool() };
+            let reshow = state.config.as_ref().is_some_and(|c| c.watchdog_reshow);
+
+            log::debug!(
+                "watchdog: fg={fg:?} class={fg_class:?} ours={fg_is_ours} root_active={fg_root_is_active} visible={visible} should_hide={should_hide}"
+            );
+
+            (false, should_hide, visible, active, reshow)
+        }
+    }; // state borrow ends here
+
+    if skip {
+        return;
+    }
+
+    if visible && should_hide {
+        log::debug!("watchdog: hiding toolbar");
+        unsafe {
+            crate::warn_on_err!(ShowWindow(toolbar, SW_HIDE).ok());
+        }
+        return;
+    }
+
+    // Opt-in re-show: toolbar hidden but the active target is genuinely foreground.
+    if !visible
+        && !should_hide
+        && reshow
+        && let Some(active_hwnd) = active
+        && !unsafe { IsIconic(active_hwnd).as_bool() }
+    {
+        log::debug!("watchdog: re-showing toolbar over active={active_hwnd:?}");
+        show_above(toolbar, active_hwnd);
+    }
+}
+
 /// Hide the toolbar if the foreground window is in a different process
 /// (i.e., not Explorer or any of its helper windows).
 fn update_toolbar_visibility(toolbar: HWND) {
@@ -798,6 +910,37 @@ mod tests {
             classify_foreground(7, Some("C:/Windows/explorer.exe"), 1),
             Foreground::Explorer
         );
+    }
+
+    #[test]
+    fn watchdog_keeps_when_foreground_is_ours() {
+        assert!(!watchdog_should_hide(true, "RandomClass", false));
+    }
+
+    #[test]
+    fn watchdog_keeps_when_foreground_is_cabinet() {
+        assert!(!watchdog_should_hide(false, "CabinetWClass", false));
+    }
+
+    #[test]
+    fn watchdog_keeps_when_foreground_root_is_active_target() {
+        // e.g. an Explorer XAML island or a dialog child popup.
+        assert!(!watchdog_should_hide(
+            false,
+            "Microsoft.UI.Content.IslandWindow",
+            true
+        ));
+    }
+
+    #[test]
+    fn watchdog_hides_foreign_app() {
+        assert!(watchdog_should_hide(false, "Chrome_WidgetWin_1", false));
+    }
+
+    #[test]
+    fn watchdog_hides_desktop() {
+        // Progman is neither ours, nor cabinet, nor rooted in the active target.
+        assert!(watchdog_should_hide(false, "Progman", false));
     }
 
     struct MockDefView(bool);

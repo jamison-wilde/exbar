@@ -175,6 +175,23 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // Initial probe pass for any network folders in the loaded config.
             state.request_probes_for_current_folders();
 
+            // Arm the periodic foreground watchdog (0 = disabled).
+            let watchdog_ms = state
+                .config
+                .as_ref()
+                .map(|c| c.foreground_watchdog_ms)
+                .unwrap_or_else(crate::config::default_foreground_watchdog_ms);
+            if watchdog_ms > 0 {
+                unsafe {
+                    let _ = SetTimer(
+                        Some(hwnd),
+                        crate::toolbar::TIMER_FOREGROUND_WATCHDOG,
+                        watchdog_ms,
+                        None,
+                    );
+                }
+            }
+
             // active_target is seeded in create_toolbar before Box::into_raw,
             // so it's always Some here. Fall back to GetForegroundWindow() only
             // as defence-in-depth in case that invariant is ever broken.
@@ -829,12 +846,20 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 unsafe {
                     let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_REPOSITION);
                 }
-                if let Some(state) = unsafe { toolbar_state(hwnd) }
-                    && let Some(explorer) = state.active_target.map(|t| t.hwnd)
-                {
-                    log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
-                    crate::visibility::reposition_and_show(hwnd, explorer);
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    // Clear unconditionally — the timer fired, so the pending
+                    // window is over whether or not we have a target to reposition
+                    // to. Gating this on active_target could strand the flag and
+                    // permanently disable the watchdog.
+                    state.reposition_pending = false;
+                    if let Some(explorer) = state.active_target.map(|t| t.hwnd) {
+                        log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
+                        crate::visibility::reposition_and_show(hwnd, explorer);
+                    }
                 }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_FOREGROUND_WATCHDOG {
+                crate::visibility::watchdog_tick(hwnd);
                 LRESULT(0)
             } else if timer_id == crate::toolbar::TIMER_LONGPRESS {
                 if let Some(state) = unsafe { toolbar_state(hwnd) } {
