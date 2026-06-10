@@ -125,7 +125,7 @@ where
     Ok(u32::deserialize(d)?.clamp(1, 300))
 }
 
-fn default_foreground_watchdog_ms() -> u32 {
+pub(crate) fn default_foreground_watchdog_ms() -> u32 {
     2000
 }
 
@@ -256,6 +256,8 @@ pub struct Config {
     /// Interval (ms) for the foreground watchdog that hides a toolbar left
     /// visible over a foreign app after a spurious Explorer foreground event.
     /// `0` disables the watchdog. Clamped to 500..=60000 otherwise.
+    /// Applied at toolbar creation; changing this value takes effect only after
+    /// the hook restarts (Reload config does not re-arm the timer).
     #[serde(
         rename = "foregroundWatchdogMs",
         default = "default_foreground_watchdog_ms",

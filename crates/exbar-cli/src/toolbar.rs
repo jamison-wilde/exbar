@@ -150,6 +150,11 @@ pub(crate) struct ToolbarState {
     /// MOVESIZESTART and MOVESIZEEND). Used to suppress CAPTUREEND
     /// repositioning during drag — MOVESIZEEND handles that instead.
     pub(crate) explorer_moving: bool,
+    /// True between scheduling a deferred reposition (TIMER_REPOSITION, on
+    /// Explorer maximize/restore/snap) and that timer firing. The foreground
+    /// watchdog skips while set so its opt-in re-show can't flash the toolbar
+    /// at a half-settled position mid-animation.
+    pub(crate) reposition_pending: bool,
     /// Count of shell popup windows currently visible (e.g. Win11 context
     /// menus, class "Microsoft.UI.Content.PopupWindowSiteBridge"). While > 0
     /// the toolbar drops from HWND_TOPMOST to HWND_NOTOPMOST so the popups
@@ -266,6 +271,7 @@ impl ToolbarState {
             active_target: None,
             last_explorer_origin: None,
             explorer_moving: false,
+            reposition_pending: false,
             popup_open_count: 0,
             rename_state: None,
             submenu_chain: crate::submenu::SubmenuChain::default(),

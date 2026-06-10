@@ -377,6 +377,7 @@ unsafe extern "system" fn foreground_event_proc(
             log::debug!(
                 "LOCATIONCHANGE: explorer={hwnd:?}, hiding + scheduling reposition ({delay}ms)"
             );
+            state.reposition_pending = true;
             unsafe {
                 // Hide immediately so the toolbar doesn't sit in the wrong
                 // spot during the maximize/restore animation.
@@ -695,6 +696,7 @@ pub(crate) fn watchdog_tick(toolbar: HWND) {
             || state.submenu_chain.is_open()
             || state.rename_state.is_some()
             || state.explorer_moving
+            || state.reposition_pending
         {
             (true, false, false, None, false)
         } else {
