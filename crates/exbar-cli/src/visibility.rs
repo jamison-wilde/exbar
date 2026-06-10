@@ -657,6 +657,78 @@ pub(crate) fn reposition_and_show(toolbar: HWND, explorer: HWND) {
     }
 }
 
+/// Periodic safety net (driven by `TIMER_FOREGROUND_WATCHDOG`). Corrects a
+/// toolbar that was left visible over a foreign app by a spurious Explorer
+/// foreground event with no subsequent corrective event.
+///
+/// Hide-only by default; if `Config.watchdog_reshow` is set it also re-shows
+/// the toolbar when it is hidden but the active target is genuinely foreground.
+#[allow(dead_code)] // wired in Task 6 (TIMER_FOREGROUND_WATCHDOG in wndproc)
+pub(crate) fn watchdog_tick(toolbar: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, IsWindowVisible};
+
+    // Read all needed fields from state, then drop the borrow before calling
+    // any function (like show_above) that re-enters toolbar_state internally.
+    let (skip, should_hide, visible, active, reshow) = {
+        let Some(state) = (unsafe { crate::toolbar::toolbar_state(toolbar) }) else {
+            return;
+        };
+
+        // Skip during transient/modal states — a popup menu, open submenu chain,
+        // active inline rename, or an in-progress Explorer move all legitimately
+        // change which window is foreground.
+        if state.popup_open_count > 0
+            || state.submenu_chain.is_open()
+            || state.rename_state.is_some()
+            || state.explorer_moving
+        {
+            (true, false, false, None, false)
+        } else {
+            let fg = unsafe { GetForegroundWindow() };
+            let fg_is_ours = hwnd_in_our_process(fg);
+            let fg_class = crate::explorer::get_class_name(fg);
+            let active = state.active_target.map(|t| t.hwnd);
+            let fg_root_is_active = active.is_some_and(|a| {
+                let root = unsafe { GetAncestor(fg, GA_ROOT) };
+                root == a
+            });
+
+            let should_hide = watchdog_should_hide(fg_is_ours, &fg_class, fg_root_is_active);
+            let visible = unsafe { IsWindowVisible(toolbar).as_bool() };
+            let reshow = state.config.as_ref().is_some_and(|c| c.watchdog_reshow);
+
+            log::debug!(
+                "watchdog: fg={fg:?} class={fg_class:?} ours={fg_is_ours} root_active={fg_root_is_active} visible={visible} should_hide={should_hide}"
+            );
+
+            (false, should_hide, visible, active, reshow)
+        }
+    }; // state borrow ends here
+
+    if skip {
+        return;
+    }
+
+    if visible && should_hide {
+        log::debug!("watchdog: hiding toolbar");
+        unsafe {
+            crate::warn_on_err!(ShowWindow(toolbar, SW_HIDE).ok());
+        }
+        return;
+    }
+
+    // Opt-in re-show: toolbar hidden but the active target is genuinely foreground.
+    if !visible
+        && !should_hide
+        && reshow
+        && let Some(active_hwnd) = active
+        && !unsafe { IsIconic(active_hwnd).as_bool() }
+    {
+        log::debug!("watchdog: re-showing toolbar over active={active_hwnd:?}");
+        show_above(toolbar, active_hwnd);
+    }
+}
+
 /// Hide the toolbar if the foreground window is in a different process
 /// (i.e., not Explorer or any of its helper windows).
 fn update_toolbar_visibility(toolbar: HWND) {
