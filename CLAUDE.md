@@ -194,6 +194,16 @@ Opt-in tracking of folders where the user spends time or acts.
 - **LRU semantics** — `recent_list::push` dedupes case-insensitively (normalized via `path_norm::normalize`), trims to `maxCount`. `for_display` filters pinned folders at render time when `includePinned == false`. `excludedPaths` is a prefix match with `\` boundary.
 - **UI** — Recent button renders `🕘 Recent` (fixed label); its root submenu uses `build_recent_display_list` (no parent-reshow, no `..`, empty state shows `(no recent folders yet)`). Hovering a recent folder opens level 2 as a normal subfolder chain with `..` enabled from there down. Right-click the 🕘 button → `Remove` (same effect as Disable).
 
+### Foreground watchdog
+
+Periodic safety net for cases where a spurious Explorer foreground event leaves the toolbar visible over an unrelated foreground app. Pure-controller + Win32 adapter, like the other interaction subsystems.
+
+- **Pure decision core** — `visibility::watchdog_should_hide(fg_is_ours, fg_class, fg_root_is_active) -> bool`. Returns `true` when none of: foreground is our process, class is `CabinetWClass`, or `GetAncestor(fg, GA_ROOT)` matches the active target. Fully unit-testable.
+- **Win32 adapter** — `visibility::watchdog_tick(hwnd)` reads the actual foreground, classifies it, calls the core, and `ShowWindow(SW_HIDE)`s on `true`. When `Config.watchdog_reshow == true`, it also re-shows the toolbar if it was hidden while the active target is foreground.
+- **Timer** — `TIMER_FOREGROUND_WATCHDOG = 8`, armed once at toolbar creation when `Config.foreground_watchdog_ms != 0`. Default 2 s, clamp 500..=60000. Changing the config value requires a hook restart; `WM_USER_RELOAD` does not re-arm.
+- **Reposition-window skip** — the watchdog short-circuits while `state.reposition_pending` is set so it does not interfere with the dialog/Explorer reshow path. The timer handler clears `reposition_pending` unconditionally on fire to avoid sticky state.
+- **Why this exists** — Win11 sporadically posts `EVENT_SYSTEM_FOREGROUND` for a CabinetWClass even when the user has already alt-tabbed away; the toolbar's normal foreground-driven hide path never runs because no further event arrives. The watchdog catches that mismatch within one tick.
+
 ### Network folder reachability
 
 Mapped-drive (`Z:\…`) and UNC (`\\server\share\…`) folder buttons may point at shares that are unreachable. To avoid blocking the UI thread on the standard SMB timeout (~30 s), reachability is determined lazily on a worker thread and cached for the session.

@@ -14,6 +14,7 @@ I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the 
 * Works in normal Save As / Open file dialogs too — click a folder to retarget the dialog instead of Explorer. Drag a file out of the dialog onto a toolbar folder to move or copy it there.
 * **Spring-open submenus**: long-press OR long-hover a folder to browse its subdirectories (up to 7 levels deep). Drop files anywhere in the submenu tree. `..` rows for quick up-traversal. Mouse wheel + hover-band autoscroll for long lists.
 * **Recent Folders** (opt-in): a 🕘 button that tracks folders where you spend time or take action. Privacy-preserving — disable anytime and the data file is deleted. Exclusion-path config keeps sensitive folders out.
+* **Network folder support**: mapped drives (`Z:\…`) and UNC paths (`\\server\share\…`) work as toolbar folders. Unreachable shares grey out instead of hanging the UI; right-click → `Retry connection` to re-probe.
 * Drag-n-drop support for moving and copying files with native Windows semantics around ctrl/shift drop.
 * Drag-n-drop support for adding folders to Exbar.
 * Drag re-sort the order of the folders in Exbar.
@@ -36,7 +37,7 @@ Let's go vertical!
 
 ## Install
 
-Download and install `exbar-1.2.0-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
+Download and install `exbar-1.3.0-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
 
 Windows SmartScreen will warn you that the publisher is unrecognized (the installer is not yet signed). Click **More info** → **Run anyway**.
 
@@ -74,6 +75,8 @@ Edit `~\.exbar\config.json` (in your user home folder):
   "repositionDelayMs": 250, // dial in the time the exbar reappears after a max/unmax
   "enableFileDialogs": true,
   "showIcons": true, // false hides the 📁/🕘 emoji on toolbar buttons (toggle via + right-click)
+  "foregroundWatchdogMs": 2000, // periodic safety-net that hides a toolbar left over a foreign app; 0 disables
+  "watchdogReshow": false,      // also let the watchdog re-show the toolbar when active target is foreground
   "submenu": {
     "springOpenDelayMs": 500,   // long-press threshold to open a subfolder submenu
     "longHoverOpenMs": 1200,    // cursor-rest threshold to open without pressing
@@ -98,6 +101,8 @@ Edit `~\.exbar\config.json` (in your user home folder):
 - `background_opacity` — 0.0 (transparent) to 1.0 (opaque). Default: 0.8
 - `enableFileDialogs` — `true` (default) to light up the toolbar over Save As / Open dialogs. Set to `false` for Explorer-only behavior.
 - `showIcons` — `true` (default) shows the `📁`/`🕘` emoji prefix on folder buttons; `false` drops it for a narrower toolbar. Toggle via the `+` button's right-click menu (`Show icons` / `Hide icons`).
+- `foregroundWatchdogMs` — interval (ms) for the foreground watchdog that hides a toolbar left visible over a foreign app after a spurious Explorer foreground event. Default 2000. Clamped to 500..=60000; `0` disables. Applied at toolbar creation — changing it takes effect on next hook restart.
+- `watchdogReshow` — when `true`, the watchdog also re-shows the toolbar if it was hidden while the active Explorer/dialog target is foreground. Default `false` (hide-only).
 - `submenu.*` — spring-open submenu tuning. Omit the block for defaults.
 - `recent.*` — Recent Folders tracking (opt-in). Enable via the `+` right-click menu; `recent.excludedPaths` is a prefix match on folder paths (any descendant is also excluded). `recents.json` lives under `~/.exbar/` and is deleted when Recent is disabled.
 

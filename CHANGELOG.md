@@ -4,6 +4,20 @@ All notable changes to Exbar are documented here. Format based on [Keep a Change
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-09
+
+### Added
+
+- **Network folder reachability.** Mapped drives (`Z:\…`) and UNC paths (`\\server\share\…`) work as toolbar folders, with disconnected shares handled gracefully instead of hanging the UI on the SMB timeout (~30 s). A persistent worker thread probes each distinct network root once at startup (via `GetFileAttributesW` with a 3 s wall-clock budget) and on every config reload; results cache for the session in an `Arc<RwLock<ReachabilityCache>>`. Unreachable buttons render greyed (mid-grey text, no hover highlight); click is a no-op, drop is rejected with `DROPEFFECT_NONE`, and spring-open submenus are suppressed. Greyed buttons get a `Retry connection` right-click entry plus disabled Open / Open in new tab. Probe also fires immediately after a drag-onto-`+` of a network folder so the button doesn't sit Unknown. Local paths and shell aliases never touch the cache.
+- **Drive roots and UNC share roots as folder buttons.** Dragging `C:\` or `Z:\` onto the `+`, or picking a drive root in the picker, now adds the folder with the trimmed path as its button label (e.g. `"C:"`, `"\\server\share"`) instead of silently failing. User can right-click → Rename to set a friendlier name.
+- **Show / Hide icons toggle.** New `showIcons` config field (default `true`); toggle via the `+` button's right-click menu (`Show icons` / `Hide icons`). When `false`, the `📁` / `🕘` emoji prefix is dropped for a narrower toolbar.
+- **Foreground watchdog.** Periodic safety-net timer (`foregroundWatchdogMs`, default 2 s, clamp 500..=60000, `0` disables) hides the toolbar when a spurious Explorer foreground event left it visible over an unrelated app. Optional `watchdogReshow` (default `false`) also re-shows the toolbar if the active target is foreground but the toolbar is hidden.
+
+### Fixed
+
+- **Spring-open submenu click in file dialogs.** Clicking a submenu item while a file dialog was foreground previously opened the path in a new Explorer window. Now the dialog navigates to the path (consistent with toolbar-button click behavior in dialog mode).
+- **Dot-prefixed folders in spring-open subfolders.** Subfolders whose names start with `.` (e.g. `.git`, `.vscode`) were filtered from the top-level toolbar (intentional) but were also being filtered from nested subfolder enumerations (unintentional). They now appear in spring-open submenus.
+
 ## [1.2.0] - 2026-04-19
 
 ### Added
@@ -63,7 +77,8 @@ First public release.
 - Configurable `repositionDelayMs` to tune the animation-aware reposition debounce (default 250 ms).
 - GitHub Actions CI: lint, test, doc-check, and MSI build on every push; automatic release creation on tag push.
 
-[Unreleased]: https://github.com/jamison-wilde/exbar/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/jamison-wilde/exbar/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/jamison-wilde/exbar/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/jamison-wilde/exbar/compare/v1.1.0...v1.2.0
 
 [1.1.0]: https://github.com/jamison-wilde/exbar/releases/tag/v1.1.0
