@@ -64,8 +64,15 @@ jobs:
         with:
           name: exbar-msi
           path: target/wix/exbar-*.msi
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash ./scripts/extract-changelog.sh "$VERSION" > release_notes.md
+          echo "--- release_notes.md ---"
+          cat release_notes.md
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: target/wix/exbar-*.msi
-          generate_release_notes: true
+          body_path: release_notes.md
