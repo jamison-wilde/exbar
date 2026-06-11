@@ -48,14 +48,22 @@ pub const WM_USER_SUBMENU_SAFETY_TICK: u32 = 0x040D; // WM_USER + 13
 /// (-1 = up band, 0 = none/cancel, 1 = down band).
 pub const WM_USER_SUBMENU_BANDHOVER: u32 = 0x040F; // WM_USER + 15
 
+/// Posted by the reachability worker thread when one or more cache
+/// entries change. Triggers a full toolbar repaint (cheap; no per-button
+/// payload). `WPARAM` and `LPARAM` are unused — wndproc invalidates the
+/// whole client area.
+pub const WM_USER_REACHABILITY_UPDATED: u32 = 0x0407; // WM_USER + 7
+
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
 const MENU_ID_TOGGLE_RECENT: u32 = 103;
+const MENU_ID_TOGGLE_ICONS: u32 = 104;
 const MENU_ID_OPEN: u32 = 201;
 const MENU_ID_OPEN_NEW_TAB: u32 = 202;
 const MENU_ID_COPY_PATH: u32 = 203;
 const MENU_ID_RENAME: u32 = 204;
 const MENU_ID_REMOVE: u32 = 205;
+const MENU_ID_RETRY_CONNECTION: u32 = 206;
 
 /// Returns `true` if the given screen-coord cursor is inside any open popup's
 /// rendered bounds OR inside the triggering toolbar button's rect.
@@ -157,6 +165,32 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
             // Apply layered window transparency and register drop target.
             crate::lifecycle::setup_on_create(hwnd, state);
+
+            // Spawn the reachability worker thread. The worker reads probe
+            // requests from a channel, runs Win32Probe (with a 3 s timeout),
+            // and posts WM_USER_REACHABILITY_UPDATED back here on completion.
+            let probe: std::sync::Arc<dyn crate::reachability_probe::ReachabilityProbe> =
+                std::sync::Arc::new(crate::reachability_probe::Win32Probe::new());
+            state.spawn_reachability_worker(hwnd, probe);
+            // Initial probe pass for any network folders in the loaded config.
+            state.request_probes_for_current_folders();
+
+            // Arm the periodic foreground watchdog (0 = disabled).
+            let watchdog_ms = state
+                .config
+                .as_ref()
+                .map(|c| c.foreground_watchdog_ms)
+                .unwrap_or_else(crate::config::default_foreground_watchdog_ms);
+            if watchdog_ms > 0 {
+                unsafe {
+                    let _ = SetTimer(
+                        Some(hwnd),
+                        crate::toolbar::TIMER_FOREGROUND_WATCHDOG,
+                        watchdog_ms,
+                        None,
+                    );
+                }
+            }
 
             // active_target is seeded in create_toolbar before Box::into_raw,
             // so it's always Some here. Fall back to GetForegroundWindow() only
@@ -471,19 +505,34 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         } else {
                             "Enable Recent Folders"
                         };
+                        let show_icons =
+                            state.config.as_ref().map(|c| c.show_icons).unwrap_or(true);
+                        let icons_label = if show_icons {
+                            "Hide icons"
+                        } else {
+                            "Show icons"
+                        };
                         let items = [
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_EDIT_CONFIG,
                                 label: "Edit config",
+                                disabled: false,
                             },
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_RELOAD_CONFIG,
                                 label: "Reload config",
+                                disabled: false,
+                            },
+                            crate::contextmenu::MenuItem {
+                                id: MENU_ID_TOGGLE_ICONS,
+                                label: icons_label,
+                                disabled: false,
                             },
                             crate::contextmenu::SEPARATOR,
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_TOGGLE_RECENT,
                                 label: toggle_label,
+                                disabled: false,
                             },
                         ];
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
@@ -496,6 +545,9 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             MENU_ID_TOGGLE_RECENT => {
                                 handle_toggle_recent(state, hwnd);
                             }
+                            MENU_ID_TOGGLE_ICONS => {
+                                handle_toggle_icons(state, hwnd);
+                            }
                             _ => {}
                         }
                     } else if state.buttons[idx].folder.kind == crate::config::FolderKind::Recent {
@@ -503,35 +555,51 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         let items = [crate::contextmenu::MenuItem {
                             id: MENU_ID_REMOVE,
                             label: "Remove",
+                            disabled: false,
                         }];
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
                         if chosen == MENU_ID_REMOVE {
                             handle_toggle_recent(state, hwnd);
                         }
                     } else {
-                        let items = [
+                        let folder_index = idx - 1; // + button at index 0
+                        let is_unreachable = state.folder_is_unreachable(folder_index);
+                        let mut items = vec![
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_OPEN,
                                 label: "Open",
+                                disabled: is_unreachable,
                             },
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_OPEN_NEW_TAB,
                                 label: "Open in new tab",
+                                disabled: is_unreachable,
                             },
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_COPY_PATH,
                                 label: "Copy path",
+                                disabled: false,
                             },
                             crate::contextmenu::SEPARATOR,
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_RENAME,
                                 label: "Rename",
+                                disabled: false,
                             },
                             crate::contextmenu::MenuItem {
                                 id: MENU_ID_REMOVE,
                                 label: "Remove",
+                                disabled: false,
                             },
                         ];
+                        if is_unreachable {
+                            items.push(crate::contextmenu::SEPARATOR);
+                            items.push(crate::contextmenu::MenuItem {
+                                id: MENU_ID_RETRY_CONNECTION,
+                                label: "Retry connection",
+                                disabled: false,
+                            });
+                        }
                         let chosen = crate::contextmenu::show_menu(hwnd, pt, &items);
                         let path = std::path::PathBuf::from(&state.buttons[idx].folder.path);
                         match chosen {
@@ -584,6 +652,17 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                             MENU_ID_REMOVE => {
                                 crate::actions::remove_folder_at(state, hwnd, idx);
                             }
+                            MENU_ID_RETRY_CONNECTION => {
+                                if let Some(p) = state
+                                    .config
+                                    .as_ref()
+                                    .and_then(|c| c.folders.get(folder_index))
+                                    .map(|f| f.path.clone())
+                                    && let Some(root) = crate::reachability::classify_root(&p)
+                                {
+                                    state.request_probe(&root);
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -594,6 +673,14 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         x if x == WM_USER_RELOAD => {
             crate::lifecycle::refresh_toolbar(hwnd);
+            LRESULT(0)
+        }
+
+        x if x == WM_USER_REACHABILITY_UPDATED => {
+            // Full repaint — cheap, no per-button bookkeeping.
+            unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, true);
+            }
             LRESULT(0)
         }
 
@@ -759,12 +846,20 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 unsafe {
                     let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_REPOSITION);
                 }
-                if let Some(state) = unsafe { toolbar_state(hwnd) }
-                    && let Some(explorer) = state.active_target.map(|t| t.hwnd)
-                {
-                    log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
-                    crate::visibility::reposition_and_show(hwnd, explorer);
+                if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                    // Clear unconditionally — the timer fired, so the pending
+                    // window is over whether or not we have a target to reposition
+                    // to. Gating this on active_target could strand the flag and
+                    // permanently disable the watchdog.
+                    state.reposition_pending = false;
+                    if let Some(explorer) = state.active_target.map(|t| t.hwnd) {
+                        log::debug!("TIMER_REPOSITION: repositioning to explorer={explorer:?}");
+                        crate::visibility::reposition_and_show(hwnd, explorer);
+                    }
                 }
+                LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_FOREGROUND_WATCHDOG {
+                crate::visibility::watchdog_tick(hwnd);
                 LRESULT(0)
             } else if timer_id == crate::toolbar::TIMER_LONGPRESS {
                 if let Some(state) = unsafe { toolbar_state(hwnd) } {
@@ -1093,6 +1188,13 @@ fn handle_toggle_recent(state: &mut crate::toolbar::ToolbarState, toolbar: HWND)
         state.execute_submenu_event(toolbar, crate::submenu::SubmenuEvent::Dismiss);
     }
 
+    crate::lifecycle::refresh_toolbar(toolbar);
+}
+
+fn handle_toggle_icons(state: &mut crate::toolbar::ToolbarState, toolbar: HWND) {
+    if crate::actions::toggle_icons_in_state(state).is_err() {
+        return; // no config or save failed; already logged
+    }
     crate::lifecycle::refresh_toolbar(toolbar);
 }
 

@@ -16,20 +16,44 @@ use crate::submenu::DisplayItem;
 use crate::theme;
 use crate::toolbar::{BTN_PAD_H, GRIP_SIZE, ToolbarState};
 
+/// Build the toolbar-button label for `folder`. When `show_icons` is `false`
+/// the leading `📁`/`🕘` emoji (and its trailing space) are omitted.
+/// Used by both [`measure_folder_text_widths`] and the paint loop so the two
+/// stay in sync.
+pub(crate) fn folder_button_label(folder: &FolderEntry, show_icons: bool) -> String {
+    match folder.kind {
+        crate::config::FolderKind::Recent => {
+            if show_icons {
+                "\u{1F558} Recent".to_string()
+            } else {
+                "Recent".to_string()
+            }
+        }
+        crate::config::FolderKind::Folder => {
+            if show_icons {
+                format!("\u{1F4C1} {}", folder.name)
+            } else {
+                folder.name.clone()
+            }
+        }
+    }
+}
+
 /// Measure the rendered-pixel width of each folder's label ("📁 Name" or "🕘 Recent" — the
 /// same format used in paint) using the currently-selected font in `hdc`.
+/// `show_icons` mirrors `Config::show_icons`; when `false` the emoji prefix is dropped.
 ///
 /// Caller must `SelectObject(hdc, font)` first. Returns a Vec the same
 /// length as `folders`.
-pub(crate) fn measure_folder_text_widths(hdc: HDC, folders: &[FolderEntry]) -> Vec<i32> {
+pub(crate) fn measure_folder_text_widths(
+    hdc: HDC,
+    folders: &[FolderEntry],
+    show_icons: bool,
+) -> Vec<i32> {
     folders
         .iter()
         .map(|f| {
-            // Match the label format used in paint: "🕘 Recent" for kind=Recent, "📁 Name" for kind=Folder.
-            let label = match f.kind {
-                crate::config::FolderKind::Recent => "🕘 Recent".to_string(),
-                crate::config::FolderKind::Folder => format!("\u{1F4C1} {}", f.name),
-            };
+            let label = folder_button_label(f, show_icons);
             let wide: Vec<u16> = label.encode_utf16().collect();
             let mut size = SIZE::default();
             let ok = unsafe { GetTextExtentPoint32W(hdc, &wide, &mut size) };
@@ -62,7 +86,8 @@ pub(crate) fn compute_layout(hdc: HDC, state: &mut ToolbarState) -> (i32, i32) {
         .as_ref()
         .map(|c| c.folders.clone())
         .unwrap_or_default();
-    let widths = measure_folder_text_widths(hdc, &folders);
+    let show_icons = state.config.as_ref().map(|c| c.show_icons).unwrap_or(true);
+    let widths = measure_folder_text_widths(hdc, &folders, show_icons);
 
     let input = LayoutInput {
         dpi: state.dpi,
@@ -240,13 +265,27 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
     let hover_button = state.pointer.hover_button();
     let pressed_button = state.pointer.pressed_button();
     let drag_source = state.pointer.dragging_reorder().map(|(src, _ins)| src);
+    let show_icons = state.config.as_ref().map(|c| c.show_icons).unwrap_or(true);
 
     for (i, btn) in state.buttons.iter().enumerate() {
         let is_hover = hover_button == Some(i);
         let is_pressed = pressed_button == Some(i);
         let is_dragging_source = drag_source == Some(i);
 
-        if is_dragging_source {
+        // Compute reachability disabled flag — only meaningful for non-add
+        // folder buttons whose path classifies as a network root.
+        let is_disabled = if btn.is_add {
+            false
+        } else {
+            crate::reachability::classify_root(&btn.folder.path)
+                .and_then(|root| state.reachability.read().ok().map(|c| c.get(&root)))
+                .map(|r| r == crate::reachability::Reachability::Unreachable)
+                .unwrap_or(false)
+        };
+
+        if is_disabled {
+            // No highlight for disabled (greyed) buttons.
+        } else if is_dragging_source {
             // Don't draw hover/pressed highlight for the dragged button.
         } else if is_pressed {
             let hl = if is_dark {
@@ -279,14 +318,12 @@ pub(crate) unsafe fn paint(hwnd: HWND, state: &ToolbarState) {
         let label = if btn.is_add {
             "+".to_string()
         } else {
-            match btn.folder.kind {
-                crate::config::FolderKind::Recent => "🕘 Recent".to_string(),
-                crate::config::FolderKind::Folder => format!("\u{1F4C1} {}", btn.folder.name),
-            }
+            folder_button_label(&btn.folder, show_icons)
         };
 
-        // Dim text for the button being dragged.
-        let text_cr_this = if is_dragging_source {
+        // Disabled (Unreachable) and drag-source buttons render at mid-grey
+        // on both themes (same shade — the visual cue is "inactive").
+        let text_cr_this = if is_disabled || is_dragging_source {
             if is_dark {
                 COLORREF(0x00808080)
             } else {
@@ -636,5 +673,49 @@ pub fn paint_submenu_popup(
         unsafe {
             SelectObject(hdc, old_font);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(name: &str) -> FolderEntry {
+        FolderEntry {
+            name: name.to_string(),
+            path: format!("C:\\{name}"),
+            icon: None,
+            kind: crate::config::FolderKind::Folder,
+        }
+    }
+
+    fn recent() -> FolderEntry {
+        FolderEntry {
+            name: "Recent".to_string(),
+            path: String::new(),
+            icon: None,
+            kind: crate::config::FolderKind::Recent,
+        }
+    }
+
+    #[test]
+    fn folder_button_label_folder_with_icon() {
+        assert_eq!(folder_button_label(&folder("Docs"), true), "\u{1F4C1} Docs");
+    }
+
+    #[test]
+    fn folder_button_label_folder_without_icon() {
+        // No prefix and no leading space.
+        assert_eq!(folder_button_label(&folder("Docs"), false), "Docs");
+    }
+
+    #[test]
+    fn folder_button_label_recent_with_icon() {
+        assert_eq!(folder_button_label(&recent(), true), "\u{1F558} Recent");
+    }
+
+    #[test]
+    fn folder_button_label_recent_without_icon() {
+        assert_eq!(folder_button_label(&recent(), false), "Recent");
     }
 }

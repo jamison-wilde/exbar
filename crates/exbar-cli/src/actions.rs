@@ -60,10 +60,23 @@ pub(crate) fn append_folder_to_state(state: &mut ToolbarState, path: &Path) -> b
 /// Append a folder to `~/.exbar.json` using its basename as the label, then reload.
 /// No-op on empty / invalid paths.
 pub(crate) fn append_folder_and_reload(state: &mut ToolbarState, path: &Path) {
-    if append_folder_to_state(state, path)
-        && let Some(hwnd) = crate::visibility::get_global_toolbar_hwnd()
-    {
-        post_reload(hwnd);
+    if append_folder_to_state(state, path) {
+        // If the new folder is on a network root not yet in the cache, fire
+        // a probe so the button doesn't render Unknown indefinitely.
+        let path_str = path.to_string_lossy();
+        if let Some(root) = crate::reachability::classify_root(&path_str) {
+            let needs = state
+                .reachability
+                .read()
+                .map(|c| c.needs_probe(&root))
+                .unwrap_or(false);
+            if needs {
+                state.request_probe(&root);
+            }
+        }
+        if let Some(hwnd) = crate::visibility::get_global_toolbar_hwnd() {
+            post_reload(hwnd);
+        }
     }
 }
 
@@ -212,6 +225,29 @@ pub(crate) fn toggle_recent_in_state(state: &mut ToolbarState) -> Result<bool, (
     Ok(now_enabled)
 }
 
+/// Flip `config.show_icons`, persist via `config_store`, and return the new
+/// value. On save failure, revert the in-memory flip so memory matches disk
+/// and return `Err(())`. Returns `Err(())` if no config is loaded.
+pub(crate) fn toggle_icons_in_state(state: &mut ToolbarState) -> Result<bool, ()> {
+    let cfg = match state.config.as_mut() {
+        Some(c) => c,
+        None => return Err(()),
+    };
+
+    cfg.show_icons = !cfg.show_icons;
+    let now = cfg.show_icons;
+
+    let cfg_snapshot = cfg.clone();
+    if let Err(e) = state.config_store.save(&cfg_snapshot) {
+        log::warn!("toggle icons: config save failed: {e:?}");
+        if let Some(c) = state.config.as_mut() {
+            c.show_icons = !now; // revert
+        }
+        return Err(());
+    }
+    Ok(now)
+}
+
 // ── Edit config ──────────────────────────────────────────────────────
 
 pub(crate) fn open_config_in_editor() {
@@ -346,6 +382,30 @@ mod tests {
     }
 
     #[test]
+    fn append_folder_unc_path_marks_root_probing() {
+        use crate::reachability::Reachability;
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        crate::actions::append_folder_and_reload(&mut state, Path::new("\\\\srv\\share\\foo"));
+
+        let r = state.reachability.read().unwrap().get("\\\\srv\\share");
+        assert_eq!(r, Reachability::Probing);
+    }
+
+    #[test]
+    fn append_folder_local_path_does_not_touch_cache() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        crate::actions::append_folder_and_reload(&mut state, Path::new("C:\\Users\\me"));
+
+        // Local path → classify_root returns None → no cache mutation.
+        let cache = state.reachability.read().unwrap();
+        assert!(cache.needs_probe("C:")); // never added
+    }
+
+    #[test]
     fn append_folder_with_load_none_uses_empty_default() {
         let deps = mk_deps();
         let mut state = make_test_state(&deps, None);
@@ -446,5 +506,46 @@ mod tests {
 
         assert!(!saved);
         assert!(state.config.is_none());
+    }
+
+    // ── toggle icons ──────────────────────────────────────────────────
+
+    #[test]
+    fn toggle_icons_flips_and_persists() {
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("A", "C:\\a")]);
+        let mut state = make_test_state(&deps, Some(cfg));
+        // Default is true; first toggle should turn it off.
+        assert!(state.config.as_ref().unwrap().show_icons);
+
+        let now = toggle_icons_in_state(&mut state).expect("ok");
+
+        assert!(!now);
+        assert!(!state.config.as_ref().unwrap().show_icons);
+        let saved = deps.cfg_store.save_calls.lock().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(!saved.last().unwrap().show_icons);
+    }
+
+    #[test]
+    fn toggle_icons_save_error_reverts_in_memory() {
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("A", "C:\\a")]);
+        *deps.cfg_store.save_should_err.lock().unwrap() = true;
+        let mut state = make_test_state(&deps, Some(cfg));
+
+        let result = toggle_icons_in_state(&mut state);
+
+        assert!(result.is_err());
+        // Flip reverted, so memory matches the (failed) on-disk state.
+        assert!(state.config.as_ref().unwrap().show_icons);
+    }
+
+    #[test]
+    fn toggle_icons_no_config_returns_err() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+
+        assert!(toggle_icons_in_state(&mut state).is_err());
     }
 }

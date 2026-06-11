@@ -34,18 +34,45 @@ pub struct FolderDropTarget {
     current_action: Mutex<Option<DropAction>>,
     session: Mutex<Option<DragSession>>,
     file_operator: Arc<dyn FileOperator>,
+    reachability: std::sync::Arc<std::sync::RwLock<crate::reachability::ReachabilityCache>>,
 }
 
 impl FolderDropTarget {
-    pub fn new(hwnd: HWND, resolver: DropResolver, file_operator: Arc<dyn FileOperator>) -> Self {
+    pub fn new(
+        hwnd: HWND,
+        resolver: DropResolver,
+        file_operator: Arc<dyn FileOperator>,
+        reachability: std::sync::Arc<std::sync::RwLock<crate::reachability::ReachabilityCache>>,
+    ) -> Self {
         FolderDropTarget {
             hwnd,
             resolver,
             current_action: Mutex::new(None),
             session: Mutex::new(None),
             file_operator,
+            reachability,
         }
     }
+}
+
+/// Free function (testable) — `true` iff `action` is a `MoveCopyTo` whose
+/// target's network root is cached as `Unreachable`. Local paths and
+/// `AddFolder` always return false.
+pub(crate) fn target_is_unreachable(
+    cache: &std::sync::Arc<std::sync::RwLock<crate::reachability::ReachabilityCache>>,
+    action: Option<&DropAction>,
+) -> bool {
+    let Some(DropAction::MoveCopyTo { target }) = action else {
+        return false;
+    };
+    let s = target.to_string_lossy();
+    let Some(root) = crate::reachability::classify_root(&s) else {
+        return false;
+    };
+    cache
+        .read()
+        .map(|c| c.get(&root) == crate::reachability::Reachability::Unreachable)
+        .unwrap_or(false)
 }
 
 // ── Shell alias resolution ────────────────────────────────────────────────────
@@ -279,8 +306,16 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         let action = self.resolve_action(pt);
         *self.current_action.lock().unwrap() = action.clone();
 
+        // Reachability gate: if target's network root is Unreachable,
+        // force the effect to None so the cursor shows ⊘.
+        let effective_action = if target_is_unreachable(&self.reachability, action.as_ref()) {
+            None
+        } else {
+            action.clone()
+        };
+
         let effect = drop_effect::effect_for(
-            action.as_ref(),
+            effective_action.as_ref(),
             session.as_ref(),
             keystate_from(grfkeystate),
         );
@@ -301,8 +336,13 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
         *self.current_action.lock().unwrap() = action.clone();
 
         let session = self.session.lock().unwrap().clone();
+        let effective_action = if target_is_unreachable(&self.reachability, action.as_ref()) {
+            None
+        } else {
+            action.clone()
+        };
         let effect = drop_effect::effect_for(
-            action.as_ref(),
+            effective_action.as_ref(),
             session.as_ref(),
             keystate_from(grfkeystate),
         );
@@ -337,6 +377,17 @@ impl IDropTarget_Impl for FolderDropTarget_Impl {
             .resolve_action(pt)
             .or_else(|| self.current_action.lock().unwrap().clone());
         let session = self.session.lock().unwrap().clone();
+
+        // Reachability gate: short-circuit before any IFileOperation call.
+        if target_is_unreachable(&self.reachability, action.as_ref()) {
+            log::info!("drop on unreachable target: {action:?}");
+            if !pdweffect.is_null() {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+            }
+            *self.session.lock().unwrap() = None;
+            *self.current_action.lock().unwrap() = None;
+            return Ok(());
+        }
 
         let result = match action {
             Some(DropAction::MoveCopyTo {
@@ -411,8 +462,9 @@ pub fn register_drop_target(
     hwnd: HWND,
     resolver: DropResolver,
     file_operator: Arc<dyn FileOperator>,
+    reachability: std::sync::Arc<std::sync::RwLock<crate::reachability::ReachabilityCache>>,
 ) -> Result<()> {
-    let target = FolderDropTarget::new(hwnd, resolver, file_operator);
+    let target = FolderDropTarget::new(hwnd, resolver, file_operator, reachability);
     let drop_target: IDropTarget = target.into();
     unsafe { RegisterDragDrop(hwnd, &drop_target) }
 }
@@ -952,6 +1004,57 @@ mod tests {
         let (got_srcs, got_tgt) = op.move_calls.lock().unwrap()[0].clone();
         assert_eq!(got_srcs, srcs);
         assert_eq!(got_tgt, tgt);
+    }
+
+    #[test]
+    fn target_is_unreachable_true_for_unreachable_unc() {
+        use crate::reachability::{Reachability, ReachabilityCache};
+        use std::sync::{Arc, RwLock};
+        let cache = Arc::new(RwLock::new(ReachabilityCache::new()));
+        cache
+            .write()
+            .unwrap()
+            .set("\\\\srv\\share", Reachability::Unreachable);
+        let action = Some(crate::drop_effect::DropAction::MoveCopyTo {
+            target: PathBuf::from("\\\\srv\\share\\foo"),
+        });
+        assert!(super::target_is_unreachable(&cache, action.as_ref()));
+    }
+
+    #[test]
+    fn target_is_unreachable_false_for_reachable_unc() {
+        use crate::reachability::{Reachability, ReachabilityCache};
+        use std::sync::{Arc, RwLock};
+        let cache = Arc::new(RwLock::new(ReachabilityCache::new()));
+        cache
+            .write()
+            .unwrap()
+            .set("\\\\srv\\share", Reachability::Reachable);
+        let action = Some(crate::drop_effect::DropAction::MoveCopyTo {
+            target: PathBuf::from("\\\\srv\\share\\foo"),
+        });
+        assert!(!super::target_is_unreachable(&cache, action.as_ref()));
+    }
+
+    #[test]
+    fn target_is_unreachable_false_for_local_path() {
+        use crate::reachability::ReachabilityCache;
+        use std::sync::{Arc, RwLock};
+        let cache = Arc::new(RwLock::new(ReachabilityCache::new()));
+        let action = Some(crate::drop_effect::DropAction::MoveCopyTo {
+            target: PathBuf::from("C:\\Users\\me\\Documents"),
+        });
+        // Local path → classify_root returns None → not unreachable.
+        assert!(!super::target_is_unreachable(&cache, action.as_ref()));
+    }
+
+    #[test]
+    fn target_is_unreachable_false_for_add_folder_action() {
+        use crate::reachability::ReachabilityCache;
+        use std::sync::{Arc, RwLock};
+        let cache = Arc::new(RwLock::new(ReachabilityCache::new()));
+        let action = Some(crate::drop_effect::DropAction::AddFolder);
+        assert!(!super::target_is_unreachable(&cache, action.as_ref()));
     }
 
     #[test]

@@ -53,6 +53,8 @@ exbar/
 │       │   ├── recent_tracker.rs       # Pure dwell+action state machine for Recent Folders
 │       │   ├── recent_store.rs         # RecentStore trait + JsonRecentStore → ~/.exbar/recents.json
 │       │   ├── clock.rs                # Clock trait + SystemClock + MockClock (time-source seam)
+│       │   ├── reachability.rs         # Pure ReachabilityCache + classify_root for network paths
+│       │   ├── reachability_probe.rs   # ReachabilityProbe trait + Win32Probe (GetFileAttributesW + 3s timeout)
 │       │   └── bin/uia_spike.rs        # Diagnostic: dump UIA tree of a live file dialog (kept for future selector changes)
 │       ├── tests/                      # integration tests
 │       └── wix/
@@ -146,8 +148,9 @@ All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` 
 | `subfolder_enum::SubfolderSource` | `Win32SubfolderSource` | Directory enumeration + ▸ has-children probe for submenus |
 | `recent_store::RecentStore` | `JsonRecentStore` | `~/.exbar/recents.json` load/save/delete for Recent Folders |
 | `clock::Clock` | `SystemClock` | Time source for dwell timestamps + debounced writes |
+| `reachability_probe::ReachabilityProbe` | `Win32Probe` | Network reachability probe with 3 s wall-clock budget |
 
-Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView`, `MockSubfolderSource`, `MockRecentStore`, `MockClock` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
+Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView`, `MockSubfolderSource`, `MockRecentStore`, `MockClock`, `MockProbe` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
 
 ### Error handling (SP5)
 
@@ -191,11 +194,33 @@ Opt-in tracking of folders where the user spends time or acts.
 - **LRU semantics** — `recent_list::push` dedupes case-insensitively (normalized via `path_norm::normalize`), trims to `maxCount`. `for_display` filters pinned folders at render time when `includePinned == false`. `excludedPaths` is a prefix match with `\` boundary.
 - **UI** — Recent button renders `🕘 Recent` (fixed label); its root submenu uses `build_recent_display_list` (no parent-reshow, no `..`, empty state shows `(no recent folders yet)`). Hovering a recent folder opens level 2 as a normal subfolder chain with `..` enabled from there down. Right-click the 🕘 button → `Remove` (same effect as Disable).
 
+### Foreground watchdog
+
+Periodic safety net for cases where a spurious Explorer foreground event leaves the toolbar visible over an unrelated foreground app. Pure-controller + Win32 adapter, like the other interaction subsystems.
+
+- **Pure decision core** — `visibility::watchdog_should_hide(fg_is_ours, fg_class, fg_root_is_active) -> bool`. Returns `true` when none of: foreground is our process, class is `CabinetWClass`, or `GetAncestor(fg, GA_ROOT)` matches the active target. Fully unit-testable.
+- **Win32 adapter** — `visibility::watchdog_tick(hwnd)` reads the actual foreground, classifies it, calls the core, and `ShowWindow(SW_HIDE)`s on `true`. When `Config.watchdog_reshow == true`, it also re-shows the toolbar if it was hidden while the active target is foreground.
+- **Timer** — `TIMER_FOREGROUND_WATCHDOG = 8`, armed once at toolbar creation when `Config.foreground_watchdog_ms != 0`. Default 2 s, clamp 500..=60000. Changing the config value requires a hook restart; `WM_USER_RELOAD` does not re-arm.
+- **Reposition-window skip** — the watchdog short-circuits while `state.reposition_pending` is set so it does not interfere with the dialog/Explorer reshow path. The timer handler clears `reposition_pending` unconditionally on fire to avoid sticky state.
+- **Why this exists** — Win11 sporadically posts `EVENT_SYSTEM_FOREGROUND` for a CabinetWClass even when the user has already alt-tabbed away; the toolbar's normal foreground-driven hide path never runs because no further event arrives. The watchdog catches that mismatch within one tick.
+
+### Network folder reachability
+
+Mapped-drive (`Z:\…`) and UNC (`\\server\share\…`) folder buttons may point at shares that are unreachable. To avoid blocking the UI thread on the standard SMB timeout (~30 s), reachability is determined lazily on a worker thread and cached for the session.
+
+- **Pure cache** — `reachability::ReachabilityCache` keyed by network root (`Z:` or `\\server\share`); `classify_root` separates network paths from local. Local paths and shell aliases never touch the cache. Mapped drives are detected via `GetDriveTypeW == DRIVE_REMOTE` (cheap, no network IO).
+- **Worker thread** — one persistent thread spawned in `WM_CREATE`, consumes `mpsc::Receiver<String>` (root), invokes `ReachabilityProbe`, writes result to `Arc<RwLock<ReachabilityCache>>`, posts `WM_USER_REACHABILITY_UPDATED` to trigger a repaint. Worker exits when the channel sender drops on toolbar destroy.
+- **Probe primitive** — `Win32Probe` spawns a fresh helper thread per request, calls `GetFileAttributesW` on the root with trailing `\`, joins via `mpsc::recv_timeout(3 s)`. Late helpers complete in background and discard their result.
+- **Startup probe** — `request_probes_for_current_folders` walks `config.folders`, classifies each root, and for each distinct network root not yet in the cache fires a probe. Re-run on every `WM_USER_RELOAD` (drops cache entries for removed folders, fires probes for newly-added). Also called after `actions::append_folder_and_reload` so a drag-add of a network folder probes immediately.
+- **UI integration** — paint, click, drop-target hover, drop fire, and submenu spring-open all consult the cache. `Unreachable` → text greyed (mid-grey on both themes), no hover highlight, click no-op, drop effect overridden to `DROPEFFECT_NONE` (cursor shows ⊘), submenu open suppressed (read_dir would hang).
+- **Recovery** — `Unreachable` buttons get a "Retry connection" right-click context-menu entry and have Open / Open-in-new-tab greyed (`MF_GRAYED`). Retry calls `request_probe(root)` to re-run the probe.
+- **Limitations** — mid-session disconnect of a previously-`Reachable` share will hang once on the next click before the user can retry; Recent submenu items are not reachability-greyed in v1; the brief Unknown window between toolbar create and probe completion (≤3 s) treats network roots as Reachable.
+
 ### Context menus and inline rename
 
 - The `+` button (first slot) has three interactions:
   - **Left-click** → `picker.rs` opens `IFileOpenDialog` with `FOS_PICKFOLDERS`, starting at `%SystemDrive%\`; selected folder appended via `Config::add_folder` + `save()`
-  - **Right-click** → `Edit config` (ShellExecute opens `~/.exbar/config.json` in default handler) / `Reload config` (posts `WM_USER_RELOAD`)
+  - **Right-click** → `Edit config` (ShellExecute opens `~/.exbar/config.json` in default handler) / `Reload config` (posts `WM_USER_RELOAD`) / `Show icons` (flip-label, toggles `Config.show_icons` via `actions::toggle_icons_in_state` — hides the `📁`/`🕘` button-label emoji for a denser toolbar) / `Enable`/`Disable Recent Folders`
   - **Drop a single directory** → same path as click-picker result
 - Folder buttons:
   - **Left-click** → navigate active Explorer via `IShellBrowser::BrowseObject`

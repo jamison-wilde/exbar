@@ -92,6 +92,7 @@ fn register_drop_targets(hwnd: HWND, state: &mut ToolbarState) {
         hwnd,
         Box::new(resolver),
         std::sync::Arc::clone(&state.file_operator),
+        std::sync::Arc::clone(&state.reachability),
     ) {
         Ok(()) => {
             state.drop_registered = true;
@@ -248,6 +249,10 @@ pub fn refresh_toolbar(hwnd: HWND) {
         ));
         let _ = InvalidateRect(Some(hwnd), None, true);
     }
+
+    // Re-probe network roots: drop entries for removed folders, fire probes
+    // for newly-added network roots not yet in the cache.
+    state.request_probes_for_current_folders();
 }
 
 /// Apply `apply_opacity` and `register_drop_targets` to the toolbar window.

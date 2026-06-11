@@ -98,6 +98,10 @@ pub(crate) const TIMER_HOVER_OPEN: usize = 6;
 /// ~150 ms while the cursor rests in a scrollable band (top or bottom buffer
 /// of a popup with off-screen items).
 pub(crate) const TIMER_SUBMENU_AUTOSCROLL: usize = 7;
+/// Timer ID for the periodic foreground watchdog. Armed once in WM_CREATE
+/// when `foreground_watchdog_ms > 0`; hides a toolbar left visible over a
+/// foreign app (and optionally re-shows it). Fires every `foreground_watchdog_ms`.
+pub(crate) const TIMER_FOREGROUND_WATCHDOG: usize = 8;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -146,6 +150,11 @@ pub(crate) struct ToolbarState {
     /// MOVESIZESTART and MOVESIZEEND). Used to suppress CAPTUREEND
     /// repositioning during drag — MOVESIZEEND handles that instead.
     pub(crate) explorer_moving: bool,
+    /// True between scheduling a deferred reposition (TIMER_REPOSITION, on
+    /// Explorer maximize/restore/snap) and that timer firing. The foreground
+    /// watchdog skips while set so its opt-in re-show can't flash the toolbar
+    /// at a half-settled position mid-animation.
+    pub(crate) reposition_pending: bool,
     /// Count of shell popup windows currently visible (e.g. Win11 context
     /// menus, class "Microsoft.UI.Content.PopupWindowSiteBridge"). While > 0
     /// the toolbar drops from HWND_TOPMOST to HWND_NOTOPMOST so the popups
@@ -196,6 +205,15 @@ pub(crate) struct ToolbarState {
     pub(crate) autoscroll_popup: Option<HWND>,
     /// Auto-scroll direction: -1 = scroll up (decrease offset), +1 = scroll down. 0 = inactive.
     pub(crate) autoscroll_dir: i32,
+    // Reachability subsystem (Plan: network-folder-reachability):
+    /// Shared cache of per-root reachability state. Read by wndproc on
+    /// every paint/click/drop; written by the worker thread.
+    pub(crate) reachability:
+        std::sync::Arc<std::sync::RwLock<crate::reachability::ReachabilityCache>>,
+    /// Sender end of the probe-request channel. The worker thread holds
+    /// the receiver; dropping the sender on `WM_DESTROY` causes the worker
+    /// to exit cleanly. `None` in test states (no worker spawned).
+    pub(crate) probe_tx: Option<std::sync::mpsc::Sender<String>>,
 }
 
 impl ToolbarState {
@@ -253,6 +271,7 @@ impl ToolbarState {
             active_target: None,
             last_explorer_origin: None,
             explorer_moving: false,
+            reposition_pending: false,
             popup_open_count: 0,
             rename_state: None,
             submenu_chain: crate::submenu::SubmenuChain::default(),
@@ -281,6 +300,107 @@ impl ToolbarState {
             hover_open_pending_button: None,
             autoscroll_popup: None,
             autoscroll_dir: 0,
+            reachability: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::reachability::ReachabilityCache::new(),
+            )),
+            probe_tx: None,
+        }
+    }
+}
+
+// ── Reachability adapter methods ─────────────────────────────────────────────
+
+impl ToolbarState {
+    /// Spawn the reachability worker thread. Idempotent: returns immediately
+    /// if `probe_tx` is already populated. Called from `WM_CREATE`.
+    ///
+    /// `toolbar_hwnd` is captured by the worker so it can `PostMessageW`
+    /// `WM_USER_REACHABILITY_UPDATED` after each probe completes.
+    pub(crate) fn spawn_reachability_worker(
+        &mut self,
+        toolbar_hwnd: HWND,
+        probe: std::sync::Arc<dyn crate::reachability_probe::ReachabilityProbe>,
+    ) {
+        if self.probe_tx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let cache = std::sync::Arc::clone(&self.reachability);
+        // HWND is `Send`-unsafe; pass as raw isize and reconstruct in worker.
+        let hwnd_raw = toolbar_hwnd.0 as isize;
+        let _ = std::thread::Builder::new()
+            .name("exbar-reachability".into())
+            .spawn(move || {
+                while let Ok(root) = rx.recv() {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        probe.probe(&root)
+                    }))
+                    .unwrap_or(false);
+                    let r = if result {
+                        crate::reachability::Reachability::Reachable
+                    } else {
+                        crate::reachability::Reachability::Unreachable
+                    };
+                    if let Ok(mut c) = cache.write() {
+                        c.set(&root, r);
+                    }
+                    // PostMessage is thread-safe; HWND validity is the wndproc
+                    // thread's responsibility (we exit via channel disconnect
+                    // before the toolbar is destroyed).
+                    let hwnd = HWND(hwnd_raw as *mut _);
+                    unsafe {
+                        let _ = PostMessageW(
+                            Some(hwnd),
+                            crate::wndproc::WM_USER_REACHABILITY_UPDATED,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    }
+                }
+            });
+        self.probe_tx = Some(tx);
+    }
+
+    /// Mark `root` as `Probing` and send a probe request to the worker.
+    /// No-op if the worker isn't spawned (test states).
+    pub(crate) fn request_probe(&self, root: &str) {
+        if let Ok(mut c) = self.reachability.write() {
+            c.set(root, crate::reachability::Reachability::Probing);
+        }
+        if let Some(tx) = self.probe_tx.as_ref() {
+            let _ = tx.send(root.to_owned());
+        }
+    }
+
+    /// Walk current `config.folders`, classify each path's network root,
+    /// drop unreferenced cache entries, and fire a probe for any root that
+    /// `needs_probe`. Idempotent — safe to call on every reload.
+    pub(crate) fn request_probes_for_current_folders(&self) {
+        let Some(cfg) = self.config.as_ref() else {
+            return;
+        };
+        let mut roots: Vec<String> = Vec::new();
+        for f in &cfg.folders {
+            if let Some(r) = crate::reachability::classify_root(&f.path)
+                && !roots.contains(&r)
+            {
+                roots.push(r);
+            }
+        }
+        // Drop entries no longer referenced.
+        if let Ok(mut c) = self.reachability.write() {
+            c.drop_unreferenced(&roots);
+        }
+        // Fire probes for any root that's currently Unknown (i.e. no entry).
+        for r in &roots {
+            let needs = self
+                .reachability
+                .read()
+                .map(|c| c.needs_probe(r))
+                .unwrap_or(false);
+            if needs {
+                self.request_probe(r);
+            }
         }
     }
 }
@@ -366,6 +486,20 @@ impl ToolbarState {
                         hwnd,
                         crate::recent_tracker::TrackerEvent::SelfInitiated,
                     );
+                    // Reachability gate: skip navigation entirely if the
+                    // folder's network root is currently Unreachable.
+                    let path_str = path.to_string_lossy();
+                    if let Some(root) = crate::reachability::classify_root(&path_str) {
+                        let r = self
+                            .reachability
+                            .read()
+                            .map(|c| c.get(&root))
+                            .unwrap_or(crate::reachability::Reachability::Unknown);
+                        if r == crate::reachability::Reachability::Unreachable {
+                            log::info!("click on unreachable folder: {path_str}");
+                            return;
+                        }
+                    }
                     if ctrl {
                         match self.active_target.map(|t| t.kind) {
                             Some(crate::target::TargetKind::FileDialog) => {
@@ -675,9 +809,18 @@ impl ToolbarState {
         use crate::target::TargetKind;
         let path = std::path::Path::new(path);
         match (self.active_target.map(|t| t.kind), ctrl) {
-            (Some(TargetKind::FileDialog), _) => {
-                // Dialogs have no tabs; always open a new Explorer window.
+            (Some(TargetKind::FileDialog), true) => {
+                // Dialogs have no tabs; ctrl degrades to a new Explorer window.
                 self.shell_browser.open_in_new_window(path);
+            }
+            (Some(TargetKind::FileDialog), false) => {
+                // Plain click: drive the dialog's folder via Ctrl+L injection,
+                // matching the top-level folder-button click behaviour.
+                if let Some(target) = self.active_target
+                    && let Err(e) = self.dialog_nav.navigate(target.hwnd, path)
+                {
+                    log::warn!("dialog navigate failed: {e:?}");
+                }
             }
             (Some(TargetKind::Explorer), true) => {
                 let active_hwnd = self.active_target.map(|t| t.hwnd).unwrap_or_default();
@@ -706,10 +849,47 @@ impl ToolbarState {
         toolbar: HWND,
         ev: crate::submenu::SubmenuEvent,
     ) {
+        // Reachability gate: suppress root-popup opens on Unreachable network
+        // folders so we never trigger the read_dir hang on a disconnected share.
+        if let crate::submenu::SubmenuEvent::OpenRoot { ref path, .. } = ev {
+            let path_str = path.to_string_lossy();
+            if let Some(root) = crate::reachability::classify_root(&path_str) {
+                let r = self
+                    .reachability
+                    .read()
+                    .map(|c| c.get(&root))
+                    .unwrap_or(crate::reachability::Reachability::Unknown);
+                if r == crate::reachability::Reachability::Unreachable {
+                    log::info!("submenu open suppressed (unreachable): {path_str}");
+                    return;
+                }
+            }
+        }
         let cmds = crate::submenu::transition(&mut self.submenu_chain, ev);
         for cmd in cmds {
             self.dispatch_submenu_command(toolbar, cmd);
         }
+    }
+
+    /// True iff the folder button at `folder_button_index` (folder-space, not
+    /// button-space) points at a network root currently `Unreachable`. Used by
+    /// the right-click context menu (to disable Open / show Retry).
+    /// (Paint reads the cache directly via `classify_root` instead of calling
+    /// this — the indirection isn't worth the extra method call there.)
+    pub(crate) fn folder_is_unreachable(&self, folder_button_index: usize) -> bool {
+        let Some(cfg) = self.config.as_ref() else {
+            return false;
+        };
+        let Some(entry) = cfg.folders.get(folder_button_index) else {
+            return false;
+        };
+        let Some(root) = crate::reachability::classify_root(&entry.path) else {
+            return false;
+        };
+        self.reachability
+            .read()
+            .map(|c| c.get(&root) == crate::reachability::Reachability::Unreachable)
+            .unwrap_or(false)
     }
 
     fn dispatch_submenu_command(&mut self, toolbar: HWND, cmd: crate::submenu::SubmenuCommand) {
@@ -1262,6 +1442,97 @@ mod tests {
     // ── Tests ────────────────────────────────────────────────────────────
 
     #[test]
+    fn folder_is_unreachable_true_for_unreachable_unc_button() {
+        use crate::reachability::Reachability;
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("UNC", "\\\\srv\\share\\foo")]);
+        let state = make_test_state(&deps, Some(cfg));
+        state
+            .reachability
+            .write()
+            .unwrap()
+            .set("\\\\srv\\share", Reachability::Unreachable);
+
+        assert!(state.folder_is_unreachable(0));
+    }
+
+    #[test]
+    fn folder_is_unreachable_false_for_reachable_unc_button() {
+        use crate::reachability::Reachability;
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("UNC", "\\\\srv\\share\\foo")]);
+        let state = make_test_state(&deps, Some(cfg));
+        state
+            .reachability
+            .write()
+            .unwrap()
+            .set("\\\\srv\\share", Reachability::Reachable);
+
+        assert!(!state.folder_is_unreachable(0));
+    }
+
+    #[test]
+    fn folder_is_unreachable_false_for_local_path() {
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("Local", "C:\\Users\\me")]);
+        let state = make_test_state(&deps, Some(cfg));
+        // Local paths classify_root → None → never unreachable.
+        assert!(!state.folder_is_unreachable(0));
+    }
+
+    #[test]
+    fn fire_folder_click_on_unreachable_does_not_navigate() {
+        use crate::reachability::Reachability;
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[("UNC", "\\\\srv\\share\\foo")]);
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.active_target = Some(crate::target::ActiveTarget::explorer(HWND(42 as *mut _)));
+        state.buttons = vec![
+            mk_add_button(),
+            mk_folder_button("UNC", "\\\\srv\\share\\foo", 42),
+        ];
+        // Pre-seed cache as Unreachable for the network root.
+        state
+            .reachability
+            .write()
+            .unwrap()
+            .set("\\\\srv\\share", Reachability::Unreachable);
+
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireFolderClick {
+                folder_button: 0,
+                ctrl: false,
+            },
+        );
+
+        // navigate should NOT have been called.
+        assert_eq!(deps.navigate_calls.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn request_probes_marks_unc_root_probing_and_skips_local() {
+        // Non-UNC paths classify_root → None and are never added to the cache.
+        // UNC paths classify deterministically (no host-state dependency on
+        // GetDriveTypeW), so we only assert about the UNC root here.
+        use crate::reachability::Reachability;
+        let deps = mk_deps();
+        let cfg = mk_config_with_folders(&[
+            ("UNC1", "\\\\srv\\share\\foo"),
+            ("UNC2", "\\\\srv\\share\\other"), // same root → still 1 probe
+            ("Local", "C:\\Users\\me"),
+        ]);
+        let state = make_test_state(&deps, Some(cfg));
+
+        state.request_probes_for_current_folders();
+
+        let cache = state.reachability.read().unwrap();
+        assert_eq!(cache.get("\\\\srv\\share"), Reachability::Probing);
+        // Local path was never classified as a network root → not in cache.
+        assert_eq!(cache.get("C:"), Reachability::Unknown);
+    }
+
+    #[test]
     fn fire_folder_click_without_ctrl_calls_navigate_with_folder_path() {
         let deps = mk_deps();
         let cfg = mk_config_with_folders(&[("Downloads", "C:\\Downloads")]);
@@ -1332,6 +1603,40 @@ mod tests {
         assert_eq!(calls[0], PathBuf::from("C:\\D"));
         assert!(deps.new_tab_calls.lock().unwrap().is_empty());
         assert!(deps.navigate_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn submenu_click_in_dialog_mode_navigates_dialog_not_new_window() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+        state.active_target = Some(ActiveTarget::file_dialog(HWND(99 as *mut _)));
+
+        // Plain (non-ctrl) submenu click should set the dialog's folder.
+        state.navigate_or_new_window_or_tab("C:\\Sub\\Folder", false);
+
+        let dlg_calls = deps.dialog_nav.calls.borrow();
+        assert_eq!(dlg_calls.len(), 1, "dialog_nav should be called once");
+        assert_eq!(dlg_calls[0].0, 99, "dialog_nav gets the file-dialog HWND");
+        assert_eq!(dlg_calls[0].1, PathBuf::from("C:\\Sub\\Folder"));
+        assert!(
+            deps.new_window_calls.lock().unwrap().is_empty(),
+            "must NOT open a new Explorer window for a plain dialog click"
+        );
+    }
+
+    #[test]
+    fn ctrl_submenu_click_in_dialog_mode_opens_new_window() {
+        let deps = mk_deps();
+        let mut state = make_test_state(&deps, None);
+        state.active_target = Some(ActiveTarget::file_dialog(HWND(99 as *mut _)));
+
+        // Ctrl submenu click: dialogs have no tabs → degrade to a new window.
+        state.navigate_or_new_window_or_tab("C:\\Sub\\Folder", true);
+
+        let calls = deps.new_window_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], PathBuf::from("C:\\Sub\\Folder"));
+        assert!(deps.dialog_nav.calls.borrow().is_empty());
     }
 
     #[test]

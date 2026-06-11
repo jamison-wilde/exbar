@@ -45,8 +45,10 @@ use std::time::{Duration, Instant};
 /// Production `SubfolderSource` that reads the real filesystem via
 /// `std::fs::read_dir` (which internally uses `FindFirstFileW` on Windows).
 ///
-/// Hidden directories (name starting with `.`) are excluded.
-/// System / reparse points (junctions, symlinks) are included.
+/// All subdirectories are listed, including dot-prefixed ones (`.config`,
+/// `.ssh`) — on Windows a leading `.` is a Unix naming convention, not the
+/// `FILE_ATTRIBUTE_HIDDEN` flag. System / reparse points (junctions,
+/// symlinks) are included.
 #[derive(Default)]
 pub struct Win32SubfolderSource;
 
@@ -74,9 +76,6 @@ impl SubfolderSource for Win32SubfolderSource {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                continue;
-            }
             dirs.push((name, entry.path()));
         }
         dirs.sort_by_key(|a| a.0.to_lowercase());
@@ -125,10 +124,7 @@ fn probe_has_child_dir(dir: &Path) -> bool {
         if let Ok(ft) = entry.file_type()
             && ft.is_dir()
         {
-            let n = entry.file_name().to_string_lossy().to_string();
-            if !n.starts_with('.') {
-                return true;
-            }
+            return true;
         }
     }
     false
@@ -205,15 +201,29 @@ mod tests {
     }
 
     #[test]
-    fn hidden_dirs_excluded() {
+    fn dot_dirs_included() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir(tmp.path().join("visible")).unwrap();
-        fs::create_dir(tmp.path().join(".hidden")).unwrap();
+        fs::create_dir(tmp.path().join(".config")).unwrap();
 
         let src = Win32SubfolderSource;
         let items = src.list(tmp.path(), 200).unwrap();
         let names: Vec<&str> = items.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["visible"]);
+        // Dot-prefixed dirs are a Unix convention, not a Windows HIDDEN flag;
+        // sorted case-insensitively, '.config' sorts before 'visible'.
+        assert_eq!(names, vec![".config", "visible"]);
+    }
+
+    #[test]
+    fn has_children_detects_nested_dot_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("parent")).unwrap();
+        fs::create_dir(tmp.path().join("parent").join(".child")).unwrap();
+
+        let src = Win32SubfolderSource;
+        let items = src.list(tmp.path(), 200).unwrap();
+        let parent = items.iter().find(|e| e.name == "parent").unwrap();
+        assert!(parent.has_children);
     }
 
     #[test]
