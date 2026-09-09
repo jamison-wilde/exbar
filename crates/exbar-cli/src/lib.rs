@@ -84,6 +84,7 @@
 //! in `CLAUDE.md`.
 
 pub mod actions;
+pub mod bootstrap;
 pub mod clipboard;
 pub mod clock;
 pub mod config;
@@ -93,6 +94,7 @@ pub mod dragdrop;
 pub mod drop_effect;
 pub mod error;
 pub mod explorer;
+pub mod fg_debounce;
 pub mod hit_test;
 pub mod layout;
 pub mod lifecycle;

@@ -77,6 +77,7 @@ Edit `~\.exbar\config.json` (in your user home folder):
   "showIcons": true, // false hides the 📁/🕘 emoji on toolbar buttons (toggle via + right-click)
   "foregroundWatchdogMs": 2000, // periodic safety-net that hides a toolbar left over a foreign app; 0 disables
   "watchdogReshow": false,      // also let the watchdog re-show the toolbar when active target is foreground
+  "foregroundDebounceMs": 300,  // ride out Explorer foreground-event storms instead of flashing along; 0 disables
   "submenu": {
     "springOpenDelayMs": 500,   // long-press threshold to open a subfolder submenu
     "longHoverOpenMs": 1200,    // cursor-rest threshold to open without pressing
@@ -103,6 +104,7 @@ Edit `~\.exbar\config.json` (in your user home folder):
 - `showIcons` — `true` (default) shows the `📁`/`🕘` emoji prefix on folder buttons; `false` drops it for a narrower toolbar. Toggle via the `+` button's right-click menu (`Show icons` / `Hide icons`).
 - `foregroundWatchdogMs` — interval (ms) for the foreground watchdog that hides a toolbar left visible over a foreign app after a spurious Explorer foreground event. Default 2000. Clamped to 500..=60000; `0` disables. Applied at toolbar creation — changing it takes effect on next hook restart.
 - `watchdogReshow` — when `true`, the watchdog also re-shows the toolbar if it was hidden while the active Explorer/dialog target is foreground. Default `false` (hide-only).
+- `foregroundDebounceMs` — window (ms) for detecting foreground-event storms. Explorer under stress (deleting thousands of files, for instance) fires bursts of activation events and visibly flickers; without this the toolbar flickers with it. Two visibility-affecting events closer together than this hide the toolbar until the burst stops, then a single re-check decides the final state. A lone window switch is never delayed. Default 300. Clamped to 100..=2000; `0` disables. Takes effect on `Reload config` — no restart needed.
 - `submenu.*` — spring-open submenu tuning. Omit the block for defaults.
 - `recent.*` — Recent Folders tracking (opt-in). Enable via the `+` right-click menu; `recent.excludedPaths` is a prefix match on folder paths (any descendant is also excluded). `recents.json` lives under `~/.exbar/` and is deleted when Recent is disabled.
 

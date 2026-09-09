@@ -55,6 +55,8 @@ exbar/
 │       │   ├── clock.rs                # Clock trait + SystemClock + MockClock (time-source seam)
 │       │   ├── reachability.rs         # Pure ReachabilityCache + classify_root for network paths
 │       │   ├── reachability_probe.rs   # ReachabilityProbe trait + Win32Probe (GetFileAttributesW + 3s timeout)
+│       │   ├── bootstrap.rs           # Bounded retry for deferred toolbar creation (cold Explorer)
+│       │   ├── fg_debounce.rs         # Pure foreground-storm debounce + settled-target classifier
 │       │   └── bin/uia_spike.rs        # Diagnostic: dump UIA tree of a live file dialog (kept for future selector changes)
 │       ├── tests/                      # integration tests
 │       └── wix/
@@ -126,6 +128,8 @@ Pointer and rename interactions are split into pure state-machine modules and th
 - `rename.rs` — `RenameState`, `RenameEvent`, `RenameAction`, `transition(...)`. No Win32.
 - `submenu.rs` — `SubmenuChain`, `SubmenuEvent`, `SubmenuCommand`, `transition(...)`. No Win32.
 - `recent_tracker.rs` — `TrackerState`, `TrackerEvent`, `TrackerCommand`, `transition(...)`. No Win32.
+- `fg_debounce.rs` — `DebounceState::on_event`, `settle_outcome`. No Win32.
+- `bootstrap.rs` — `next_action`, `should_abandon` (pure policy) + a thread-timer adapter.
 - `recent_list.rs` — `push`, `for_display` — LRU mutations, no time/IO; adapter supplies `now_unix_ms` via `Clock` trait.
 - `path_norm.rs` — Windows path normalization + prefix-exclusion match (no IO).
 - `toolbar.rs::execute_pointer_command` / `execute_rename_event` / `execute_submenu_event` / `execute_tracker_event` — the adapters. Translate `WM_*` messages or foreground events to events, call `transition`, dispatch returned commands against Win32 + trait seams.
@@ -204,6 +208,16 @@ Periodic safety net for cases where a spurious Explorer foreground event leaves 
 - **Reposition-window skip** — the watchdog short-circuits while `state.reposition_pending` is set so it does not interfere with the dialog/Explorer reshow path. The timer handler clears `reposition_pending` unconditionally on fire to avoid sticky state.
 - **Why this exists** — Win11 sporadically posts `EVENT_SYSTEM_FOREGROUND` for a CabinetWClass even when the user has already alt-tabbed away; the toolbar's normal foreground-driven hide path never runs because no further event arrives. The watchdog catches that mismatch within one tick.
 
+### Foreground-storm debounce
+
+Explorer under stress — a recursive delete of thousands of files is the reproducer — emits bursts of `EVENT_SYSTEM_FOREGROUND` cycling through transient windows (`ForegroundStaging`, `Static`, a `CabinetWClass` that isn't really in front, sometimes a null foreground). Handling each on arrival made the toolbar flash in lockstep with Explorer.
+
+- **Pure core** — `fg_debounce.rs`: `DebounceState::on_event(now_ms, debounce_ms) -> EventDecision` (`ApplyNow` | `SuppressAndSettle`), plus `settle_outcome(fg_class, fg_is_ours, fg_root_is_active) -> SettleOutcome` and `is_usable_target_class`. No Win32.
+- **Policy** — a *lone* activation always applies immediately, so ordinary window switching gains no latency. Two visibility-affecting events inside `foregroundDebounceMs` flip to suppressing: hide the toolbar and arm `TIMER_FG_SETTLE`. Every further event re-arms it, so the toolbar stays hidden for the whole storm.
+- **Settle** — on timer fire, `visibility::settle_foreground` reads the real foreground *once*, re-targets `active_target` if the storm ended on a different Explorer window or a file dialog (the defview probe runs here, once per storm, never per event), then commits to a single show/hide. The desktop (`Progman`/`WorkerW`) and the transient churn classes are explicitly not usable targets.
+- **Interaction guards** — the debounce is skipped entirely for our own process's foreground events and while a popup menu, submenu chain, or inline rename is active; the watchdog in turn skips while `fg_debounce.is_settling()`, so the two never fight.
+- **Escape hatch** — `foregroundDebounceMs: 0` disables suppression completely and is read live, so `Reload config` toggles it without a hook restart.
+
 ### Network folder reachability
 
 Mapped-drive (`Z:\…`) and UNC (`\\server\share\…`) folder buttons may point at shares that are unreachable. To avoid blocking the UI thread on the standard SMB timeout (~30 s), reachability is determined lazily on a worker thread and cached for the session.
@@ -250,6 +264,7 @@ Mapped-drive (`Z:\…`) and UNC (`\\server\share\…`) folder buttons may point 
 - **Win11 new-tab detection**: `IShellWindows` entries for tabs in the same window share the same HWND. Detect a new tab by `IShellWindows.Count()` increase, not by new-HWND appearance. The new tab is the last entry in enumeration. `open_in_new_tab` uses `SendInput` (hardware-level Ctrl+T injection) rather than `PostMessageW` because PostMessage doesn't reach Explorer after a right-click context menu steals focus.
 - **`OleInitialize` required**: `RegisterDragDrop` requires `OleInitialize`, not just `CoInitializeEx(COINIT_APARTMENTTHREADED)`. Without it, drop target registration silently fails.
 - **Foreground hook must be installed before the first toolbar exists**: `install_foreground_hook()` is called from `run_hook()` (not from toolbar `WM_CREATE`) because the hook is what creates the toolbar on the first `CabinetWClass` foreground event. Chicken-and-egg if reversed. However, `run_hook` also checks if Explorer is already foreground and creates the toolbar immediately (handles post-MSI-install case).
+- **A cold Explorer isn't ready when its foreground event fires**: `explorer::check_explorer_ready` gates creation on the `Microsoft.UI.Content.DesktopChildSiteBridge` child, which does not exist yet on the first Explorer launch after login. Both creation call sites (`visibility::handle_explorer_foreground` and `run_hook`'s startup check) hand a failed probe to `bootstrap::schedule_retry` instead of giving up — 250 ms re-probes, 40-attempt budget, abandoned early only if a toolbar appears or the Explorer window dies. Note the split between `should_abandon` (terminal conditions) and `ready_to_create` (per-probe gate): the foreground momentarily not being Explorer must NOT end the attempt, because a cold Explorer launch flickers focus while it starts — observed live, mid-probe, on exactly the launch this exists to rescue. Focus only gates creation, so a blip costs one probe instead of the toolbar. The retry timer is a **thread** timer (`SetTimer` with a null HWND plus a `TIMERPROC`, dispatched by the existing `DispatchMessageW` pump) precisely because no toolbar window exists yet to own a normal timer. Without this the toolbar was missing until a later foreground event caught Explorer warm — which is why minimize/restore "fixed" it.
 - **Why Ctrl+L for file-dialog navigation, not UIA**: the 2026-04-16 UIA spike found that the Common Item Dialog's breadcrumb is NOT a `ControlType.Edit` in the static UIA tree — it's a `Pane`/`Toolbar` composite with `Button` children that only becomes editable on click. The filename Edit (`AutomationId=1001`) does accept `SetValue` but clobbers user-typed filenames on Save As (hostile UX). Ctrl+L is the OS-level Shell shortcut that focuses the breadcrumb in edit mode directly — no selector required, no filename clobber. Full spike trace in `docs/superpowers/spikes/2026-04-16-uia-spike-results.md`. The `crates/exbar-cli/src/bin/uia_spike.rs` binary is retained for future diagnostic use.
 - **Foreground set before keyboard injection**: `SendInput` targets whichever window has the foreground at the moment of injection. `KeybdDialogNavigator::navigate` calls `SetForegroundWindow(dialog_hwnd)` + 50 ms sleep before injecting Ctrl+L, the Unicode path, and Enter. Without the focus step, keystrokes can land in the wrong window during rapid clicks. Same pattern as the Ctrl+T injection in `shell_windows::open_in_new_tab`.
 - **Position schema backward-compat**: `~/.exbar/position.json` migrated from flat `{offset_x, offset_y}` to `{"explorer": ..., "file_dialog": ...}` in v1.1. `PositionStore::from_json_str` accepts both via a serde `untagged` enum — old flat shape loads as the `explorer` offset and copies the same value to `file_dialog` (better UX than defaulting dialog offset to zero).

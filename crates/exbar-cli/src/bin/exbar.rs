@@ -238,12 +238,21 @@ fn run_hook() -> ExbarResult<()> {
         use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
         let fg = unsafe { GetForegroundWindow() };
         let class = exbar_cli::explorer::get_class_name(fg);
-        if class == "CabinetWClass"
-            && let Some(info) = exbar_cli::explorer::check_explorer_ready(fg)
-        {
-            let hinst = exbar_cli::lifecycle::exe_hinstance();
-            let _ =
-                exbar_cli::lifecycle::create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
+        if class == "CabinetWClass" {
+            // Same cold-Explorer race as the foreground handler, and more
+            // likely here: at login the Run key starts us while Explorer is
+            // still building its XAML bridge.
+            match exbar_cli::explorer::check_explorer_ready(fg) {
+                Some(info) => {
+                    let hinst = exbar_cli::lifecycle::exe_hinstance();
+                    let _ = exbar_cli::lifecycle::create_toolbar(
+                        info.cabinet_hwnd,
+                        &info.default_pos,
+                        hinst,
+                    );
+                }
+                None => exbar_cli::bootstrap::schedule_retry(fg),
+            }
         }
     }
 

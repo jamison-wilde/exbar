@@ -139,6 +139,21 @@ where
     Ok(if v == 0 { 0 } else { v.clamp(500, 60_000) })
 }
 
+pub(crate) fn default_foreground_debounce_ms() -> u32 {
+    300
+}
+
+/// Clamp the foreground debounce window. `0` passes through (disables
+/// debouncing); any positive value is clamped into 100 ms..=2 s. Above that
+/// the settle delay would be perceptible on an ordinary window switch.
+fn deserialize_foreground_debounce_ms<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = u32::deserialize(d)?;
+    Ok(if v == 0 { 0 } else { v.clamp(100, 2_000) })
+}
+
 /// Recent Folders tracking config. All fields optional with sensible defaults.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RecentConfig {
@@ -269,6 +284,18 @@ pub struct Config {
     /// (hide-only).
     #[serde(rename = "watchdogReshow", default)]
     pub watchdog_reshow: bool,
+    /// Window (ms) used to detect and ride out foreground-event storms —
+    /// Explorer churning during a large recursive delete, for instance. Two
+    /// visibility-affecting events closer together than this hide the toolbar
+    /// until the traffic stops, then a single re-check settles the final
+    /// state. A lone activation is never delayed. `0` disables debouncing.
+    /// Clamped to 100..=2000 otherwise.
+    #[serde(
+        rename = "foregroundDebounceMs",
+        default = "default_foreground_debounce_ms",
+        deserialize_with = "deserialize_foreground_debounce_ms"
+    )]
+    pub foreground_debounce_ms: u32,
 }
 
 /// Discriminator for toolbar button kinds. Omitted in JSON = `Folder` (backward compat).
@@ -930,5 +957,30 @@ mod tests {
     fn watchdog_reshow_parses_true() {
         let cfg = Config::from_str(r#"{"folders":[],"watchdogReshow":true}"#).unwrap();
         assert!(cfg.watchdog_reshow);
+    }
+
+    #[test]
+    fn foreground_debounce_defaults_to_300() {
+        let cfg = Config::from_str(r#"{"folders":[]}"#).unwrap();
+        assert_eq!(cfg.foreground_debounce_ms, 300);
+    }
+
+    #[test]
+    fn foreground_debounce_zero_passes_through_as_disabled() {
+        // The escape hatch: 0 turns storm suppression off without a rebuild.
+        let cfg = Config::from_str(r#"{"folders":[],"foregroundDebounceMs":0}"#).unwrap();
+        assert_eq!(cfg.foreground_debounce_ms, 0);
+    }
+
+    #[test]
+    fn foreground_debounce_clamped_low() {
+        let cfg = Config::from_str(r#"{"folders":[],"foregroundDebounceMs":5}"#).unwrap();
+        assert_eq!(cfg.foreground_debounce_ms, 100);
+    }
+
+    #[test]
+    fn foreground_debounce_clamped_high() {
+        let cfg = Config::from_str(r#"{"folders":[],"foregroundDebounceMs":999999}"#).unwrap();
+        assert_eq!(cfg.foreground_debounce_ms, 2_000);
     }
 }

@@ -861,6 +861,10 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             } else if timer_id == crate::toolbar::TIMER_FOREGROUND_WATCHDOG {
                 crate::visibility::watchdog_tick(hwnd);
                 LRESULT(0)
+            } else if timer_id == crate::toolbar::TIMER_FG_SETTLE {
+                // A foreground-event storm has gone quiet — decide once.
+                crate::visibility::settle_foreground(hwnd);
+                LRESULT(0)
             } else if timer_id == crate::toolbar::TIMER_LONGPRESS {
                 if let Some(state) = unsafe { toolbar_state(hwnd) } {
                     let elapsed_ms = state
