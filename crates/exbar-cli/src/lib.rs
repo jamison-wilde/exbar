@@ -84,6 +84,7 @@
 //! in `CLAUDE.md`.
 
 pub mod actions;
+pub mod bootstrap;
 pub mod clipboard;
 pub mod clock;
 pub mod config;

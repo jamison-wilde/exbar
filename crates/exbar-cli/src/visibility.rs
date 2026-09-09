@@ -220,7 +220,7 @@ fn pid_for_hwnd(hwnd: HWND) -> u32 {
 
 /// True if `hwnd` belongs to our own (exbar.exe) process — e.g., our toolbar,
 /// our popup menu, our rename edit, our folder picker dialog.
-fn hwnd_in_our_process(hwnd: HWND) -> bool {
+pub(crate) fn hwnd_in_our_process(hwnd: HWND) -> bool {
     let pid = pid_for_hwnd(hwnd);
     let our_pid = std::process::id();
     classify_foreground(pid, exe_path_for_pid(pid).as_deref(), our_pid) == Foreground::Ours
@@ -229,7 +229,7 @@ fn hwnd_in_our_process(hwnd: HWND) -> bool {
 /// True if `hwnd` belongs to any process whose executable filename is `explorer.exe`.
 /// Used by the foreground hook to keep the toolbar visible over Explorer's own
 /// popups (tooltips, tree-view pop-outs, Quick Access breadcrumb flyouts, etc.).
-fn hwnd_in_explorer_process(hwnd: HWND) -> bool {
+pub(crate) fn hwnd_in_explorer_process(hwnd: HWND) -> bool {
     let pid = pid_for_hwnd(hwnd);
     let our_pid = std::process::id();
     classify_foreground(pid, exe_path_for_pid(pid).as_deref(), our_pid) == Foreground::Explorer
@@ -419,12 +419,22 @@ unsafe extern "system" fn foreground_event_proc(
             }
         }
         // First time we see an Explorer foreground, create the toolbar.
-        // If not ready, retry logic is deferred to Task 8.
-        if tb_opt.is_none()
-            && let Some(info) = crate::explorer::check_explorer_ready(hwnd)
-        {
-            let hinst = crate::lifecycle::exe_hinstance();
-            let _ = crate::lifecycle::create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
+        // A cold Explorer has not built its XAML bridge yet when this event
+        // arrives, so the readiness probe fails; hand off to the bootstrap
+        // retry rather than abandoning creation until some later event
+        // happens to catch Explorer warm.
+        if tb_opt.is_none() {
+            match crate::explorer::check_explorer_ready(hwnd) {
+                Some(info) => {
+                    let hinst = crate::lifecycle::exe_hinstance();
+                    let _ = crate::lifecycle::create_toolbar(
+                        info.cabinet_hwnd,
+                        &info.default_pos,
+                        hinst,
+                    );
+                }
+                None => crate::bootstrap::schedule_retry(hwnd),
+            }
         }
         if let Some(tb) = get_global_toolbar_hwnd() {
             // Direction-1 guard: Win11 fires spurious EVENT_SYSTEM_FOREGROUND for
