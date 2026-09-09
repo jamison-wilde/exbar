@@ -63,18 +63,29 @@ pub fn next_action(ready: bool, attempts_so_far: u32, max_attempts: u32) -> Retr
 
 /// Pure: should a pending bootstrap be dropped without creating a toolbar?
 ///
-/// Abandon when a toolbar already exists (some other path won the race),
-/// when the Explorer window we were waiting on has been destroyed, or when
-/// the user has switched away to an unrelated app. The last case matters:
-/// creating a toolbar then would flash it over whatever is now in front.
-/// Dropping the attempt is safe because any later Explorer foreground
-/// event re-enters the same path.
-pub fn should_abandon(
-    toolbar_exists: bool,
-    target_alive: bool,
-    foreground_is_explorer_related: bool,
-) -> bool {
-    toolbar_exists || !target_alive || !foreground_is_explorer_related
+/// Only two things end an attempt early: a toolbar already exists (some
+/// other path won the race), or the Explorer window we were waiting on has
+/// been destroyed. Both are terminal.
+///
+/// Deliberately NOT a reason to abandon: the foreground momentarily not
+/// being Explorer. A cold Explorer launch flickers focus while it starts —
+/// observed live, mid-probe, on the very launch this module exists to
+/// rescue. Treating that as "user switched away" threw the attempt away and
+/// only recovered because a second foreground event happened to arrive.
+/// Focus is instead gated at creation time by [`ready_to_create`], so a blip
+/// costs one probe rather than the whole attempt.
+pub fn should_abandon(toolbar_exists: bool, target_alive: bool) -> bool {
+    toolbar_exists || !target_alive
+}
+
+/// Pure: may the toolbar be created on this probe?
+///
+/// Both conditions must hold: Explorer's XAML bridge is up, and Explorer is
+/// still what the user is looking at. Creating while some other app is in
+/// front would flash the toolbar over it. A `false` here just spends an
+/// attempt and probes again, so a transient focus loss is survivable.
+pub fn ready_to_create(probe_ready: bool, foreground_is_explorer_related: bool) -> bool {
+    probe_ready && foreground_is_explorer_related
 }
 
 // ── Win32 adapter ────────────────────────────────────────────────────────────
@@ -167,11 +178,7 @@ unsafe extern "system" fn retry_timer_proc(_hwnd: HWND, _msg: u32, _id: usize, _
 
     let toolbar_exists = crate::visibility::get_global_toolbar_hwnd().is_some();
     let target_alive = unsafe { IsWindow(Some(cabinet)).as_bool() };
-    if should_abandon(
-        toolbar_exists,
-        target_alive,
-        foreground_is_explorer_related(cabinet),
-    ) {
+    if should_abandon(toolbar_exists, target_alive) {
         log::debug!(
             "bootstrap: abandoning retry for {cabinet:?} (toolbar={toolbar_exists} alive={target_alive})"
         );
@@ -180,9 +187,14 @@ unsafe extern "system" fn retry_timer_proc(_hwnd: HWND, _msg: u32, _id: usize, _
     }
 
     let ready = crate::explorer::check_explorer_ready(cabinet);
-    match next_action(ready.is_some(), p.attempts, MAX_ATTEMPTS) {
+    let focused = foreground_is_explorer_related(cabinet);
+    match next_action(
+        ready_to_create(ready.is_some(), focused),
+        p.attempts,
+        MAX_ATTEMPTS,
+    ) {
         RetryAction::Create => {
-            let info = ready.expect("next_action returns Create only when the probe succeeded");
+            let info = ready.expect("ready_to_create is only true when the probe succeeded");
             log::info!(
                 "bootstrap: explorer={cabinet:?} ready after {} retries — creating toolbar",
                 p.attempts
@@ -265,21 +277,43 @@ mod tests {
 
     #[test]
     fn healthy_pending_attempt_is_kept() {
-        assert!(!should_abandon(false, true, true));
+        assert!(!should_abandon(false, true));
     }
 
     #[test]
     fn existing_toolbar_abandons_the_attempt() {
-        assert!(should_abandon(true, true, true));
+        assert!(should_abandon(true, true));
     }
 
     #[test]
     fn destroyed_explorer_abandons_the_attempt() {
-        assert!(should_abandon(false, false, true));
+        assert!(should_abandon(false, false));
     }
 
     #[test]
-    fn switching_to_a_foreign_app_abandons_the_attempt() {
-        assert!(should_abandon(false, true, false));
+    fn creates_when_ready_and_explorer_still_has_focus() {
+        assert!(ready_to_create(true, true));
+    }
+
+    #[test]
+    fn does_not_create_over_a_foreign_app_even_when_ready() {
+        assert!(!ready_to_create(true, false));
+    }
+
+    #[test]
+    fn does_not_create_before_the_xaml_bridge_exists() {
+        assert!(!ready_to_create(false, true));
+    }
+
+    #[test]
+    fn a_focus_blip_costs_one_probe_not_the_whole_attempt() {
+        // Regression: a cold Explorer launch flickers focus mid-probe. That
+        // must spend an attempt and retry, never end the attempt -- the
+        // toolbar would then never appear, which is the bug being fixed.
+        assert!(!should_abandon(false, true));
+        assert_eq!(
+            next_action(ready_to_create(true, false), 3, MAX_ATTEMPTS),
+            RetryAction::Retry { attempt: 4 }
+        );
     }
 }
