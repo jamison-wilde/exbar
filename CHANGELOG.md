@@ -2,7 +2,7 @@
 
 All notable changes to Exbar are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.3.1] - Unreleased
 
 ### Fixed
 
@@ -83,7 +83,7 @@ First public release.
 - Configurable `repositionDelayMs` to tune the animation-aware reposition debounce (default 250 ms).
 - GitHub Actions CI: lint, test, doc-check, and MSI build on every push; automatic release creation on tag push.
 
-[Unreleased]: https://github.com/jamison-wilde/exbar/compare/v1.3.0...HEAD
+[1.3.1]: https://github.com/jamison-wilde/exbar/compare/v1.3.0...HEAD
 [1.3.0]: https://github.com/jamison-wilde/exbar/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/jamison-wilde/exbar/compare/v1.1.0...v1.2.0
 
