@@ -401,160 +401,315 @@ unsafe extern "system" fn foreground_event_proc(
         return;
     }
 
-    // EVENT_SYSTEM_FOREGROUND
-    // Keep toolbar visible if the foreground window is:
-    //   - An Explorer window (re-raise above it; create toolbar on first event)
-    //   - Explorer's own process popups (tooltips, tree-view pop-outs, etc.)
-    //   - OUR process (rename edit, folder picker, popup menu — all transient)
-    // Hide only when a window in a DIFFERENT unrelated process takes foreground.
+    handle_foreground_change(hwnd, &class, is_explorer, in_our_process, tb_opt);
+}
+
+/// Handle one `EVENT_SYSTEM_FOREGROUND`.
+///
+/// Keep the toolbar visible if the foreground window is:
+///   - An Explorer window (re-raise above it; create the toolbar on first event)
+///   - Explorer's own process popups (tooltips, tree-view pop-outs, etc.)
+///   - OUR process (rename edit, folder picker, popup menu — all transient)
+///
+/// Hide only when a window in a DIFFERENT unrelated process takes foreground.
+///
+/// Bursty traffic short-circuits all of that: see [`storm_suppressed`].
+fn handle_foreground_change(
+    hwnd: HWND,
+    class: &str,
+    is_explorer: bool,
+    in_our_process: bool,
+    tb_opt: Option<HWND>,
+) {
+    // A storm of events means Explorer is thrashing, not that the user is
+    // switching windows. Hide and let the settle timer decide once it stops.
+    if storm_suppressed(hwnd, is_explorer, in_our_process, tb_opt) {
+        return;
+    }
+
     let in_explorer = hwnd_in_explorer_process(hwnd);
 
     if is_explorer {
-        if let Some(toolbar_hwnd) = get_global_toolbar_hwnd() {
-            // SAFETY: Win32 dispatches WinEvent callbacks on the thread that
-            // installed SetWinEventHook — our message-pump thread. Same
-            // single-threaded invariant `toolbar_state` relies on.
-            if let Some(state) = unsafe { crate::toolbar::toolbar_state(toolbar_hwnd) } {
+        handle_explorer_foreground(hwnd, tb_opt);
+    } else if in_explorer {
+        handle_explorer_process_foreground(hwnd, class, tb_opt);
+    } else if in_our_process {
+        // Our own popup menu / rename edit / folder picker. Keep visible.
+    } else {
+        handle_foreign_foreground(hwnd, class, tb_opt);
+    }
+}
+
+/// Run the event through the debounce. Returns `true` when the event was
+/// swallowed because foreground traffic is bursty — in which case the
+/// toolbar has been hidden and `TIMER_FG_SETTLE` (re)armed.
+///
+/// The active target is still recorded for real Explorer windows even while
+/// suppressing, so the settle re-check knows where to put the toolbar if
+/// Explorer turns out to be what is genuinely in front.
+fn storm_suppressed(
+    hwnd: HWND,
+    is_explorer: bool,
+    in_our_process: bool,
+    tb_opt: Option<HWND>,
+) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::SetTimer;
+
+    if in_our_process {
+        // Our own menu / rename edit / picker taking focus is never Explorer
+        // churn. Debouncing these would hide the toolbar out from under a
+        // user who is actively interacting with it.
+        return false;
+    }
+
+    let Some(tb) = tb_opt else {
+        // No toolbar yet — nothing can flash, and creation must not be
+        // debounced away.
+        return false;
+    };
+    // SAFETY: WinEvent callbacks arrive on the thread that installed the
+    // hook — our message-pump thread, the same single-threaded invariant
+    // `toolbar_state` relies on.
+    let Some(state) = (unsafe { crate::toolbar::toolbar_state(tb) }) else {
+        return false;
+    };
+
+    // Never yank the toolbar away mid-interaction. Mirrors the transient
+    // states the watchdog already refuses to act on.
+    if state.popup_open_count > 0 || state.submenu_chain.is_open() || state.rename_state.is_some() {
+        return false;
+    }
+
+    let debounce_ms = state
+        .config
+        .as_ref()
+        .map_or_else(crate::config::default_foreground_debounce_ms, |c| {
+            c.foreground_debounce_ms
+        });
+    let now = state.clock.now_unix_ms();
+
+    match state.fg_debounce.on_event(now, debounce_ms) {
+        crate::fg_debounce::EventDecision::ApplyNow => false,
+        crate::fg_debounce::EventDecision::SuppressAndSettle { settle_ms } => {
+            if is_explorer {
                 state.active_target = Some(crate::target::ActiveTarget::explorer(hwnd));
             }
-        }
-        // First time we see an Explorer foreground, create the toolbar.
-        // A cold Explorer has not built its XAML bridge yet when this event
-        // arrives, so the readiness probe fails; hand off to the bootstrap
-        // retry rather than abandoning creation until some later event
-        // happens to catch Explorer warm.
-        if tb_opt.is_none() {
-            match crate::explorer::check_explorer_ready(hwnd) {
-                Some(info) => {
-                    let hinst = crate::lifecycle::exe_hinstance();
-                    let _ = crate::lifecycle::create_toolbar(
-                        info.cabinet_hwnd,
-                        &info.default_pos,
-                        hinst,
-                    );
-                }
-                None => crate::bootstrap::schedule_retry(hwnd),
+            log::debug!("foreground storm: hwnd={hwnd:?} suppressed, settling in {settle_ms}ms");
+            unsafe {
+                crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
+                // Same ID replaces any pending settle, so a continuing storm
+                // keeps pushing the re-check out until the traffic stops.
+                let _ = SetTimer(Some(tb), crate::toolbar::TIMER_FG_SETTLE, settle_ms, None);
             }
+            true
         }
-        if let Some(tb) = get_global_toolbar_hwnd() {
-            // Direction-1 guard: Win11 fires spurious EVENT_SYSTEM_FOREGROUND for
-            // Explorer windows during transition animations while a foreign app is
-            // the real foreground. Only show if Explorer is genuinely foreground —
-            // symmetric with the actual_fg guard in the in_explorer branch below.
+    }
+}
+
+/// A real `CabinetWClass` took foreground.
+fn handle_explorer_foreground(hwnd: HWND, tb_opt: Option<HWND>) {
+    if let Some(toolbar_hwnd) = get_global_toolbar_hwnd() {
+        // SAFETY: see `storm_suppressed` — callback runs on the pump thread.
+        if let Some(state) = unsafe { crate::toolbar::toolbar_state(toolbar_hwnd) } {
+            state.active_target = Some(crate::target::ActiveTarget::explorer(hwnd));
+        }
+    }
+    // First time we see an Explorer foreground, create the toolbar.
+    // A cold Explorer has not built its XAML bridge yet when this event
+    // arrives, so the readiness probe fails; hand off to the bootstrap
+    // retry rather than abandoning creation until some later event
+    // happens to catch Explorer warm.
+    if tb_opt.is_none() {
+        match crate::explorer::check_explorer_ready(hwnd) {
+            Some(info) => {
+                let hinst = crate::lifecycle::exe_hinstance();
+                let _ =
+                    crate::lifecycle::create_toolbar(info.cabinet_hwnd, &info.default_pos, hinst);
+            }
+            None => crate::bootstrap::schedule_retry(hwnd),
+        }
+    }
+    if let Some(tb) = get_global_toolbar_hwnd() {
+        // Direction-1 guard: Win11 fires spurious EVENT_SYSTEM_FOREGROUND for
+        // Explorer windows during transition animations while a foreign app is
+        // the real foreground. Only show if Explorer is genuinely foreground —
+        // symmetric with the actual_fg guard in the in_explorer branch below.
+        let actual_fg = unsafe { GetForegroundWindow() };
+        if actual_fg == hwnd
+            || crate::explorer::get_class_name(actual_fg) == "CabinetWClass"
+            || hwnd_in_explorer_process(actual_fg)
+            || hwnd_in_our_process(actual_fg)
+        {
+            reposition_and_show(tb, hwnd);
+        } else {
+            log::debug!(
+                "is_explorer foreground but actual_fg={actual_fg:?} is foreign — skipping show"
+            );
+        }
+    }
+}
+
+/// An explorer.exe window that is not a `CabinetWClass` took foreground.
+fn handle_explorer_process_foreground(hwnd: HWND, class: &str, tb_opt: Option<HWND>) {
+    // Desktop (Progman / WorkerW) lives in explorer.exe but is NOT a
+    // file-browser window. Hide the toolbar when the desktop takes
+    // foreground so exbar doesn't ride on top of the wallpaper.
+    if class == "Progman" || class == "WorkerW" {
+        log::debug!("foreground: desktop class={class:?} hwnd={hwnd:?} — hiding toolbar");
+        if let Some(tb) = tb_opt {
+            update_toolbar_visibility(tb);
+        }
+        return;
+    }
+
+    // Only show the toolbar if this window is related to the active Explorer
+    // file browser — check that its root ancestor is the active CabinetWClass.
+    // This filters out alt-tab/win-tab (XamlExplorerHostIslandWindow owned by
+    // the task switcher, not by a CabinetWClass) while still allowing
+    // Explorer's own XAML islands and popups through.
+    if let Some(tb) = tb_opt
+        && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
+        && let Some(active) = state.active_target.map(|t| t.hwnd)
+    {
+        let root = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+            )
+        };
+        if root == active {
+            log::debug!(
+                "foreground: explorer-process class={class:?} root={root:?} matches active, showing"
+            );
+            // Also verify Explorer is genuinely foreground — Win11 fires
+            // XAML events during transition animations away from Explorer.
             let actual_fg = unsafe { GetForegroundWindow() };
             if actual_fg == hwnd
                 || crate::explorer::get_class_name(actual_fg) == "CabinetWClass"
                 || hwnd_in_explorer_process(actual_fg)
-                || hwnd_in_our_process(actual_fg)
             {
-                reposition_and_show(tb, hwnd);
-            } else {
-                log::debug!(
-                    "is_explorer foreground but actual_fg={actual_fg:?} is foreign — skipping show"
-                );
+                show_above(tb, hwnd);
             }
+        } else {
+            log::debug!(
+                "foreground: explorer-process class={class:?} root={root:?} != active={active:?}, ignoring (task switcher?)"
+            );
         }
-    } else if in_explorer {
-        // Desktop (Progman / WorkerW) lives in explorer.exe but is NOT a
-        // file-browser window. Hide the toolbar when the desktop takes
-        // foreground so exbar doesn't ride on top of the wallpaper.
-        if class == "Progman" || class == "WorkerW" {
-            log::debug!("foreground: desktop class={class:?} hwnd={hwnd:?} — hiding toolbar");
-            if let Some(tb) = tb_opt {
-                update_toolbar_visibility(tb);
-            }
-            return;
-        }
+    }
+}
 
-        // Explorer-process window that isn't CabinetWClass. Only show the
-        // toolbar if it's related to the active Explorer file browser —
-        // check that its root ancestor is the active CabinetWClass.
-        // This filters out alt-tab/win-tab (XamlExplorerHostIslandWindow
-        // owned by the task switcher, not by a CabinetWClass) while still
-        // allowing Explorer's own XAML islands and popups through.
-        if let Some(tb) = tb_opt
-            && let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
-            && let Some(active) = state.active_target.map(|t| t.hwnd)
-        {
-            let root = unsafe {
-                windows::Win32::UI::WindowsAndMessaging::GetAncestor(
-                    hwnd,
-                    windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
-                )
-            };
-            if root == active {
-                log::debug!(
-                    "foreground: explorer-process class={class:?} root={root:?} matches active, showing"
-                );
-                // Also verify Explorer is genuinely foreground — Win11 fires
-                // XAML events during transition animations away from Explorer.
-                let actual_fg = unsafe { GetForegroundWindow() };
-                if actual_fg == hwnd
-                    || crate::explorer::get_class_name(actual_fg) == "CabinetWClass"
-                    || hwnd_in_explorer_process(actual_fg)
-                {
-                    show_above(tb, hwnd);
+/// A window in some other process took foreground. It is either a
+/// Shell-hosted file dialog (treat like Explorer) or a reason to hide.
+fn handle_foreign_foreground(hwnd: HWND, class: &str, tb_opt: Option<HWND>) {
+    let dialog_enabled = tb_opt
+        .and_then(|tb| unsafe { crate::toolbar::toolbar_state(tb) })
+        .and_then(|s| s.config.as_ref())
+        .map(|c| c.enable_file_dialogs)
+        .unwrap_or(true);
+
+    match classify_hwnd(hwnd, class, dialog_enabled, &Win32DefViewProbe) {
+        HwndRole::FileDialog => {
+            // Toolbar may not exist yet (first dialog ever).
+            if tb_opt.is_none() {
+                let mut rect = windows::Win32::Foundation::RECT::default();
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
                 }
-            } else {
-                log::debug!(
-                    "foreground: explorer-process class={class:?} root={root:?} != active={active:?}, ignoring (task switcher?)"
-                );
+                let default_pos = windows::Win32::Foundation::RECT {
+                    left: rect.left + 40,
+                    top: rect.top + 120,
+                    right: rect.left + 440,
+                    bottom: rect.top + 160,
+                };
+                let hinst = crate::lifecycle::exe_hinstance();
+                let _ = crate::lifecycle::create_toolbar(hwnd, &default_pos, hinst);
+            }
+            if let Some(tb) = get_global_toolbar_hwnd() {
+                if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
+                    state.active_target = Some(crate::target::ActiveTarget::file_dialog(hwnd));
+                    // Force a reposition; last_explorer_origin was for explorer.
+                    state.last_explorer_origin = None;
+                }
+                reposition_and_show(tb, hwnd);
             }
         }
-    } else if in_our_process {
-        // Our own popup menu / rename edit / folder picker. Keep visible.
-    } else {
-        // Not Explorer, not an explorer-process window, not our process.
-        // Last check: is it a Shell-hosted file dialog? If so, treat it like
-        // an Explorer for show/position purposes.
-        let dialog_enabled = tb_opt
-            .and_then(|tb| unsafe { crate::toolbar::toolbar_state(tb) })
-            .and_then(|s| s.config.as_ref())
+        HwndRole::Unknown => {
+            // Different unrelated process — hide. Also dismiss any open
+            // submenu chain so popups don't linger after focus leaves us.
+            if let Some(tb) = tb_opt {
+                if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
+                    && state.submenu_chain.is_open()
+                {
+                    state.execute_submenu_event(tb, crate::submenu::SubmenuEvent::Dismiss);
+                }
+                unsafe {
+                    crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
+                }
+            }
+        }
+    }
+}
+
+/// Fired by `TIMER_FG_SETTLE` once a foreground-event storm has gone quiet.
+///
+/// Looks at what is *actually* in front exactly once and commits to a single
+/// show/hide, instead of having tracked every transient window on the way.
+pub(crate) fn settle_foreground(toolbar: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, KillTimer};
+
+    unsafe {
+        let _ = KillTimer(Some(toolbar), crate::toolbar::TIMER_FG_SETTLE);
+    }
+
+    let Some(state) = (unsafe { crate::toolbar::toolbar_state(toolbar) }) else {
+        return;
+    };
+    state.fg_debounce.on_settle();
+
+    let fg = unsafe { GetForegroundWindow() };
+    let fg_class = crate::explorer::get_class_name(fg);
+    let fg_is_ours = hwnd_in_our_process(fg);
+
+    // Re-target before deciding: a storm can end on a different Explorer
+    // window, or on a file dialog, than the one we last attached to. The
+    // dialog probe walks child windows, which is why it belongs here — once
+    // per storm — and not on the suppressed per-event path.
+    if fg_class == "CabinetWClass" {
+        state.active_target = Some(crate::target::ActiveTarget::explorer(fg));
+    } else if !fg_is_ours {
+        let dialog_enabled = state
+            .config
+            .as_ref()
             .map(|c| c.enable_file_dialogs)
             .unwrap_or(true);
+        if classify_hwnd(fg, &fg_class, dialog_enabled, &Win32DefViewProbe) == HwndRole::FileDialog
+        {
+            state.active_target = Some(crate::target::ActiveTarget::file_dialog(fg));
+            // Offsets are per-kind; force a fresh measure against the dialog.
+            state.last_explorer_origin = None;
+        }
+    }
 
-        match classify_hwnd(hwnd, &class, dialog_enabled, &Win32DefViewProbe) {
-            HwndRole::FileDialog => {
-                // Toolbar may not exist yet (first dialog ever).
-                if tb_opt.is_none() {
-                    let mut rect = windows::Win32::Foundation::RECT::default();
-                    unsafe {
-                        let _ =
-                            windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
-                    }
-                    let default_pos = windows::Win32::Foundation::RECT {
-                        left: rect.left + 40,
-                        top: rect.top + 120,
-                        right: rect.left + 440,
-                        bottom: rect.top + 160,
-                    };
-                    let hinst = crate::lifecycle::exe_hinstance();
-                    let _ = crate::lifecycle::create_toolbar(hwnd, &default_pos, hinst);
-                }
-                if let Some(tb) = get_global_toolbar_hwnd() {
-                    if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
-                        state.active_target = Some(crate::target::ActiveTarget::file_dialog(hwnd));
-                        // Force a reposition; last_explorer_origin was for explorer.
-                        state.last_explorer_origin = None;
-                    }
-                    reposition_and_show(tb, hwnd);
-                }
-            }
-            HwndRole::Unknown => {
-                // Different unrelated process — hide. Also dismiss any open
-                // submenu chain so popups don't linger after focus leaves us.
-                if let Some(tb) = tb_opt {
-                    if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) }
-                        && state.submenu_chain.is_open()
-                    {
-                        state.execute_submenu_event(tb, crate::submenu::SubmenuEvent::Dismiss);
-                    }
-                    unsafe {
-                        crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
-                    }
-                }
+    let active = state.active_target.map(|t| t.hwnd);
+    // A re-target above makes this true by construction for the new target.
+    let fg_root_is_active = active.is_some_and(|a| unsafe { GetAncestor(fg, GA_ROOT) } == a);
+
+    let outcome = crate::fg_debounce::settle_outcome(&fg_class, fg_is_ours, fg_root_is_active);
+    log::debug!(
+        "fg settle: fg={fg:?} class={fg_class:?} ours={fg_is_ours} root_active={fg_root_is_active} -> {outcome:?}"
+    );
+
+    match outcome {
+        crate::fg_debounce::SettleOutcome::Show => {
+            // Prefer the recorded target: `fg` may be an XAML island child,
+            // which is not something to position against.
+            if let Some(target) = active {
+                reposition_and_show(toolbar, target);
             }
         }
+        crate::fg_debounce::SettleOutcome::Hide => unsafe {
+            crate::warn_on_err!(ShowWindow(toolbar, SW_HIDE).ok());
+        },
     }
 }
 
@@ -707,6 +862,10 @@ pub(crate) fn watchdog_tick(toolbar: HWND) {
             || state.rename_state.is_some()
             || state.explorer_moving
             || state.reposition_pending
+            // Riding out a foreground storm: the toolbar is deliberately
+            // hidden and TIMER_FG_SETTLE owns the next state change. A
+            // watchdog re-show here would reintroduce the flashing.
+            || state.fg_debounce.is_settling()
         {
             (true, false, false, None, false)
         } else {

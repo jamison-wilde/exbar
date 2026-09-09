@@ -102,6 +102,10 @@ pub(crate) const TIMER_SUBMENU_AUTOSCROLL: usize = 7;
 /// when `foreground_watchdog_ms > 0`; hides a toolbar left visible over a
 /// foreign app (and optionally re-shows it). Fires every `foreground_watchdog_ms`.
 pub(crate) const TIMER_FOREGROUND_WATCHDOG: usize = 8;
+/// Timer ID for the foreground-storm settle re-check. One-shot, armed (and
+/// re-armed) while `fg_debounce` is suppressing events; on fire it inspects
+/// the real foreground once and picks the toolbar's final show/hide state.
+pub(crate) const TIMER_FG_SETTLE: usize = 9;
 
 // Layout constants (logical pixels, scale by DPI)
 pub(crate) const BTN_PAD_H: i32 = 10;
@@ -155,6 +159,10 @@ pub(crate) struct ToolbarState {
     /// watchdog skips while set so its opt-in re-show can't flash the toolbar
     /// at a half-settled position mid-animation.
     pub(crate) reposition_pending: bool,
+    /// Event-rate tracker for foreground-change storms. While it is settling
+    /// the toolbar is forced hidden and TIMER_FG_SETTLE decides the final
+    /// state once the traffic stops.
+    pub(crate) fg_debounce: crate::fg_debounce::DebounceState,
     /// Count of shell popup windows currently visible (e.g. Win11 context
     /// menus, class "Microsoft.UI.Content.PopupWindowSiteBridge"). While > 0
     /// the toolbar drops from HWND_TOPMOST to HWND_NOTOPMOST so the popups
@@ -272,6 +280,7 @@ impl ToolbarState {
             last_explorer_origin: None,
             explorer_moving: false,
             reposition_pending: false,
+            fg_debounce: crate::fg_debounce::DebounceState::default(),
             popup_open_count: 0,
             rename_state: None,
             submenu_chain: crate::submenu::SubmenuChain::default(),
