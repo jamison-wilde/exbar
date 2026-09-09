@@ -21,7 +21,17 @@
 
         <SummaryInformation Description="Exbar — floating folder-shortcut toolbar for Windows 11 File Explorer" />
 
+        <!-- AllowSameVersionUpgrades is REQUIRED, not cosmetic. WiX
+             auto-generates a fresh ProductCode on every build, and the
+             default MajorUpgrade only detects related products with a
+             STRICTLY LOWER version. Reinstalling the same version (the
+             normal dev/rebuild loop) therefore matched nothing, skipped
+             RemoveExistingProducts, and installed side-by-side — one
+             extra "Exbar" row in Settings → Apps per build. With this
+             flag the current version is inside the detected range, so
+             every reinstall replaces its predecessors. -->
         <MajorUpgrade
+            AllowSameVersionUpgrades="yes"
             Schedule="afterInstallInitialize"
             DowngradeErrorMessage="A newer version of [ProductName] is already installed. Setup will now exit." />
 
@@ -45,9 +55,21 @@
         <Feature Id="Main" Title="Exbar" Level="1">
             <ComponentRef Id="ExbarExe" />
             <ComponentRef Id="RunKey" />
-            <ComponentRef Id="UninstallEntry" />
             <ComponentRef Id="StartMenuShortcut" />
         </Feature>
+
+        <!-- Uninstall metadata — shown in Settings → Apps.
+             Windows Installer writes the ARP row itself, under
+             HKCU\...\Uninstall\{ProductCode}, sourcing DisplayName from
+             Package/@Name, DisplayVersion from @Version and Publisher
+             from @Manufacturer. A hand-rolled Uninstall\Exbar registry
+             component used to duplicate that row and, because its key
+             name was fixed rather than ProductCode-keyed, survived as an
+             orphan pointing at an uninstalled ProductCode. These three
+             properties supply the only fields the automatic row misses.
+             ARPNOMODIFY is not set here — WixUI_Minimal already declares it. -->
+        <Property Id="ARPNOREPAIR" Value="1" />
+        <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize" />
 
         <!-- UI: WixUI_Minimal = Welcome/License → Finish. Finish dialog has
              a "Launch Exbar now" checkbox wired to WixShellExec. ShellExecute
@@ -119,26 +141,16 @@
                 Type="string"
                 Value="&quot;[INSTALLDIR]exbar.exe&quot; hook"
                 KeyPath="yes" />
-        </Component>
 
-        <!-- Uninstall metadata — shown in Settings → Apps -->
-        <Component Id="UninstallEntry" Directory="INSTALLDIR" Guid="*" Bitness="always64">
-            <RegistryKey Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\Exbar">
-                <RegistryValue Name="DisplayName" Type="string" Value="Exbar" />
-                <RegistryValue Name="DisplayVersion" Type="string" Value="$(Version)" />
-                <RegistryValue Name="Publisher" Type="string" Value="Exbar" />
-                <RegistryValue Name="InstallLocation" Type="string" Value="[INSTALLDIR]" />
-                <RegistryValue Name="UninstallString" Type="string" Value="msiexec /x [ProductCode]" />
-                <RegistryValue Name="NoModify" Type="integer" Value="1" />
-                <RegistryValue Name="NoRepair" Type="integer" Value="1" />
-            </RegistryKey>
-            <RegistryValue
+            <!-- Sweep up the pre-1.3.1 hand-rolled ARP key. Machines that
+                 installed an older build carry a fixed-name Uninstall\Exbar
+                 key whose owning ProductCode may already be gone, so
+                 RemoveExistingProducts cannot reclaim it — it would linger
+                 as a dead Settings → Apps row with a broken uninstall. -->
+            <RemoveRegistryKey
                 Root="HKCU"
                 Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\Exbar"
-                Name="Installed"
-                Type="integer"
-                Value="1"
-                KeyPath="yes" />
+                Action="removeOnInstall" />
         </Component>
 
     </Package>
