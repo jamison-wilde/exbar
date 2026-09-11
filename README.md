@@ -37,7 +37,7 @@ Let's go vertical!
 
 ## Install
 
-Download and install `exbar-1.3.0-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
+Download and install `exbar-1.3.1-x64.msi` from the [latest release](https://github.com/jamison-wilde/exbar/releases/latest).
 
 Windows SmartScreen will warn you that the publisher is unrecognized (the installer is not yet signed). Click **More info** → **Run anyway**.
 
