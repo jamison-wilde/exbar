@@ -441,8 +441,29 @@ fn handle_foreground_change(
 }
 
 /// Run the event through the debounce. Returns `true` when the event was
-/// swallowed because foreground traffic is bursty — in which case the
-/// toolbar has been hidden and `TIMER_FG_SETTLE` (re)armed.
+/// swallowed because foreground traffic is bursty — in which case
+/// `TIMER_FG_SETTLE` has been (re)armed and the toolbar's *current*
+/// visibility is frozen until it fires.
+///
+/// Freezing rather than force-hiding is deliberate, and was measured. An
+/// earlier version hid the toolbar for the duration of every storm; two
+/// hours of dogfooding produced three sequences like this one, where a
+/// transient window blipped the foreground while the toolbar sat correctly
+/// over Explorer:
+///
+/// ```text
+/// 22:32:30.131 watchdog: visible=true should_hide=false
+/// 22:32:30.223 foreground storm: suppressed
+/// 22:32:30.224 ShowWindow(tb, SW_HIDE)
+/// 22:32:30.535 fg settle: CabinetWClass -> Show
+/// ```
+///
+/// That is a 314 ms blank inserted by the anti-flicker path itself. Holding
+/// the existing state is better in every case: a storm that ends where it
+/// started is now invisible to the user, one that ends elsewhere just hides
+/// up to `settle_ms` later than it would have, and during genuine Explorer
+/// churn the toolbar sits still while Explorer flashes — which was the
+/// point.
 ///
 /// The active target is still recorded for real Explorer windows even while
 /// suppressing, so the settle re-check knows where to put the toolbar if
@@ -496,7 +517,7 @@ fn storm_suppressed(
             }
             log::debug!("foreground storm: hwnd={hwnd:?} suppressed, settling in {settle_ms}ms");
             unsafe {
-                crate::warn_on_err!(ShowWindow(tb, SW_HIDE).ok());
+                // Visibility is deliberately left untouched here — see above.
                 // Same ID replaces any pending settle, so a continuing storm
                 // keeps pushing the re-check out until the traffic stops.
                 let _ = SetTimer(Some(tb), crate::toolbar::TIMER_FG_SETTLE, settle_ms, None);

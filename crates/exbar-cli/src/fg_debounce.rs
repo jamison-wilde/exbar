@@ -10,10 +10,15 @@
 //!
 //! The rule here: a single activation still applies immediately, so normal
 //! use stays snappy and gains no latency. But once two visibility-affecting
-//! events land within the debounce window, the toolbar hides and stays
-//! hidden until the storm stops. Each further event re-arms the settle
+//! events land within the debounce window, the toolbar's current visibility
+//! is frozen and further events are swallowed, each one re-arming the settle
 //! timer. When it finally fires, [`settle_outcome`] looks at what is
 //! *actually* in front — once — and picks a single final state.
+//!
+//! Freezing, not hiding: forcing the toolbar hidden for the duration was
+//! tried first and measurably inserted its own ~300 ms flicker whenever a
+//! storm ended where it began. The adapter in `visibility.rs` carries the
+//! log evidence.
 //!
 //! Both halves are pure and unit-tested; the Win32 adapter lives in
 //! `visibility.rs` and the settle timer on the toolbar window.
