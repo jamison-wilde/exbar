@@ -174,7 +174,7 @@ pub(crate) struct ToolbarState {
     pub(crate) submenu_cfg: crate::config::SubmenuConfig,
     /// Cursor X at the moment long-press / drag-hover fired — used by level-1 placement.
     pub(crate) last_cursor_x_on_open: i32,
-    /// Cursor Y at the moment long-press / drag-hover fired — used by level-1 reshow placement.
+    /// Cursor Y at the moment long-press / drag-hover fired — recorded at open time (diagnostics; level-1 placement now uses the toolbar band).
     pub(crate) last_cursor_y_on_open: i32,
     /// Triggering folder button center-Y.
     pub(crate) last_button_center_y_on_open: i32,
@@ -190,6 +190,10 @@ pub(crate) struct ToolbarState {
     /// Used to emit `CursorExit`/`CursorReenter` only on transitions, not every tick.
     /// Initialized to `true` so that the first tick with cursor outside emits `CursorExit`.
     pub(crate) cursor_was_inside_popup: bool,
+    /// Esc was still held when the safety tick was re-armed after the Remove
+    /// menu closed; the tick ignores Esc until it reads up, so cancelling the
+    /// menu with Esc does not also dismiss the chain.
+    pub(crate) esc_latched: bool,
     /// Tracks whether any mouse button was pressed on the PREVIOUS safety-timer tick.
     /// Used to detect a fresh button-down for the click-outside-dismiss path.
     pub(crate) prev_mouse_button_down: bool,
@@ -202,7 +206,7 @@ pub(crate) struct ToolbarState {
     pub(crate) recent_dirty: bool,
     /// Set when SetTimer(TIMER_RECENT_DEBOUNCE) is armed but not yet fired.
     pub(crate) recent_debounce_pending: bool,
-    /// Button index the hover-open timer is waiting on. `None` when no wait is active.
+    /// Hover-open controller state (rest wait, open/suppressed/away per button).
     pub(crate) hover: crate::hover_open::HoverState,
     /// HWND of the popup currently being auto-scrolled (`None` = no autoscroll).
     pub(crate) autoscroll_popup: Option<HWND>,
@@ -307,6 +311,7 @@ impl ToolbarState {
             last_press_instant: None,
             submenu_timer_active: false,
             cursor_was_inside_popup: true,
+            esc_latched: false,
             prev_mouse_button_down: false,
             recent_tracker: crate::recent_tracker::TrackerState::default(),
             recent_list,

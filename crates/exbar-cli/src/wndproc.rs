@@ -16,10 +16,10 @@ use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, DefWindowProcW, GWLP_USERDATA, GetCursorPos, GetForegroundWindow,
-    GetWindowLongPtrW, GetWindowRect, HTCAPTION, KillTimer, PostMessageW, SW_HIDE, SWP_NOACTIVATE,
-    SWP_NOZORDER, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED,
-    WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NCHITTEST,
-    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+    GetWindowLongPtrW, GetWindowRect, HTCAPTION, IsWindowVisible, KillTimer, PostMessageW, SW_HIDE,
+    SWP_NOACTIVATE, SWP_NOZORDER, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE,
+    WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
 };
 
 use crate::hit_test;
@@ -98,7 +98,8 @@ fn cursor_inside_popups(state: &crate::toolbar::ToolbarState, cx: i32, cy: i32) 
 /// closing under it.
 fn cursor_over_toolbar(toolbar: HWND, cx: i32, cy: i32) -> bool {
     let mut r = windows::Win32::Foundation::RECT::default();
-    let ok = unsafe { GetWindowRect(toolbar, &mut r).is_ok() };
+    let ok =
+        unsafe { IsWindowVisible(toolbar).as_bool() && GetWindowRect(toolbar, &mut r).is_ok() };
     ok && cx >= r.left && cx < r.right && cy >= r.top && cy < r.bottom
 }
 
@@ -333,19 +334,15 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     },
                 );
 
-                let ev = match state.pointer {
-                    pointer::PointerState::Hovering { button } if button >= 1 => {
-                        crate::hover_open::HoverEvent::MoveOnButton {
-                            button,
-                            is_recent: state.button_is_recent(button),
-                            x,
-                            y,
-                            chain_open: state.submenu_chain.is_open(),
-                        }
-                    }
-                    _ => crate::hover_open::HoverEvent::MoveOffButtons,
-                };
-                state.execute_hover_event(hwnd, ev);
+                if let Some(ev) = crate::hover_open::event_for_pointer(
+                    &state.pointer,
+                    |b| state.button_is_recent(b),
+                    x,
+                    y,
+                    state.submenu_chain.is_open(),
+                ) {
+                    state.execute_hover_event(hwnd, ev);
+                }
             }
             LRESULT(0)
         }
@@ -880,7 +877,10 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     // 1. Escape — WS_EX_NOACTIVATE means WM_KEYDOWN rarely arrives; poll here.
                     let esc_pressed =
                         unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16) & 0x8000 != 0 };
-                    if esc_pressed {
+                    if !esc_pressed {
+                        state.esc_latched = false;
+                    }
+                    if esc_pressed && !state.esc_latched {
                         state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Dismiss);
                         unsafe {
                             let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_SAFETY);

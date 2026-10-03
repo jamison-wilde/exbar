@@ -91,6 +91,12 @@ impl ToolbarState {
         let buffer_px = self.submenu_cfg.hover_buffer_px as i32;
 
         let Some(contents) = self.load_level_contents(level, &folder_path, is_recent) else {
+            // OpenRoot/HoverChildItem already pushed this level into the pure
+            // chain; drop it so no phantom open chain outlives the refusal.
+            self.submenu_chain.levels.truncate(level as usize - 1);
+            if self.submenu_chain.levels.is_empty() {
+                self.submenu_chain.flow = None;
+            }
             return;
         };
         let folder_display_name = folder_path
@@ -117,6 +123,7 @@ impl ToolbarState {
                 .max(crate::theme::scale(100, self.dpi))
         };
 
+        let mut start_scrolled_to_end = false;
         let (display_items, layout, sx, sy) = if level == 1 {
             // Level 1 sits beside the toolbar band, never over it; the
             // toolbar-facing side carries no hover buffer.
@@ -146,6 +153,9 @@ impl ToolbarState {
                 .max(work.left)
                 .min(work.right - layout.popup_w);
             let y = level1_y(placement, band_top, band_bottom, layout.popup_h);
+            // Above popups put the header at the toolbar-facing bottom end;
+            // start at the end of the list so it is not hidden when scrolling.
+            start_scrolled_to_end = placement.side == crate::submenu::Side::Above;
             (display_items, layout, x, y)
         } else {
             let display_items = build(ReshowPosition::None);
@@ -161,6 +171,11 @@ impl ToolbarState {
             (display_items, layout, x, y)
         };
 
+        let scroll_offset = if start_scrolled_to_end {
+            layout.total_count.saturating_sub(layout.visible_count)
+        } else {
+            0
+        };
         let base_opacity = self
             .config
             .as_ref()
@@ -176,7 +191,7 @@ impl ToolbarState {
             dpi: self.dpi,
             toolbar_hwnd: toolbar,
             drop_registered: false,
-            scroll_offset: 0,
+            scroll_offset,
             scroll_delta_accum: 0,
             last_bandhover_dir: 0,
         });
@@ -558,6 +573,7 @@ impl ToolbarState {
     /// Right-click on popup item `idx` at `level`. Only level-1 items of a
     /// Recent chain get a menu (Remove from Recents).
     pub(crate) fn on_popup_right_click(&mut self, toolbar: HWND, level: u8, idx: usize) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
         use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, KillTimer, SetTimer};
         if level != 1 {
             return;
@@ -596,7 +612,9 @@ impl ToolbarState {
         }];
         let chosen = crate::contextmenu::show_menu(toolbar, pt, &items);
 
-        if chosen == MENU_ID_REMOVE_RECENT && self.remove_recent(toolbar, &entry.path) {
+        let removed = chosen == MENU_ID_REMOVE_RECENT && self.remove_recent(toolbar, &entry.path);
+        // A chain closed during the modal loop must not reopen unprompted.
+        if removed && self.submenu_chain.is_open() {
             // Reopen the Recents root so the list (or its placeholder) refreshes.
             self.execute_submenu_event(
                 toolbar,
@@ -608,6 +626,9 @@ impl ToolbarState {
             );
         } else if self.submenu_chain.is_open() {
             self.cursor_was_inside_popup = true;
+            // Esc that cancelled the menu may still read as down on the next tick.
+            self.esc_latched =
+                unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16) & 0x8000 != 0 };
             unsafe {
                 let _ = SetTimer(Some(toolbar), TIMER_SUBMENU_SAFETY, 30, None);
             }
@@ -669,5 +690,40 @@ mod tests {
             items.as_slice(),
             [crate::submenu::DisplayItem::Empty { .. }]
         ));
+    }
+
+    #[test]
+    fn empty_shell_alias_open_leaves_no_phantom_chain() {
+        let deps = mk_deps();
+        let mut state = make_test_state(
+            &deps,
+            Some(mk_config_with_folders(&[("D", "shell:downloads")])),
+        );
+        state.execute_submenu_event(
+            toolbar(),
+            crate::submenu::SubmenuEvent::OpenRoot {
+                path: PathBuf::from("shell:downloads"),
+                button_center_y: 10,
+                is_recent: false,
+            },
+        );
+        assert!(!state.submenu_chain.is_open());
+        assert!(state.submenu_chain.flow.is_none());
+        assert!(state.submenu_popups.is_empty());
+    }
+
+    #[test]
+    fn remove_then_flush_saves_shortened_list() {
+        use crate::recent_store::test_mocks::MockRecentStore;
+        use crate::test_helpers::RecentStoreArc;
+        let mut state = recent_state(&["C:\\A", "C:\\B"]);
+        let store = std::sync::Arc::new(MockRecentStore::default());
+        state.recent_store = Box::new(RecentStoreArc(store.clone()));
+        assert!(state.remove_recent(toolbar(), Path::new("C:\\A")));
+        state.flush_recent(toolbar());
+        assert_eq!(*store.save_calls.lock().unwrap(), 1);
+        let saved = store.stored.lock().unwrap().clone();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].path, PathBuf::from("C:\\B"));
     }
 }

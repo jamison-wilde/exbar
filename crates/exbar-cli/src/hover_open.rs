@@ -196,6 +196,37 @@ fn arrive(
     }
 }
 
+/// Map the pointer state machine's post-`Move` state to the hover event for
+/// that mouse move, or `None` when hover must stay silent.
+///
+/// Only the passive states feed hover: while a button is pressed (including
+/// the below-threshold jitter of a click and a reorder drag) nothing is sent,
+/// otherwise `MoveOffButtons` would clear the `Suppressed` state that
+/// `ButtonDown` set and the clicked folder would pop open after release.
+/// Every `PointerState` variant is listed so a new one forces a decision.
+pub fn event_for_pointer(
+    pointer: &crate::pointer::PointerState,
+    is_recent: impl Fn(usize) -> bool,
+    x: i32,
+    y: i32,
+    chain_open: bool,
+) -> Option<HoverEvent> {
+    use crate::pointer::PointerState;
+    match *pointer {
+        PointerState::Hovering { button } if button >= 1 => Some(HoverEvent::MoveOnButton {
+            button,
+            is_recent: is_recent(button),
+            x,
+            y,
+            chain_open,
+        }),
+        PointerState::Hovering { .. } | PointerState::Idle => Some(HoverEvent::MoveOffButtons),
+        PointerState::PressedNonFolder { .. }
+        | PointerState::PressedFolder { .. }
+        | PointerState::DraggingReorder { .. } => None,
+    }
+}
+
 // ── ToolbarState adapter ─────────────────────────────────────────────────────
 
 impl ToolbarState {
@@ -675,5 +706,74 @@ mod tests {
     fn recent_switches_instantly_from_an_open_chain() {
         let mut s = HoverState::Open { button: 3 };
         assert_eq!(transition(&mut s, recent(1, true), &CTX), vec![Open(1)]);
+    }
+
+    #[test]
+    fn event_for_pointer_maps_every_pointer_state() {
+        use crate::pointer::PointerState as P;
+        let rec = |b: usize| b == 2;
+        let f = |p: P| event_for_pointer(&p, rec, 7, 9, true);
+        assert_eq!(
+            f(P::Hovering { button: 2 }),
+            Some(HoverEvent::MoveOnButton {
+                button: 2,
+                is_recent: true,
+                x: 7,
+                y: 9,
+                chain_open: true
+            })
+        );
+        assert_eq!(
+            f(P::Hovering { button: 3 }),
+            Some(HoverEvent::MoveOnButton {
+                button: 3,
+                is_recent: false,
+                x: 7,
+                y: 9,
+                chain_open: true
+            })
+        );
+        assert_eq!(
+            f(P::Hovering { button: 0 }),
+            Some(HoverEvent::MoveOffButtons)
+        );
+        assert_eq!(f(P::Idle), Some(HoverEvent::MoveOffButtons));
+        assert_eq!(f(P::PressedNonFolder { button: 1 }), None);
+        assert_eq!(
+            f(P::PressedFolder {
+                button: 2,
+                press_x: 0,
+                press_y: 0,
+                long_press_fired: false
+            }),
+            None
+        );
+        assert_eq!(
+            f(P::DraggingReorder {
+                source_button: 2,
+                insertion: 3
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn click_then_release_jitter_does_not_rearm_hover() {
+        use crate::pointer::PointerState as P;
+        let mut s = HoverState::Idle;
+        transition(&mut s, HoverEvent::ButtonDown { button: Some(2) }, &CTX);
+        assert_eq!(s, HoverState::Suppressed { button: 2 });
+        // Moves while pressed produce no events (mapper returns None).
+        let pressed = P::PressedFolder {
+            button: 2,
+            press_x: 0,
+            press_y: 0,
+            long_press_fired: false,
+        };
+        assert_eq!(event_for_pointer(&pressed, |_| false, 1, 1, false), None);
+        // After release the pointer is Hovering again on the same button.
+        let ev = event_for_pointer(&P::Hovering { button: 2 }, |_| false, 1, 1, false).unwrap();
+        assert_eq!(transition(&mut s, ev, &CTX), vec![]);
+        assert_eq!(s, HoverState::Suppressed { button: 2 });
     }
 }
