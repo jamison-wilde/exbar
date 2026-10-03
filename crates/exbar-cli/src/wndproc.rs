@@ -971,12 +971,10 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     let done = unsafe {
                         match crate::submenu_wnd::popup_state(popup_hwnd) {
                             Some(popup) => {
-                                let total = popup.display_items.len();
-                                let visible = popup.layout.visible_count;
-                                if total <= visible {
+                                let max_offset = popup.layout.max_scroll_offset();
+                                if max_offset == 0 {
                                     true
                                 } else {
-                                    let max_offset = total - visible;
                                     let new_offset = if dir < 0 {
                                         popup.scroll_offset.saturating_sub(1)
                                     } else {

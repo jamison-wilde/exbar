@@ -703,12 +703,10 @@ impl SubmenuDropTarget {
             None => return -1,
         };
 
-        for (vis_i, rect) in popup.layout.item_rects.iter().enumerate() {
-            if pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom {
-                return (vis_i + popup.scroll_offset) as isize;
-            }
+        match popup.layout.hit(pt.x, pt.y, popup.scroll_offset) {
+            crate::layout::PopupHit::Item(i) => i as isize,
+            _ => -1,
         }
-        -1
     }
 
     fn post_hover(&self, item_idx: isize) {

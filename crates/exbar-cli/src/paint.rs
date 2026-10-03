@@ -591,6 +591,39 @@ fn paint_popup_row(
     }
 }
 
+/// Paint a scroll-arrow row: the glyph centred in `rect`, dim when disabled.
+fn paint_arrow_row(
+    hdc: HDC,
+    rect: crate::layout::Rect,
+    glyph: &str,
+    enabled: bool,
+    palette: &PopupPalette,
+) {
+    let mut wide: Vec<u16> = glyph.encode_utf16().collect();
+    let mut r = RECT {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    };
+    unsafe {
+        SetTextColor(
+            hdc,
+            if enabled {
+                palette.text
+            } else {
+                palette.text_dim
+            },
+        );
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut r,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+    }
+}
+
 /// Render a submenu popup. Called from the popup wndproc's `WM_PAINT` handler.
 ///
 /// Not unit-tested (pure GDI) — covered by manual smoke in Task 17.
@@ -660,74 +693,47 @@ pub fn paint_submenu_popup(
 
     unsafe { SetBkMode(hdc, TRANSPARENT) };
 
-    // Only paint the visible window of items (scroll_offset..scroll_offset+visible_count).
-    let start = scroll_offset;
-    let end = (start + layout.visible_count).min(display_items.len());
-    for (vis_i, item) in display_items[start..end].iter().enumerate() {
-        let Some(rect) = layout.item_rects.get(vis_i) else {
+    // Paint every display row the layout currently shows (pinned header plus
+    // the visible scroll window); the layout owns the index <-> row mapping.
+    let last = display_items.len().saturating_sub(1);
+    for (i, item) in display_items.iter().enumerate() {
+        let Some(rect) = layout.rect_for_display_index(i, scroll_offset) else {
             continue;
         };
-        let win_rect = RECT {
-            left: rect.left,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.bottom,
-        };
-        // highlighted_index is in display-items space; vis_i is visible-window space.
-        let logical_i = start + vis_i;
         paint_popup_row(
             hdc,
             item,
-            win_rect,
-            highlighted_index == Some(logical_i),
-            logical_i == 0,
-            logical_i + 1 == display_items.len(),
+            RECT {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+            },
+            highlighted_index == Some(i),
+            i == 0,
+            i == last,
             at_max_depth,
             &palette,
             dpi,
         );
     }
 
-    // Scroll indicators: ▲ in top buffer band when more items above; ▼ in bottom band below.
-    let can_scroll_up = scroll_offset > 0;
-    let can_scroll_down = scroll_offset + layout.visible_count < display_items.len();
-
-    unsafe { SetTextColor(hdc, text_color_dim) };
-
-    if can_scroll_up {
-        let mut up_glyph: Vec<u16> = "\u{25B2}".encode_utf16().collect(); // ▲
-        // Glyph paints in the inner trigger band only (adjacent to items),
-        // not the full buffer — keeps the outer forgiveness zone visually clean.
-        let mut tr = RECT {
-            left: 0,
-            top: layout.buffer_top_px - layout.scroll_trigger_top_px,
-            right: layout.popup_w,
-            bottom: layout.buffer_top_px,
-        };
-        unsafe {
-            DrawTextW(
-                hdc,
-                &mut up_glyph,
-                &mut tr,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-            );
-        }
-    }
-    if can_scroll_down {
-        let mut down_glyph: Vec<u16> = "\u{25BC}".encode_utf16().collect(); // ▼
-        let mut tr = RECT {
-            left: 0,
-            top: layout.popup_h - layout.buffer_bottom_px,
-            right: layout.popup_w,
-            bottom: layout.popup_h - layout.buffer_bottom_px + layout.scroll_trigger_bottom_px,
-        };
-        unsafe {
-            DrawTextW(
-                hdc,
-                &mut down_glyph,
-                &mut tr,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-            );
+    // Arrow rows exist only when the scrolling rows overflow; dim when the
+    // list cannot scroll further in that direction.
+    for (rect, glyph, enabled) in [
+        (
+            layout.arrow_up_rect,
+            "▲", // ▲
+            layout.can_scroll_up(scroll_offset),
+        ),
+        (
+            layout.arrow_down_rect,
+            "▼", // ▼
+            layout.can_scroll_down(scroll_offset),
+        ),
+    ] {
+        if let Some(r) = rect {
+            paint_arrow_row(hdc, r, glyph, enabled, &palette);
         }
     }
 
