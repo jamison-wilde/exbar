@@ -80,7 +80,7 @@ Edit `~\.exbar\config.json` (in your user home folder):
   "foregroundDebounceMs": 300,  // ride out Explorer foreground-event storms instead of flashing along; 0 disables
   "submenu": {
     "springOpenDelayMs": 500,   // long-press threshold to open a subfolder submenu
-    "longHoverOpenMs": 400,     // how long the pointer must rest on a folder to open it; 0 = on contact (Recent always opens on contact)
+    "longHoverOpenMs": 0, // 0 = open on contact; set e.g. 400 to require the pointer to rest
     "hoverBufferPx": 30,        // forgiveness zone around each popup
     "nonChainItemOpacity": 0.5  // (reserved for future use)
   },

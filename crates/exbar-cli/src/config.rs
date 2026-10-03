@@ -64,7 +64,7 @@ fn default_spring_open_delay_ms() -> u32 {
     500
 }
 fn default_long_hover_open_ms() -> u32 {
-    400
+    0
 }
 fn default_hover_buffer_px() -> u32 {
     30
@@ -216,7 +216,8 @@ pub struct SubmenuConfig {
     /// How long (ms) the pointer must *rest* on a folder button before its
     /// submenu opens; movement restarts the wait. The Recent button ignores
     /// this and opens on contact, and once any submenu is open, hovering
-    /// another button switches immediately. `0` opens on contact.
+    /// another button switches immediately. Default `0` = open on contact;
+    /// set > 0 to require the pointer to rest.
     /// Clamped 0..=5000.
     #[serde(
         rename = "longHoverOpenMs",
@@ -815,7 +816,7 @@ mod tests {
     #[test]
     fn submenu_long_hover_default_when_missing() {
         let cfg: Config = Config::from_str(r#"{"folders":[]}"#).unwrap();
-        assert_eq!(cfg.submenu.long_hover_open_ms, 400);
+        assert_eq!(cfg.submenu.long_hover_open_ms, 0);
     }
 
     #[test]

@@ -232,82 +232,183 @@ pub fn compute_insertion_index(input: &InsertionInput) -> usize {
     }
 }
 
-/// Result of `compute_submenu_layout`: the popup's overall size + each item's
+/// Where a popup's pinned header row sits (it never scrolls).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderPin {
+    None,
+    Top,
+    Bottom,
+}
+
+/// What lies under a client point of a submenu popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupHit {
+    /// Display index (header included: Top = 0, Bottom = `total_count`).
+    Item(usize),
+    ArrowUp,
+    ArrowDown,
+    Nothing,
+}
+
+/// Result of `compute_submenu_layout`: the popup's overall size + each row's
 /// rect (relative to the popup's client-area origin, i.e. (0,0) = top-left).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubmenuLayout {
+    /// Visible scrolling rows only (not the header, not the arrows).
     pub item_rects: Vec<Rect>,
     pub popup_w: i32,
     pub popup_h: i32,
-    /// Buffer (forgiveness zone) at the top of the popup, in physical pixels.
-    /// May be 0 when the toolbar-facing side is collapsed for level-1 popups
-    /// whose opening direction means the top edge is flush with the toolbar.
+    /// Pure forgiveness zone at the top, in physical pixels. May be 0 when the
+    /// top edge is flush with the toolbar.
     pub buffer_top_px: i32,
-    /// Buffer (forgiveness zone) at the bottom of the popup, in physical pixels.
-    /// May be 0 when the toolbar-facing side is collapsed for level-1 popups
-    /// whose opening direction means the bottom edge is flush with the toolbar.
+    /// Pure forgiveness zone at the bottom, in physical pixels.
     pub buffer_bottom_px: i32,
-    /// Scroll-trigger band height at the top (inner min(buffer_top_px, 16) px).
-    pub scroll_trigger_top_px: i32,
-    /// Scroll-trigger band height at the bottom (inner min(buffer_bottom_px, 16) px).
-    pub scroll_trigger_bottom_px: i32,
-    /// Number of items visible in the popup's painted area (≤ `total_count`).
+    /// Number of scrolling rows visible (<= `total_count`).
     pub visible_count: usize,
-    /// Total items the caller wanted to show (pre-scroll).
+    /// Scrolling rows the caller wanted to show (excludes the pinned header).
     pub total_count: usize,
+    pub header: HeaderPin,
+    pub header_rect: Option<Rect>,
+    /// Present only when the scrolling rows overflow.
+    pub arrow_up_rect: Option<Rect>,
+    pub arrow_down_rect: Option<Rect>,
+}
+
+impl SubmenuLayout {
+    fn header_offset(&self) -> usize {
+        usize::from(self.header == HeaderPin::Top)
+    }
+
+    /// Map a client point to what is under it. All display-index <-> row
+    /// mapping lives here; callers must not do scroll arithmetic themselves.
+    pub fn hit(&self, x: i32, y: i32, scroll_offset: usize) -> PopupHit {
+        if self.header_rect.is_some_and(|r| r.contains(x, y)) {
+            return PopupHit::Item(match self.header {
+                HeaderPin::Top => 0,
+                _ => self.total_count,
+            });
+        }
+        if self.arrow_up_rect.is_some_and(|r| r.contains(x, y)) {
+            return PopupHit::ArrowUp;
+        }
+        if self.arrow_down_rect.is_some_and(|r| r.contains(x, y)) {
+            return PopupHit::ArrowDown;
+        }
+        for (i, r) in self.item_rects.iter().enumerate() {
+            if r.contains(x, y) {
+                return PopupHit::Item(scroll_offset + i + self.header_offset());
+            }
+        }
+        PopupHit::Nothing
+    }
+
+    /// Client rect of display item `idx` if currently visible (the header is
+    /// always visible).
+    pub fn rect_for_display_index(&self, idx: usize, scroll_offset: usize) -> Option<Rect> {
+        let is_header = match self.header {
+            HeaderPin::Top => idx == 0,
+            HeaderPin::Bottom => idx == self.total_count,
+            HeaderPin::None => false,
+        };
+        if is_header {
+            return self.header_rect;
+        }
+        let scroll_idx = idx.checked_sub(self.header_offset())?;
+        let row = scroll_idx.checked_sub(scroll_offset)?;
+        if row >= self.visible_count {
+            return None;
+        }
+        self.item_rects.get(row).copied()
+    }
+
+    pub fn can_scroll_up(&self, scroll_offset: usize) -> bool {
+        scroll_offset > 0
+    }
+
+    pub fn can_scroll_down(&self, scroll_offset: usize) -> bool {
+        scroll_offset + self.visible_count < self.total_count
+    }
+
+    pub fn max_scroll_offset(&self) -> usize {
+        self.total_count.saturating_sub(self.visible_count)
+    }
 }
 
 /// Compute a vertical-stack layout for a submenu popup.
 ///
-/// Items stack top-to-bottom inside translucent buffer bands at the top and
-/// bottom. The buffers implement the cursor-forgiveness zone described in the
-/// spec. Pass asymmetric values (e.g. `buffer_top_px = 0`) for level-1 popups
-/// where one side is flush against the toolbar/screen edge.
-///
-/// `max_popup_h` clamps the popup height: if all items don't fit, only the
-/// first `visible_count` produce rects; the caller uses `scroll_offset` to
-/// select which slice of `display_items` to paint. Pass a very large value
-/// (e.g. 10 000) to disable clamping.
+/// `scroll_count` excludes a pinned header. Order top to bottom:
+/// Top `header, up, rows, down`, Bottom `up, rows, down, header`, None
+/// `up, rows, down`; the arrow rows exist only when the rows overflow
+/// `max_popup_h`. Buffers are pure forgiveness zones. At least one row stays
+/// visible even if that exceeds `max_popup_h`.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_submenu_layout(
-    item_count: usize,
+    scroll_count: usize,
+    header: HeaderPin,
     item_px: i32,
+    arrow_px: i32,
     max_width_px: i32,
     buffer_top_px: i32,
     buffer_bottom_px: i32,
     max_popup_h: i32,
 ) -> SubmenuLayout {
-    // Floor: always fit at least one item even if max_popup_h is tiny.
-    let floor_h = buffer_top_px + buffer_bottom_px + item_px;
-    let want_h = (item_count as i32) * item_px + buffer_top_px + buffer_bottom_px;
-    let popup_h = want_h.min(max_popup_h.max(floor_h));
-    let visible_count =
-        (((popup_h - buffer_top_px - buffer_bottom_px) / item_px.max(1)) as usize).min(item_count);
-    let mut rects = Vec::with_capacity(visible_count);
-    for i in 0..visible_count {
-        rects.push(Rect {
-            left: buffer_top_px,
-            top: buffer_top_px + (i as i32) * item_px,
-            right: buffer_top_px + max_width_px,
-            bottom: buffer_top_px + (i as i32) * item_px + item_px,
-        });
+    let header_h = if header == HeaderPin::None {
+        0
+    } else {
+        item_px
+    };
+    let buffers = buffer_top_px + buffer_bottom_px;
+    let want_h = buffers + header_h + (scroll_count as i32) * item_px;
+    let overflow = want_h > max_popup_h;
+    let arrows_h = if overflow { 2 * arrow_px } else { 0 };
+    let visible_count = if overflow {
+        let avail = max_popup_h - buffers - header_h - arrows_h;
+        ((avail / item_px.max(1)).max(1) as usize).min(scroll_count)
+    } else {
+        scroll_count
+    };
+    let popup_h = buffers + header_h + arrows_h + (visible_count as i32) * item_px;
+    let left = buffer_top_px;
+    let right = buffer_top_px + max_width_px;
+    let row = |top: i32, h: i32| Rect {
+        left,
+        top,
+        right,
+        bottom: top + h,
+    };
+    let mut y = buffer_top_px;
+    let mut header_rect = None;
+    if header == HeaderPin::Top {
+        header_rect = Some(row(y, item_px));
+        y += item_px;
     }
-    // Scroll trigger bands: inner min(buffer_*_px, 16) px adjacent to items.
-    // When a buffer is very small (< 16), the whole buffer is the trigger zone.
-    // The outer portion stays pure forgiveness — cursor can drift past ▲/▼
-    // without triggering scroll.
-    let scroll_trigger_top_px = buffer_top_px.min(16);
-    let scroll_trigger_bottom_px = buffer_bottom_px.min(16);
-
+    let arrow_up_rect = overflow.then(|| row(y, arrow_px));
+    if overflow {
+        y += arrow_px;
+    }
+    let item_rects: Vec<Rect> = (0..visible_count)
+        .map(|i| row(y + (i as i32) * item_px, item_px))
+        .collect();
+    y += (visible_count as i32) * item_px;
+    let arrow_down_rect = overflow.then(|| row(y, arrow_px));
+    if overflow {
+        y += arrow_px;
+    }
+    if header == HeaderPin::Bottom {
+        header_rect = Some(row(y, item_px));
+    }
     SubmenuLayout {
-        item_rects: rects,
-        popup_w: max_width_px + buffer_top_px + buffer_bottom_px,
+        item_rects,
+        popup_w: max_width_px + buffers,
         popup_h,
         buffer_top_px,
         buffer_bottom_px,
-        scroll_trigger_top_px,
-        scroll_trigger_bottom_px,
         visible_count,
-        total_count: item_count,
+        total_count: scroll_count,
+        header,
+        header_rect,
+        arrow_up_rect,
+        arrow_down_rect,
     }
 }
 
@@ -950,46 +1051,45 @@ mod tests {
         }
     }
 
+    fn lay(n: usize, h: HeaderPin, bt: i32, bb: i32, max_h: i32) -> SubmenuLayout {
+        // item 30, arrow 18, width 200
+        compute_submenu_layout(n, h, 30, 18, 200, bt, bb, max_h)
+    }
+
     #[test]
     fn submenu_layout_stacks_vertically_with_buffer() {
-        // Pass generous max_popup_h so no clamping occurs.
-        let layout = compute_submenu_layout(3, 28, 200, 10, 10, 10_000);
+        let layout = lay(3, HeaderPin::None, 10, 10, 10_000);
         assert_eq!(layout.item_rects.len(), 3);
         assert_eq!(layout.visible_count, 3);
         assert_eq!(layout.total_count, 3);
-        // First inner rect top-left is (buffer_top, buffer_top).
         assert_eq!(layout.item_rects[0].left, 10);
         assert_eq!(layout.item_rects[0].top, 10);
         assert_eq!(layout.item_rects[0].width(), 200);
-        assert_eq!(layout.item_rects[0].height(), 28);
-        assert_eq!(layout.item_rects[1].top, 10 + 28);
+        assert_eq!(layout.item_rects[0].height(), 30);
+        assert_eq!(layout.item_rects[1].top, 40);
         assert_eq!(layout.item_rects[1].left, 10);
         assert_eq!(layout.item_rects[1].width(), 200);
-        assert_eq!(layout.item_rects[1].bottom, 10 + 28 + 28);
-        // Total popup size includes buffer on both sides.
-        assert_eq!(layout.popup_w, 200 + 2 * 10);
-        assert_eq!(layout.popup_h, 3 * 28 + 2 * 10);
+        assert_eq!(layout.item_rects[1].bottom, 70);
+        assert_eq!(layout.popup_w, 220);
+        assert_eq!(layout.popup_h, 3 * 30 + 20);
+        assert!(layout.arrow_up_rect.is_none() && layout.arrow_down_rect.is_none());
+        assert!(layout.header_rect.is_none());
     }
 
     #[test]
     fn submenu_layout_zero_items_is_just_buffer() {
-        let layout = compute_submenu_layout(0, 28, 200, 10, 10, 10_000);
+        let layout = lay(0, HeaderPin::None, 10, 10, 10_000);
         assert_eq!(layout.popup_w, 220);
         assert_eq!(layout.visible_count, 0);
         assert_eq!(layout.total_count, 0);
-        // With zero items, popup_h is just 2*buffer (clamped floor = 2*buffer + item_px,
-        // but item_count=0 so want_h=20 which is smaller than floor=56; floor wins).
-        // Actually: floor_h = 10 + 10 + 28 = 48; want_h = 0*28 + 20 = 20; popup_h = min(20, max(10000, 48)) ... wait:
-        // popup_h = want_h.min(max_popup_h.max(floor_h)) = 20.min(10000.max(48)) = 20.min(10000) = 20.
-        // floor is only used to clamp max_popup_h upward before min — it doesn't lift want_h.
         assert_eq!(layout.popup_h, 20);
         assert!(layout.item_rects.is_empty());
     }
 
     #[test]
     fn submenu_layout_zero_buffer_tight_fit() {
-        let layout = compute_submenu_layout(2, 30, 150, 0, 0, 10_000);
-        assert_eq!(layout.popup_w, 150);
+        let layout = lay(2, HeaderPin::None, 0, 0, 10_000);
+        assert_eq!(layout.popup_w, 200);
         assert_eq!(layout.popup_h, 60);
         assert_eq!(layout.visible_count, 2);
         assert_eq!(layout.total_count, 2);
@@ -998,7 +1098,7 @@ mod tests {
             Rect {
                 left: 0,
                 top: 0,
-                right: 150,
+                right: 200,
                 bottom: 30
             }
         );
@@ -1007,66 +1107,147 @@ mod tests {
             Rect {
                 left: 0,
                 top: 30,
-                right: 150,
+                right: 200,
                 bottom: 60
             }
         );
     }
 
     #[test]
-    fn submenu_layout_clamps_to_max_height_and_reports_visible_count() {
-        // 10 items × 30 px + 2*10 buffer = 320 needed; max 150 → (150-20)/30 = 4 visible.
-        let layout = compute_submenu_layout(10, 30, 200, 10, 10, 150);
+    fn submenu_layout_overflow_none_header_has_arrows_and_visible_math() {
+        // buffers 20, arrows 36 → avail = 150-20-36 = 94 → 3 visible.
+        let layout = lay(10, HeaderPin::None, 10, 10, 150);
         assert_eq!(layout.total_count, 10);
-        assert_eq!(layout.visible_count, 4);
-        assert_eq!(layout.item_rects.len(), 4);
-        assert_eq!(layout.popup_h, 150);
+        assert_eq!(layout.visible_count, 3);
+        assert_eq!(layout.popup_h, 20 + 36 + 90);
+        let up = layout.arrow_up_rect.unwrap();
+        let down = layout.arrow_down_rect.unwrap();
+        assert_eq!((up.top, up.bottom), (10, 28));
+        assert_eq!(layout.item_rects[0].top, 28);
+        assert_eq!(layout.item_rects[2].bottom, 118);
+        assert_eq!((down.top, down.bottom), (118, 136));
+        assert!(layout.header_rect.is_none());
     }
 
     #[test]
-    fn submenu_layout_honors_min_height_floor() {
-        // max_popup_h smaller than even one item + buffer → floor lifts it.
-        // floor_h = 10 + 10 + 30 = 50; max_popup_h=20 → max(20, 50) = 50.
-        let layout = compute_submenu_layout(10, 30, 200, 10, 10, 20);
-        assert_eq!(layout.popup_h, 50);
+    fn submenu_layout_overflow_top_header_order() {
+        // buffers 0/10, header 30, arrows 36 → avail = 200-10-30-36 = 124 → 4.
+        let layout = lay(10, HeaderPin::Top, 0, 10, 200);
+        assert_eq!(layout.visible_count, 4);
+        assert_eq!(layout.popup_h, 10 + 30 + 36 + 120);
+        let h = layout.header_rect.unwrap();
+        let up = layout.arrow_up_rect.unwrap();
+        let down = layout.arrow_down_rect.unwrap();
+        assert_eq!((h.top, h.bottom), (0, 30));
+        assert_eq!((up.top, up.bottom), (30, 48));
+        assert_eq!(layout.item_rects[0].top, 48);
+        assert_eq!((down.top, down.bottom), (168, 186));
+        assert_eq!(layout.popup_h, 186 + 10);
+    }
+
+    #[test]
+    fn submenu_layout_overflow_bottom_header_order() {
+        let layout = lay(10, HeaderPin::Bottom, 10, 0, 200);
+        assert_eq!(layout.visible_count, 4);
+        let up = layout.arrow_up_rect.unwrap();
+        let down = layout.arrow_down_rect.unwrap();
+        let h = layout.header_rect.unwrap();
+        assert_eq!((up.top, up.bottom), (10, 28));
+        assert_eq!(layout.item_rects[0].top, 28);
+        assert_eq!((down.top, down.bottom), (148, 166));
+        assert_eq!((h.top, h.bottom), (166, 196));
+        assert_eq!(layout.popup_h, 196);
+    }
+
+    #[test]
+    fn submenu_layout_fits_header_top_and_bottom_no_arrows() {
+        let t = lay(3, HeaderPin::Top, 0, 10, 10_000);
+        assert_eq!(t.header_rect.unwrap().top, 0);
+        assert_eq!(t.item_rects[0].top, 30);
+        assert_eq!(t.popup_h, 30 + 90 + 10);
+        assert!(t.arrow_up_rect.is_none());
+        let b = lay(3, HeaderPin::Bottom, 10, 0, 10_000);
+        assert_eq!(b.item_rects[0].top, 10);
+        assert_eq!(b.header_rect.unwrap().top, 100);
+        assert_eq!(b.popup_h, 130);
+    }
+
+    #[test]
+    fn submenu_layout_honors_min_one_visible_floor() {
+        let layout = lay(10, HeaderPin::None, 10, 10, 20);
         assert_eq!(layout.visible_count, 1);
+        assert_eq!(layout.popup_h, 20 + 36 + 30);
     }
 
     #[test]
     fn submenu_layout_visible_count_never_exceeds_total() {
-        // Plenty of height for 20 but only 3 items → visible=3, not more.
-        let layout = compute_submenu_layout(3, 30, 200, 10, 10, 10_000);
+        let layout = lay(3, HeaderPin::None, 10, 10, 10_000);
         assert_eq!(layout.visible_count, 3);
-        assert_eq!(layout.total_count, 3);
-    }
-
-    #[test]
-    fn submenu_layout_scroll_trigger_px_reasonable() {
-        // buffer=30 >= 16 → both triggers clamp to 16.
-        let layout = compute_submenu_layout(5, 30, 200, 30, 30, 10_000);
-        assert_eq!(layout.scroll_trigger_top_px, 16);
-        assert_eq!(layout.scroll_trigger_bottom_px, 16);
-    }
-
-    #[test]
-    fn submenu_layout_scroll_trigger_clamps_to_small_buffer() {
-        // buffer=5 < 16 → trigger equals buffer on both sides.
-        let layout = compute_submenu_layout(5, 30, 200, 5, 5, 10_000);
-        assert_eq!(layout.scroll_trigger_top_px, 5);
-        assert_eq!(layout.scroll_trigger_bottom_px, 5);
     }
 
     #[test]
     fn submenu_layout_asymmetric_buffer() {
-        // top=0, bottom=20: popup_h = 3*30 + 0 + 20 = 110; items start at y=0.
-        let layout = compute_submenu_layout(3, 30, 200, 0, 20, 10_000);
+        let layout = lay(3, HeaderPin::None, 0, 20, 10_000);
         assert_eq!(layout.popup_h, 110);
         assert_eq!(layout.item_rects[0].top, 0);
         assert_eq!(layout.item_rects[0].bottom, 30);
         assert_eq!(layout.item_rects[2].bottom, 90);
         assert_eq!(layout.buffer_top_px, 0);
         assert_eq!(layout.buffer_bottom_px, 20);
-        assert_eq!(layout.scroll_trigger_top_px, 0);
-        assert_eq!(layout.scroll_trigger_bottom_px, 16);
+    }
+
+    #[test]
+    fn hit_header_arrows_and_buffers() {
+        let l = lay(10, HeaderPin::Top, 0, 10, 200);
+        assert_eq!(l.hit(50, 10, 0), PopupHit::Item(0));
+        assert_eq!(l.hit(50, 40, 0), PopupHit::ArrowUp);
+        assert_eq!(l.hit(50, 170, 0), PopupHit::ArrowDown);
+        assert_eq!(l.hit(50, 190, 0), PopupHit::Nothing);
+        assert_eq!(l.hit(-1, 10, 0), PopupHit::Nothing);
+    }
+
+    #[test]
+    fn hit_top_maps_display_index_with_scroll() {
+        let l = lay(10, HeaderPin::Top, 0, 10, 200);
+        // first visible row (y=48) with offset 3 → scroll item 3 → display 4.
+        assert_eq!(l.hit(50, 50, 3), PopupHit::Item(4));
+        // last visible row (4th, y=138..168).
+        assert_eq!(l.hit(50, 150, 3), PopupHit::Item(7));
+    }
+
+    #[test]
+    fn hit_bottom_maps_display_index_with_scroll() {
+        let l = lay(10, HeaderPin::Bottom, 10, 0, 200);
+        assert_eq!(l.hit(50, 30, 3), PopupHit::Item(3));
+        assert_eq!(l.hit(50, 147, 3), PopupHit::Item(6));
+        // header is display total_count (10).
+        assert_eq!(l.hit(50, 180, 3), PopupHit::Item(10));
+        assert_eq!(l.hit(50, 5, 3), PopupHit::Nothing);
+    }
+
+    #[test]
+    fn rect_for_display_index_header_visible_and_scrolled_out() {
+        let l = lay(10, HeaderPin::Top, 0, 10, 200);
+        assert_eq!(l.rect_for_display_index(0, 5), l.header_rect);
+        assert_eq!(l.rect_for_display_index(6, 5), Some(l.item_rects[0]));
+        assert_eq!(l.rect_for_display_index(2, 5), None);
+        assert_eq!(l.rect_for_display_index(10, 5), None);
+        let b = lay(10, HeaderPin::Bottom, 10, 0, 200);
+        assert_eq!(b.rect_for_display_index(10, 0), b.header_rect);
+        assert_eq!(b.rect_for_display_index(1, 0), Some(b.item_rects[1]));
+        assert_eq!(b.rect_for_display_index(9, 0), None);
+    }
+
+    #[test]
+    fn scroll_bounds_helpers() {
+        let l = lay(10, HeaderPin::None, 10, 10, 150);
+        assert_eq!(l.max_scroll_offset(), 7);
+        assert!(!l.can_scroll_up(0));
+        assert!(l.can_scroll_up(1));
+        assert!(l.can_scroll_down(6));
+        assert!(!l.can_scroll_down(7));
+        let fit = lay(3, HeaderPin::None, 0, 0, 10_000);
+        assert_eq!(fit.max_scroll_offset(), 0);
+        assert!(!fit.can_scroll_down(0));
     }
 }

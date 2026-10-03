@@ -89,6 +89,7 @@ impl ToolbarState {
         let work = self.submenu_work_area();
         let item_px = self.submenu_item_px();
         let buffer_px = self.submenu_cfg.hover_buffer_px as i32;
+        let arrow_px = crate::theme::scale(18, self.dpi);
 
         let Some(contents) = self.load_level_contents(level, &folder_path, is_recent) else {
             // OpenRoot/HoverChildItem already pushed this level into the pure
@@ -136,9 +137,17 @@ impl ToolbarState {
                 crate::submenu::Side::Below => (0, buffer_px),
                 crate::submenu::Side::Above => (buffer_px, 0),
             };
+            // Level 1 (non-Recent) carries a pinned header at the toolbar-facing end.
+            let header = match (matches!(contents, LevelContents::Folder(_)), placement.side) {
+                (false, _) => crate::layout::HeaderPin::None,
+                (true, crate::submenu::Side::Below) => crate::layout::HeaderPin::Top,
+                (true, crate::submenu::Side::Above) => crate::layout::HeaderPin::Bottom,
+            };
             let layout = crate::layout::compute_submenu_layout(
-                display_items.len(),
+                display_items.len() - usize::from(header != crate::layout::HeaderPin::None),
+                header,
                 item_px,
+                arrow_px,
                 width_for(&display_items),
                 buffer_top,
                 buffer_bottom,
@@ -153,15 +162,18 @@ impl ToolbarState {
                 .max(work.left)
                 .min(work.right - layout.popup_w);
             let y = level1_y(placement, band_top, band_bottom, layout.popup_h);
-            // Above popups put the header at the toolbar-facing bottom end;
-            // start at the end of the list so it is not hidden when scrolling.
+            // The toolbar-facing end of an Above popup is its bottom, so start
+            // at the end of the list: the user sees the rows nearest the
+            // toolbar first.
             start_scrolled_to_end = placement.side == crate::submenu::Side::Above;
             (display_items, layout, x, y)
         } else {
             let display_items = build(ReshowPosition::None);
             let layout = crate::layout::compute_submenu_layout(
                 display_items.len(),
+                crate::layout::HeaderPin::None,
                 item_px,
+                arrow_px,
                 width_for(&display_items),
                 buffer_px,
                 buffer_px,
@@ -172,7 +184,7 @@ impl ToolbarState {
         };
 
         let scroll_offset = if start_scrolled_to_end {
-            layout.total_count.saturating_sub(layout.visible_count)
+            layout.max_scroll_offset()
         } else {
             0
         };
@@ -291,13 +303,8 @@ impl ToolbarState {
                 crate::submenu_wnd::popup_state(parent_hwnd)
                     .and_then(|p| {
                         p.highlighted_index.and_then(|hi| {
-                            // highlighted_index is in display-items space;
-                            // item_rects is in visible-window space (0..visible_count).
-                            // Subtract scroll_offset to get the rect index.
-                            let vis_i = hi.checked_sub(p.scroll_offset)?;
                             p.layout
-                                .item_rects
-                                .get(vis_i)
+                                .rect_for_display_index(hi, p.scroll_offset)
                                 .map(|r| parent_rect.top + r.top)
                         })
                     })
@@ -441,13 +448,11 @@ impl ToolbarState {
         // highlighted_index in the same pass. Only fires when the index actually
         // changed, so mouse micro-motion at the same item is a no-op.
         //
-        // highlighted_index is in display-items space (0..total_count).
-        // layout.item_rects is in visible-window space (0..visible_count).
-        // When scroll_offset > 0 these spaces don't match — passing a display-space
-        // index directly to item_rects.get() returns the WRONG row or silently
-        // misses (causing stuck highlights or multi-highlight artifacts).
-        // We map display→visible before lookup; off-screen items fall back to a
-        // full InvalidateRect so no repaint is ever missed.
+        // highlighted_index is in display-items space (header included;
+        // layout.total_count excludes a pinned header). Rows are looked up via
+        // layout.rect_for_display_index, which owns the scroll/header mapping;
+        // scrolled-out items fall back to a full InvalidateRect so no repaint
+        // is ever missed.
         enum Action {
             None,
             Full,
@@ -462,16 +467,11 @@ impl ToolbarState {
                     let mut rects = Vec::new();
                     let mut any_offscreen = false;
                     for display_idx in [old, index].into_iter().flatten() {
-                        // Map display-space index → visible-space index.
-                        let vis = display_idx
-                            .checked_sub(popup.scroll_offset)
-                            .filter(|&v| v < popup.layout.visible_count);
-                        match vis {
-                            Some(v) => {
-                                if let Some(r) = popup.layout.item_rects.get(v) {
-                                    rects.push(*r);
-                                }
-                            }
+                        match popup
+                            .layout
+                            .rect_for_display_index(display_idx, popup.scroll_offset)
+                        {
+                            Some(r) => rects.push(r),
                             None => any_offscreen = true,
                         }
                     }
