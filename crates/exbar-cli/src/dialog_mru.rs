@@ -207,9 +207,156 @@ pub(crate) mod test_mocks {
     }
 }
 
+// ── Watcher thread ───────────────────────────────────────────────────────────
+
+/// How long to wait for further writes before reporting a change. One Save
+/// writes both `MRUListEx` and the entry value; reading after the burst
+/// ends guarantees the newest index points at a fully written entry.
+const MRU_SETTLE_MS: u32 = 150;
+
+/// Owns the watcher thread's shutdown event. Dropping it (with
+/// `ToolbarState` in `WM_DESTROY`) stops the thread.
+pub(crate) struct DialogMruWatcher {
+    shutdown: windows::Win32::Foundation::HANDLE,
+}
+
+impl DialogMruWatcher {
+    /// Start watching. `None` (logged) if the thread or event can't be made;
+    /// the feature is then simply off.
+    pub(crate) fn spawn(toolbar: HWND) -> Option<Self> {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::System::Threading::CreateEventW;
+
+        // Manual-reset: once set, every later wait sees it.
+        let shutdown = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+            Ok(h) => h,
+            Err(e) => {
+                log::warn!("dialog-mru: CreateEventW failed: {e:?}; dialog Recents off");
+                return None;
+            }
+        };
+        // HWND/HANDLE aren't Send; pass raw values and rebuild in the thread.
+        let hwnd_raw = toolbar.0 as isize;
+        let shutdown_raw = shutdown.0 as isize;
+        let spawned = std::thread::Builder::new()
+            .name("exbar-dialog-mru".into())
+            .spawn(move || {
+                let toolbar = HWND(hwnd_raw as *mut _);
+                let shutdown = HANDLE(shutdown_raw as *mut _);
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    watch_loop(toolbar, shutdown);
+                }))
+                .is_err()
+                {
+                    log::error!("dialog-mru: watcher panicked; dialog Recents off");
+                }
+            });
+        if let Err(e) = spawned {
+            log::warn!("dialog-mru: thread spawn failed: {e}; dialog Recents off");
+            unsafe {
+                let _ = CloseHandle(shutdown);
+            }
+            return None;
+        }
+        Some(Self { shutdown })
+    }
+}
+
+impl Drop for DialogMruWatcher {
+    fn drop(&mut self) {
+        // Signal only. The handle is not closed: the thread may still be
+        // waiting on it, and the process exits right after WM_DESTROY.
+        unsafe {
+            let _ = windows::Win32::System::Threading::SetEvent(self.shutdown);
+        }
+    }
+}
+
+/// Wait for changes to the MRU key; post one message per settled burst.
+fn watch_loop(toolbar: HWND, shutdown: windows::Win32::Foundation::HANDLE) {
+    use windows::Win32::Foundation::{CloseHandle, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM};
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_NOTIFY, REG_NOTIFY_CHANGE_LAST_SET, REG_OPTION_NON_VOLATILE,
+        RegCloseKey, RegCreateKeyExW, RegNotifyChangeKeyValue,
+    };
+    use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForMultipleObjects};
+    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+
+    // Create-or-open: a profile that has never used a file dialog has no key yet.
+    let mut key = HKEY::default();
+    let rc = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            MRU_KEY,
+            None,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_NOTIFY,
+            None,
+            &mut key,
+            None,
+        )
+    };
+    if rc.is_err() {
+        log::warn!("dialog-mru: cannot open MRU key: {rc:?}; dialog Recents off");
+        return;
+    }
+    let notify = match unsafe { CreateEventW(None, false, false, PCWSTR::null()) } {
+        Ok(h) => h,
+        Err(e) => {
+            log::warn!("dialog-mru: CreateEventW failed: {e:?}; dialog Recents off");
+            unsafe {
+                let _ = RegCloseKey(key);
+            }
+            return;
+        }
+    };
+    log::info!("dialog-mru: watching LastVisitedPidlMRU");
+
+    // `armed` avoids stacking a second registration on the same key while
+    // one is still pending (after a settle timeout).
+    let mut armed = false;
+    let mut pending = false;
+    loop {
+        if !armed {
+            let rc = unsafe {
+                RegNotifyChangeKeyValue(key, false, REG_NOTIFY_CHANGE_LAST_SET, Some(notify), true)
+            };
+            if rc.is_err() {
+                log::warn!("dialog-mru: RegNotifyChangeKeyValue failed: {rc:?}; stopping");
+                break;
+            }
+            armed = true;
+        }
+        let timeout = if pending { MRU_SETTLE_MS } else { INFINITE };
+        let woke = unsafe { WaitForMultipleObjects(&[notify, shutdown], false, timeout) };
+        if woke == WAIT_OBJECT_0 {
+            log::debug!("dialog-mru: key changed");
+            armed = false;
+            pending = true;
+        } else if woke == WAIT_TIMEOUT {
+            pending = false;
+            unsafe {
+                let _ = PostMessageW(
+                    Some(toolbar),
+                    crate::wndproc::WM_USER_DIALOG_MRU_CHANGED,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        } else {
+            // Shutdown signalled, or the wait failed.
+            break;
+        }
+    }
+    unsafe {
+        let _ = CloseHandle(notify);
+        let _ = RegCloseKey(key);
+    }
+}
+
 // ── ToolbarState adapter ─────────────────────────────────────────────────────
 
-#[allow(dead_code)] // called from wndproc in Task 4
 impl crate::toolbar::ToolbarState {
     /// Handle `WM_USER_DIALOG_MRU_CHANGED`: commit the newest dialog-MRU
     /// folder to Recents if it came from the dialog exbar is attached to.

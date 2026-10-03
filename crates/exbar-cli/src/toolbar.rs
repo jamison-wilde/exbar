@@ -232,6 +232,9 @@ pub(crate) struct ToolbarState {
     /// before its Save/Open reaches the MRU. Never cleared: the commit gate
     /// checks the target kind first, and the next dialog overwrites it.
     pub(crate) active_dialog_exe: Option<String>,
+    /// Dialog-MRU watcher; dropping it (with this state) stops the thread.
+    /// `None` in test states and if the watcher failed to start.
+    pub(crate) dialog_mru_watcher: Option<crate::dialog_mru::DialogMruWatcher>,
 }
 
 impl ToolbarState {
@@ -325,6 +328,7 @@ impl ToolbarState {
             probe_tx: None,
             dialog_mru: Box::new(crate::dialog_mru::Win32DialogMru::new()),
             active_dialog_exe: None,
+            dialog_mru_watcher: None,
         }
     }
 }

@@ -271,4 +271,9 @@ pub(crate) fn setup_on_create(hwnd: HWND, state: &mut ToolbarState) {
     if recent_enabled {
         state.arm_dwell_tick(hwnd);
     }
+    // Watch the shell's dialog MRU so file-dialog Save/Open feeds Recents.
+    // Runs regardless of config; the handler gates on Recents being enabled.
+    if state.dialog_mru_watcher.is_none() {
+        state.dialog_mru_watcher = crate::dialog_mru::DialogMruWatcher::spawn(hwnd);
+    }
 }
