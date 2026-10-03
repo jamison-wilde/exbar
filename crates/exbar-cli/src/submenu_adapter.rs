@@ -138,10 +138,10 @@ impl ToolbarState {
                 crate::submenu::Side::Above => (buffer_px, 0),
             };
             // Level 1 (non-Recent) carries a pinned header at the toolbar-facing end.
-            let header = match (is_recent, placement.side) {
-                (true, _) => crate::layout::HeaderPin::None,
-                (false, crate::submenu::Side::Below) => crate::layout::HeaderPin::Top,
-                (false, crate::submenu::Side::Above) => crate::layout::HeaderPin::Bottom,
+            let header = match (matches!(contents, LevelContents::Folder(_)), placement.side) {
+                (false, _) => crate::layout::HeaderPin::None,
+                (true, crate::submenu::Side::Below) => crate::layout::HeaderPin::Top,
+                (true, crate::submenu::Side::Above) => crate::layout::HeaderPin::Bottom,
             };
             let layout = crate::layout::compute_submenu_layout(
                 display_items.len() - usize::from(header != crate::layout::HeaderPin::None),
@@ -162,8 +162,9 @@ impl ToolbarState {
                 .max(work.left)
                 .min(work.right - layout.popup_w);
             let y = level1_y(placement, band_top, band_bottom, layout.popup_h);
-            // Above popups put the header at the toolbar-facing bottom end;
-            // start at the end of the list so it is not hidden when scrolling.
+            // The toolbar-facing end of an Above popup is its bottom, so start
+            // at the end of the list: the user sees the rows nearest the
+            // toolbar first.
             start_scrolled_to_end = placement.side == crate::submenu::Side::Above;
             (display_items, layout, x, y)
         } else {
@@ -447,13 +448,11 @@ impl ToolbarState {
         // highlighted_index in the same pass. Only fires when the index actually
         // changed, so mouse micro-motion at the same item is a no-op.
         //
-        // highlighted_index is in display-items space (0..total_count).
-        // layout.item_rects is in visible-window space (0..visible_count).
-        // When scroll_offset > 0 these spaces don't match — passing a display-space
-        // index directly to item_rects.get() returns the WRONG row or silently
-        // misses (causing stuck highlights or multi-highlight artifacts).
-        // We map display→visible before lookup; off-screen items fall back to a
-        // full InvalidateRect so no repaint is ever missed.
+        // highlighted_index is in display-items space (header included;
+        // layout.total_count excludes a pinned header). Rows are looked up via
+        // layout.rect_for_display_index, which owns the scroll/header mapping;
+        // scrolled-out items fall back to a full InvalidateRect so no repaint
+        // is ever missed.
         enum Action {
             None,
             Full,

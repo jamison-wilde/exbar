@@ -629,8 +629,8 @@ fn paint_arrow_row(
 /// Not unit-tested (pure GDI) — covered by manual smoke in Task 17.
 ///
 /// Design: fills the popup with bg_color under the layered-window alpha set at
-/// popup creation. Iterates `display_items` in parallel with
-/// `layout.item_rects`, drawing each row; the `highlighted_index` row gets an
+/// popup creation. Iterates `display_items` and draws each row the layout
+/// currently shows (`layout.rect_for_display_index`); the `highlighted_index` row gets an
 /// opaque accent bar. Rows with `has_children` paint a right-aligned `▸` glyph.
 /// Header and Dotdot items get distinctive markers. `Ellipsis` / `Empty`
 /// rows render disabled. Font obtained via `GetStockObject(DEFAULT_GUI_FONT)`,
@@ -723,12 +723,12 @@ pub fn paint_submenu_popup(
     for (rect, glyph, enabled) in [
         (
             layout.arrow_up_rect,
-            "▲", // ▲
+            "\u{25B2}",
             layout.can_scroll_up(scroll_offset),
         ),
         (
             layout.arrow_down_rect,
-            "▼", // ▼
+            "\u{25BC}",
             layout.can_scroll_down(scroll_offset),
         ),
     ] {

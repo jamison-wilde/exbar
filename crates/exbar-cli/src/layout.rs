@@ -1067,6 +1067,9 @@ mod tests {
         assert_eq!(layout.item_rects[0].width(), 200);
         assert_eq!(layout.item_rects[0].height(), 30);
         assert_eq!(layout.item_rects[1].top, 40);
+        assert_eq!(layout.item_rects[1].left, 10);
+        assert_eq!(layout.item_rects[1].width(), 200);
+        assert_eq!(layout.item_rects[1].bottom, 70);
         assert_eq!(layout.popup_w, 220);
         assert_eq!(layout.popup_h, 3 * 30 + 20);
         assert!(layout.arrow_up_rect.is_none() && layout.arrow_down_rect.is_none());
@@ -1078,6 +1081,7 @@ mod tests {
         let layout = lay(0, HeaderPin::None, 10, 10, 10_000);
         assert_eq!(layout.popup_w, 220);
         assert_eq!(layout.visible_count, 0);
+        assert_eq!(layout.total_count, 0);
         assert_eq!(layout.popup_h, 20);
         assert!(layout.item_rects.is_empty());
     }
@@ -1087,6 +1091,17 @@ mod tests {
         let layout = lay(2, HeaderPin::None, 0, 0, 10_000);
         assert_eq!(layout.popup_w, 200);
         assert_eq!(layout.popup_h, 60);
+        assert_eq!(layout.visible_count, 2);
+        assert_eq!(layout.total_count, 2);
+        assert_eq!(
+            layout.item_rects[0],
+            Rect {
+                left: 0,
+                top: 0,
+                right: 200,
+                bottom: 30
+            }
+        );
         assert_eq!(
             layout.item_rects[1],
             Rect {
@@ -1175,6 +1190,8 @@ mod tests {
         let layout = lay(3, HeaderPin::None, 0, 20, 10_000);
         assert_eq!(layout.popup_h, 110);
         assert_eq!(layout.item_rects[0].top, 0);
+        assert_eq!(layout.item_rects[0].bottom, 30);
+        assert_eq!(layout.item_rects[2].bottom, 90);
         assert_eq!(layout.buffer_top_px, 0);
         assert_eq!(layout.buffer_bottom_px, 20);
     }
