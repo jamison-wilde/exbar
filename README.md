@@ -12,7 +12,7 @@ I was a big fan of [GPSoft's Directory Opus](https://www.gpsoft.com.au/) in the 
 ## Features
 * Works with tabs, changing the active tab when clicking a folder in exbar. Ctrl-click to open in new tab.
 * Works in normal Save As / Open file dialogs too — click a folder to retarget the dialog instead of Explorer. Drag a file out of the dialog onto a toolbar folder to move or copy it there.
-* **Spring-open submenus**: long-press OR long-hover a folder to browse its subdirectories (up to 7 levels deep). Drop files anywhere in the submenu tree. `..` rows for quick up-traversal. Mouse wheel + hover-band autoscroll for long lists.
+* **Spring-open submenus**: long-press OR rest the pointer on a folder to browse its subdirectories (up to 7 levels deep). Drop files anywhere in the submenu tree. `..` rows for quick up-traversal. Mouse wheel + hover-band autoscroll for long lists.
 * **Recent Folders** (opt-in): a 🕘 button that tracks folders where you spend time or take action — including folders you Save to or Open from in a Save As / Open dialog. Privacy-preserving — disable anytime and the data file is deleted. Exclusion-path config keeps sensitive folders out.
 * **Network folder support**: mapped drives (`Z:\…`) and UNC paths (`\\server\share\…`) work as toolbar folders. Unreachable shares grey out instead of hanging the UI; right-click → `Retry connection` to re-probe.
 * Drag-n-drop support for moving and copying files with native Windows semantics around ctrl/shift drop.
@@ -49,7 +49,7 @@ The installer is per-user (no admin required) and:
 ## Use
 
 - **Click a folder button** — the active Explorer window's active tab navigates to that folder
-- **Long-press or long-hover** a folder button — opens a subfolder submenu. Click / Ctrl-click items to navigate; drop files onto them to move/copy; mouse-wheel or hover the top/bottom arrows to scroll long lists. `..` rows navigate up. Esc or click outside dismisses.
+- **Long-press or rest the pointer** on a folder button — opens a subfolder submenu beside the toolbar (never over it). Once one is open, slide across the toolbar to switch folders instantly. Right-click a Recents entry → **Remove from Recents**. Click / Ctrl-click items to navigate; drop files onto them to move/copy; mouse-wheel or hover the top/bottom arrows to scroll long lists. `..` rows navigate up. Esc or click outside dismisses.
 - **Drag a file/folder onto an exbar folder button** — moves (same drive) or copies (different drive) just like it would with a Quick Access folder
   - Hold `Ctrl` to force copy, or `Shift` to force move
 - **Drag the grip** (dots on the left edge when horizontal, top edge when vertical) — move the toolbar
@@ -80,7 +80,7 @@ Edit `~\.exbar\config.json` (in your user home folder):
   "foregroundDebounceMs": 300,  // ride out Explorer foreground-event storms instead of flashing along; 0 disables
   "submenu": {
     "springOpenDelayMs": 500,   // long-press threshold to open a subfolder submenu
-    "longHoverOpenMs": 1200,    // cursor-rest threshold to open without pressing
+    "longHoverOpenMs": 400,     // how long the pointer must rest on a folder to open it; 0 = on contact (Recent always opens on contact)
     "hoverBufferPx": 30,        // forgiveness zone around each popup
     "nonChainItemOpacity": 0.5  // (reserved for future use)
   },

@@ -49,6 +49,8 @@ exbar/
 │       │   ├── submenu.rs              # Pure chain-of-popups state machine + direction/display-list
 │       │   ├── subfolder_enum.rs       # SubfolderSource trait + Win32 impl (read_dir + ▸ probe)
 │       │   ├── submenu_wnd.rs          # Submenu popup HWND lifecycle (WS_EX_LAYERED + IDropTarget)
+│       │   ├── submenu_adapter.rs      # Submenu popup adapter on ToolbarState: open/place/close/highlight, Recents right-click
+│       │   ├── hover_open.rs           # Pure rest-based hover-open controller + adapter
 │       │   ├── recent_list.rs          # Pure LRU ops for recent folders (push/dedup/trim/exclude)
 │       │   ├── recent_tracker.rs       # Pure dwell+action state machine for Recent Folders
 │       │   ├── recent_store.rs         # RecentStore trait + JsonRecentStore → ~/.exbar/recents.json
@@ -130,6 +132,7 @@ Pointer and rename interactions are split into pure state-machine modules and th
 - `submenu.rs` — `SubmenuChain`, `SubmenuEvent`, `SubmenuCommand`, `transition(...)`. No Win32.
 - `recent_tracker.rs` — `TrackerState`, `TrackerEvent`, `TrackerCommand`, `transition(...)`. No Win32.
 - `fg_debounce.rs` — `DebounceState::on_event`, `settle_outcome`. No Win32.
+- `hover_open.rs` — `HoverState`, `HoverEvent`, `HoverCommand`, `transition(...)`. No Win32 in the core; adapter `execute_hover_event` in the same file.
 - `bootstrap.rs` — `next_action`, `should_abandon` (pure policy) + a thread-timer adapter.
 - `recent_list.rs` — `push`, `for_display` — LRU mutations, no time/IO; adapter supplies `now_unix_ms` via `Clock` trait.
 - `path_norm.rs` — Windows path normalization + prefix-exclusion match (no IO).
@@ -180,12 +183,15 @@ Beyond Explorer windows, the toolbar also activates over the Windows Common Item
 
 ### Spring-open submenus (v1.2.0)
 
-Every folder button can spawn a hierarchical subfolder popup tree on long-press (`springOpenDelayMs`, default 500 ms) or long-hover (`longHoverOpenMs`, default 1200 ms).
+Every folder button can spawn a hierarchical subfolder popup tree on long-press (`springOpenDelayMs`, default 500 ms) or hover-rest (`longHoverOpenMs`, default 400 ms).
+
+- **Hover-open controller** — `hover_open.rs`: pure `HoverState` (`Idle` / `Resting{button, anchor}` / `Open` / `Away` / `Suppressed`), `HoverEvent` (`MoveOnButton{…, chain_open}` / `MoveOffButtons` / `Leave` / `RestTimerFired` / `ButtonDown`), `HoverCommand` (`ArmRest` / `KillRest` / `Open`). A folder opens after the pointer *rests* `longHoverOpenMs` (movement beyond `theme::scale(4)` px re-arms; `0` = on contact). The Recent button opens on contact. While a chain is open, hovering another folder button switches immediately (`OpenRoot` closes the old chain first). A chain dismissed under the cursor, or a press on a button, leaves it `Suppressed` until the cursor leaves that button; `Leave` into a popup moves `Open` → `Away`, so returning after the chain closed elsewhere re-arms. Every move carries `chain_open`, which is how the controller notices chains it didn't open or that closed — the old inline logic lost the next button whenever a chain closed under it (every other folder never opened). Adapter `execute_hover_event` lives in the same file.
 
 - **Pure state machine** — `submenu.rs` owns `SubmenuChain` (vec of `ChainLevel`), `SubmenuEvent` (OpenRoot / HoverChildItem / HoverBufferAt / CursorExit / SafetyTick / CursorReenter / Commit / Dismiss), and `SubmenuCommand` (OpenLevel / CloseDeeperThan / CloseAll / SetHighlight). `transition(state, event) → Vec<command>`. No Win32.
 - **Win32 adapter** — `submenu_wnd.rs` creates per-level `WS_POPUP | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | HWND_TOPMOST` windows, each with its own `IDropTarget`. `SubmenuPopup` state stored via `GWLP_USERDATA` (`Box::into_raw` / `Box::from_raw` on destroy). Paint via `paint::paint_submenu_popup` with dark-mode-aware palette, chain-opacity rendering, and partial-rect invalidation on highlight changes.
-- **Depth cap** `MAX_CHAIN_DEPTH = 7`. Level 1 centered on the triggering button; levels 2+ flow right unless overflow triggers a one-way flip to left (reset per-subtree on truncation). `..` ancestor navigation with mode tracking (disappears once descent begins). Recent's root submenu sits entirely above or below the toolbar (not overlapping the 🕘 button).
-- **Dismiss** — 30 ms safety timer polls cursor position; transitions inside→outside arm a 5-tick (~150 ms) dismiss countdown. Click outside (`GetAsyncKeyState(VK_LBUTTON/VK_RBUTTON)` polled in the same tick) dismisses immediately. Esc via `GetAsyncKeyState(VK_ESCAPE)`. Foreground change to foreign window dismisses via existing `HwndRole::Unknown` branch.
+- **Level-1 placement** — pure `submenu::place_level1`: the popup opens on the side of the toolbar band that fits (Below preferred; else Above; else the larger side, height capped, overflow scrolls) and sits flush against it — never over the toolbar, wherever it is docked. Band = toolbar window rect for horizontal layout, the triggering button rect for vertical. The folder's `DisplayItem::Header` row (📂 full name, 1 px separator, click = open the folder) sits at the toolbar-facing end. The adapter is `submenu_adapter.rs` (`open_popup_level` → `load_level_contents`, `level1_band`, `leveln_origin`, `install_popup`).
+- **Depth cap** `MAX_CHAIN_DEPTH = 7`. Levels 2+ flow right unless overflow triggers a one-way flip to left (reset per-subtree on truncation). `..` ancestor navigation with mode tracking (disappears once descent begins).
+- **Dismiss** — 30 ms safety timer polls cursor position; transitions inside→outside arm a 5-tick (~150 ms) dismiss countdown. The toolbar window counts as "inside" for the countdown (so the cursor can return to the bar to switch buttons), but a click on it still dismisses. Click outside (`GetAsyncKeyState(VK_LBUTTON/VK_RBUTTON)` polled in the same tick) dismisses immediately. Esc via `GetAsyncKeyState(VK_ESCAPE)`. Foreground change to foreign window dismisses via existing `HwndRole::Unknown` branch.
 - **Scroll** — popup height clamps to work area. `SubmenuLayout` reports `visible_count`, `total_count`, asymmetric `buffer_top_px` / `buffer_bottom_px` (toolbar-facing buffer collapses to 0 at level 1 for screen-edge forgiveness). `WM_MOUSEWHEEL` accumulates sub-WHEEL_DELTA values for touchpads. `▲`/`▼` glyphs in scroll-trigger bands; hovering a scroll band auto-advances via `TIMER_SUBMENU_AUTOSCROLL` (150 ms cadence).
 - **Drop-through** — `SubmenuDropTarget::Drop` resolves the hit display-item to its path, extracts paths from the `CF_HDROP` `IDataObject`, and invokes `FileOperator::move_or_copy_paths` synchronously before posting `WM_USER_SUBMENU_CLICK` to dismiss.
 
@@ -199,7 +205,7 @@ Opt-in tracking of folders where the user spends time or acts.
 - **Active-tab path resolution** — `IShellBrowser::QueryActiveShellView` → `IFolderView::GetFolder::<IPersistFolder2>` → `GetCurFolder()` PIDL → `SHGetPathFromIDListW`. Polled each `TIMER_DWELL_TICK`.
 - **Persistence** — `RecentStore` trait; `JsonRecentStore` writes `recents.json` with a 2 s debounced `TIMER_RECENT_DEBOUNCE` on each `CommitRecent`. `flush_recent` called on toolbar `WM_DESTROY` so a clean shutdown doesn't lose pending commits.
 - **LRU semantics** — `recent_list::push` dedupes case-insensitively (normalized via `path_norm::normalize`), trims to `maxCount`. `for_display` filters pinned folders at render time when `includePinned == false`. `excludedPaths` is a prefix match with `\` boundary.
-- **UI** — Recent button renders `🕘 Recent` (fixed label); its root submenu uses `build_recent_display_list` (no parent-reshow, no `..`, empty state shows `(no recent folders yet)`). Hovering a recent folder opens level 2 as a normal subfolder chain with `..` enabled from there down. Right-click the 🕘 button → `Remove` (same effect as Disable).
+- **UI** — Recent button renders `🕘 Recent` (fixed label); its root submenu uses `build_recent_display_list` (no parent-reshow, no `..`, empty state shows `(no recent folders yet)`). Hovering a recent folder opens level 2 as a normal subfolder chain with `..` enabled from there down. Right-click the 🕘 button → `Remove` (same effect as Disable). Right-click an item in the Recents popup → `Remove from Recents` (`recent_list::remove` + debounced save; the popup posts `WM_USER_SUBMENU_RCLICK`, the safety timer pauses during the menu's modal loop, and the Recents root reopens to refresh).
 
 ### Foreground watchdog
 
