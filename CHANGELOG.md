@@ -11,7 +11,7 @@ All notable changes to Exbar are documented here. Format based on [Keep a Change
 
 ### Changed
 
-- **Hover opens on rest, not on a fixed timer.** A folder's submenu opens once the pointer has rested on it for `longHoverOpenMs` (now 400 ms, was 1200 ms from first contact; `0` = on contact); sweeping across the toolbar opens nothing, except crossing the Recent button, which opens on contact (and, once a submenu is open, sliding switches folders instantly, like a menu bar).
+- **Folders open on contact by default.** Popups no longer cover the toolbar, so the old guard delay is unnecessary: `longHoverOpenMs` now defaults to `0` (open on contact; was a 400 ms rest). Set it above `0` to restore a rest-based delay (the pointer must rest that long; movement re-arms it). Menu-bar switching is unchanged: once a submenu is open, sliding to another folder switches instantly.
 - **Submenus open beside the toolbar, never over it (horizontal toolbars; vertical toolbars still overlap).** The first popup level opens on whichever side of the toolbar has room (below preferred), flush against it and capped to that side, so the bar stays visible whether it sits mid-window or in a bottom status bar. The in-place name row that covered neighbouring buttons is now a 📂 header at the toolbar-facing end of the popup.
 
 ### Fixed
