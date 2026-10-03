@@ -18,8 +18,8 @@ touched file (see the global CLAUDE.md "Decomposition (size) discipline").
 
 ## Size warnings
 
-- `crates/exbar-cli/src/toolbar.rs` — 1,455 production lines (cap 1,500) as of
-  2026-10-03. Schedule a split before any feature grows it.
+- `crates/exbar-cli/src/toolbar.rs` split 2026-10-03 (submenu adapter →
+  `submenu_adapter.rs`); production now 925 lines.
 - `crates/exbar-cli/src/wndproc.rs::toolbar_wndproc` — 1,049 lines, frozen.
   One `WM_USER_DIALOG_MRU_CHANGED` arm added under a dated ruling
   (2026-10-03). Decomposition (move `WM_*` arms into feature handlers) is

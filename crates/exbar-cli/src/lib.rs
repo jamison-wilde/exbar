@@ -116,6 +116,7 @@ pub mod rename_edit;
 pub mod shell_windows;
 pub mod subfolder_enum;
 pub mod submenu;
+pub mod submenu_adapter;
 pub mod submenu_wnd;
 pub mod target;
 pub mod theme;
