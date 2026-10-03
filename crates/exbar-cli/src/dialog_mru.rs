@@ -198,10 +198,14 @@ pub(crate) mod test_mocks {
     /// Returns a fixed newest entry.
     pub struct MockDialogMru {
         pub newest: Option<(String, PathBuf)>,
+        /// Number of `read_newest` calls, shared so a test can keep a handle.
+        pub calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     }
 
     impl DialogMruSource for MockDialogMru {
         fn read_newest(&self) -> Option<(String, PathBuf)> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.newest.clone()
         }
     }
@@ -274,7 +278,9 @@ impl Drop for DialogMruWatcher {
 
 /// Wait for changes to the MRU key; post one message per settled burst.
 fn watch_loop(toolbar: HWND, shutdown: windows::Win32::Foundation::HANDLE) {
-    use windows::Win32::Foundation::{CloseHandle, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM};
+    use windows::Win32::Foundation::{
+        CloseHandle, LPARAM, WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+    };
     use windows::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, KEY_NOTIFY, REG_NOTIFY_CHANGE_LAST_SET, REG_OPTION_NON_VOLATILE,
         RegCloseKey, RegCreateKeyExW, RegNotifyChangeKeyValue,
@@ -282,25 +288,32 @@ fn watch_loop(toolbar: HWND, shutdown: windows::Win32::Foundation::HANDLE) {
     use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForMultipleObjects};
     use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-    // Create-or-open: a profile that has never used a file dialog has no key yet.
-    let mut key = HKEY::default();
-    let rc = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            MRU_KEY,
-            None,
-            PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_NOTIFY,
-            None,
-            &mut key,
-            None,
-        )
+    // Create-or-open: a profile that has never used a file dialog has no key
+    // yet, and a privacy cleaner may delete it mid-session (re-open on demand).
+    let open_mru_key = || -> Option<HKEY> {
+        let mut key = HKEY::default();
+        let rc = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                MRU_KEY,
+                None,
+                PCWSTR::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_NOTIFY,
+                None,
+                &mut key,
+                None,
+            )
+        };
+        if rc.is_err() {
+            log::warn!("dialog-mru: cannot open MRU key: {rc:?}; dialog Recents off");
+            return None;
+        }
+        Some(key)
     };
-    if rc.is_err() {
-        log::warn!("dialog-mru: cannot open MRU key: {rc:?}; dialog Recents off");
+    let Some(mut key) = open_mru_key() else {
         return;
-    }
+    };
     let notify = match unsafe { CreateEventW(None, false, false, PCWSTR::null()) } {
         Ok(h) => h,
         Err(e) => {
@@ -323,8 +336,33 @@ fn watch_loop(toolbar: HWND, shutdown: windows::Win32::Foundation::HANDLE) {
                 RegNotifyChangeKeyValue(key, false, REG_NOTIFY_CHANGE_LAST_SET, Some(notify), true)
             };
             if rc.is_err() {
-                log::warn!("dialog-mru: RegNotifyChangeKeyValue failed: {rc:?}; stopping");
-                break;
+                // e.g. ERROR_KEY_DELETED: re-create the key once and retry.
+                log::warn!("dialog-mru: RegNotifyChangeKeyValue failed: {rc:?}; reopening key");
+                unsafe {
+                    let _ = RegCloseKey(key);
+                }
+                let Some(new_key) = open_mru_key() else {
+                    unsafe {
+                        let _ = CloseHandle(notify);
+                    }
+                    return;
+                };
+                key = new_key;
+                let rc = unsafe {
+                    RegNotifyChangeKeyValue(
+                        key,
+                        false,
+                        REG_NOTIFY_CHANGE_LAST_SET,
+                        Some(notify),
+                        true,
+                    )
+                };
+                if rc.is_err() {
+                    log::warn!(
+                        "dialog-mru: RegNotifyChangeKeyValue retry failed: {rc:?}; stopping"
+                    );
+                    break;
+                }
             }
             armed = true;
         }
@@ -344,8 +382,10 @@ fn watch_loop(toolbar: HWND, shutdown: windows::Win32::Foundation::HANDLE) {
                     LPARAM(0),
                 );
             }
+        } else if woke == WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
+            break; // shutdown signalled
         } else {
-            // Shutdown signalled, or the wait failed.
+            log::warn!("dialog-mru: wait failed: {woke:?}; dialog Recents off");
             break;
         }
     }
@@ -360,8 +400,12 @@ fn watch_loop(toolbar: HWND, shutdown: windows::Win32::Foundation::HANDLE) {
 impl crate::toolbar::ToolbarState {
     /// Handle `WM_USER_DIALOG_MRU_CHANGED`: commit the newest dialog-MRU
     /// folder to Recents if it came from the dialog exbar is attached to.
-    /// `execute_tracker_event` no-ops when Recents is disabled.
+    /// Returns early when Recents is disabled so no registry read or PIDL
+    /// resolve happens per Save while the feature is off.
     pub(crate) fn on_dialog_mru_changed(&mut self, toolbar: HWND) {
+        if !self.config.as_ref().is_some_and(|c| c.recent.enabled) {
+            return;
+        }
         let Some((app, path)) = self.dialog_mru.read_newest() else {
             return;
         };
@@ -374,7 +418,7 @@ impl crate::toolbar::ToolbarState {
             );
             return;
         }
-        log::debug!("dialog-mru: {app} -> {} committed", path.display());
+        log::debug!("dialog-mru: {app} -> {} sent to tracker", path.display());
         self.execute_tracker_event(
             toolbar,
             crate::recent_tracker::TrackerEvent::ActionInFolder(path),
@@ -603,6 +647,7 @@ mod adapter_tests {
         state.recent_list.clear();
         state.dialog_mru = Box::new(MockDialogMru {
             newest: newest.map(|(app, p)| (app.to_owned(), PathBuf::from(p))),
+            calls: Default::default(),
         });
         state.active_target = Some(ActiveTarget::file_dialog(HWND(99 as *mut _)));
         state.active_dialog_exe = Some(NOTEPAD.to_owned());
@@ -637,6 +682,18 @@ mod adapter_tests {
         let mut state = state_with(false, &[], Some(("notepad.exe", "C:\\Notes")));
         state.on_dialog_mru_changed(toolbar());
         assert!(state.recent_list.is_empty());
+    }
+
+    #[test]
+    fn recents_disabled_never_reads_the_registry() {
+        let mut state = state_with(false, &[], Some(("notepad.exe", "C:\\Notes")));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        state.dialog_mru = Box::new(MockDialogMru {
+            newest: Some(("notepad.exe".to_owned(), PathBuf::from("C:\\Notes"))),
+            calls: calls.clone(),
+        });
+        state.on_dialog_mru_changed(toolbar());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     #[test]

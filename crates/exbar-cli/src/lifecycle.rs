@@ -256,7 +256,8 @@ pub fn refresh_toolbar(hwnd: HWND) {
 }
 
 /// Apply `apply_opacity` and `register_drop_targets` to the toolbar window.
-/// Arms the dwell-tick timer if `config.recent.enabled`.
+/// Arms the dwell-tick timer if `config.recent.enabled`, and spawns the
+/// dialog-MRU watcher thread (`dialog_mru::DialogMruWatcher`) once.
 ///
 /// Called from `WM_CREATE` via `crate::toolbar::toolbar_wndproc`.
 pub(crate) fn setup_on_create(hwnd: HWND, state: &mut ToolbarState) {
