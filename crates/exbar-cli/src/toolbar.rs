@@ -176,7 +176,7 @@ pub(crate) struct ToolbarState {
     pub(crate) last_cursor_x_on_open: i32,
     /// Cursor Y at the moment long-press / drag-hover fired — used by level-1 reshow placement.
     pub(crate) last_cursor_y_on_open: i32,
-    /// Triggering folder button center-Y — used by resolve_level1_orientation.
+    /// Triggering folder button center-Y.
     pub(crate) last_button_center_y_on_open: i32,
     /// Triggering folder button screen rect — used for level-1 popup left-edge alignment.
     pub(crate) last_button_screen_rect: crate::layout::Rect,

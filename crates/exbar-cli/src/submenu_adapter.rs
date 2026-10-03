@@ -15,6 +15,14 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 /// same 26 px design token.
 const SUBMENU_ROW_LOGICAL_PX: i32 = 26;
 
+/// What a popup level lists, loaded before its header position is known.
+enum LevelContents {
+    /// Level-1 Recent root: the filtered recent list.
+    Recent(Vec<crate::recent_list::RecentEntry>),
+    /// A real folder's subfolders.
+    Folder(Vec<crate::subfolder_enum::SubfolderEntry>),
+}
+
 impl ToolbarState {
     /// Translate a `SubmenuEvent` into pure state-machine transitions + Win32 side effects.
     pub(crate) fn execute_submenu_event(
@@ -74,242 +82,81 @@ impl ToolbarState {
         ancestor_mode: bool,
         is_recent: bool,
     ) {
-        use crate::submenu::{
-            ReshowPosition, VertOrient, build_display_list, resolve_level1_orientation,
-        };
+        use crate::submenu::{ReshowPosition, build_display_list, level1_y, place_level1};
 
         let work = self.submenu_work_area();
-        let cursor_y = self.last_cursor_y_on_open;
-        let btn_center_y = self.last_button_center_y_on_open;
         let item_px = self.submenu_item_px();
         let buffer_px = self.submenu_cfg.hover_buffer_px as i32;
 
-        // Level-1 Recent button: build from the tracked recent list, not from
-        // subfolder enumeration. No ".." and no parent-reshow.
-        let (display_items, reshow) = if level == 1 && is_recent {
-            let (pinned, include_pinned) = self
-                .config
-                .as_ref()
-                .map(|c| {
-                    let pinned: Vec<String> = c
-                        .folders
-                        .iter()
-                        .filter(|f| f.kind == crate::config::FolderKind::Folder)
-                        .map(|f| f.path.clone())
-                        .collect();
-                    (pinned, c.recent.include_pinned)
-                })
-                .unwrap_or_default();
-            let filtered =
-                crate::recent_list::for_display(&self.recent_list, &pinned, include_pinned);
-            // Recent has no parent to reshow; orient upward/downward from btn position.
-            let reshow = {
-                let item_count = filtered.len().max(1) as i32; // at least 1 (placeholder)
-                let orient =
-                    resolve_level1_orientation(btn_center_y, item_count, item_px, cursor_y, work);
-                match orient {
-                    VertOrient::Upward => ReshowPosition::Last,
-                    VertOrient::Downward => ReshowPosition::First,
-                }
-            };
-            (crate::submenu::build_recent_display_list(&filtered), reshow)
-        } else {
-            let max_items = 200;
-            let entries = match self.subfolder_source.list(&folder_path, max_items) {
-                Ok(e) => e,
-                Err(e) => {
-                    log::warn!("subfolder list failed for {folder_path:?}: {e:?}");
-                    Vec::new()
-                }
-            };
-
-            // Fix 3: refuse to open an empty popup for a shell alias — path
-            // resolution is a Task 15 follow-up.
-            if entries.is_empty()
-                && crate::config::is_shell_alias(folder_path.to_string_lossy().as_ref())
-            {
-                log::warn!(
-                    "submenu: refusing to open empty popup for shell alias {folder_path:?}; \
-                     path resolution is a Task 15 follow-up"
-                );
-                return;
-            }
-
-            let reshow = if level == 1 {
-                let orient = resolve_level1_orientation(
-                    btn_center_y,
-                    entries.len() as i32,
-                    item_px,
-                    cursor_y,
-                    work,
-                );
-                match orient {
-                    VertOrient::Upward => ReshowPosition::Last,
-                    VertOrient::Downward => ReshowPosition::First,
-                }
-            } else {
-                ReshowPosition::None
-            };
-
-            let folder_display_name = folder_path
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| folder_path.to_string_lossy().to_string());
-
-            (
-                build_display_list(
+        let Some(contents) = self.load_level_contents(level, &folder_path, is_recent) else {
+            return;
+        };
+        let folder_display_name = folder_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| folder_path.to_string_lossy().to_string());
+        let build = |pos: ReshowPosition| -> Vec<crate::submenu::DisplayItem> {
+            match &contents {
+                LevelContents::Recent(list) => crate::submenu::build_recent_display_list(list),
+                LevelContents::Folder(entries) => build_display_list(
                     level,
                     &folder_path,
                     &folder_display_name,
                     ancestor_mode,
-                    &entries,
-                    reshow,
+                    entries,
+                    pos,
                 ),
-                reshow,
-            )
-        };
-
-        let measured_w = crate::paint::measure_display_items_width(&display_items, self.dpi, level);
-        let max_width_px = (measured_w + crate::theme::scale(32, self.dpi))
-            .min(crate::theme::scale(400, self.dpi))
-            .max(crate::theme::scale(100, self.dpi));
-
-        let max_popup_h = work.bottom - work.top;
-
-        // For level-1 popups, collapse the buffer on the toolbar-facing side to 0.
-        // The toolbar-facing side is determined by the reshow/orient:
-        //   Downward (First) → popup opens below toolbar → top edge is flush → top buffer = 0.
-        //   Upward   (Last)  → popup opens above toolbar → bottom edge is flush → bottom buffer = 0.
-        // For levels 2+, use symmetric buffers (no guaranteed screen edge).
-        let (buffer_top, buffer_bottom) = if level == 1 {
-            match reshow {
-                ReshowPosition::First => (0, buffer_px), // downward: top is flush
-                ReshowPosition::Last => (buffer_px, 0),  // upward: bottom is flush
-                ReshowPosition::None => (buffer_px, buffer_px),
             }
-        } else {
-            (buffer_px, buffer_px)
+        };
+        let width_for = |items: &[crate::submenu::DisplayItem]| -> i32 {
+            let measured_w = crate::paint::measure_display_items_width(items, self.dpi, level);
+            (measured_w + crate::theme::scale(32, self.dpi))
+                .min(crate::theme::scale(400, self.dpi))
+                .max(crate::theme::scale(100, self.dpi))
         };
 
-        let layout = crate::layout::compute_submenu_layout(
-            display_items.len(),
-            item_px,
-            max_width_px,
-            buffer_top,
-            buffer_bottom,
-            max_popup_h,
-        );
-
-        // Popup placement: level-1 left-edge aligns to triggering button; deeper levels right of parent.
-        let (sx, sy) = if level == 1 {
+        let (display_items, layout, sx, sy) = if level == 1 {
+            // Level 1 sits beside the toolbar band, never over it; the
+            // toolbar-facing side carries no hover buffer.
+            let (band_top, band_bottom) = self.level1_band(toolbar);
+            let count = build(ReshowPosition::First).len() as i32;
+            let needed_h = count * item_px + buffer_px;
+            let placement = place_level1(band_top, band_bottom, needed_h, work);
+            let display_items = build(placement.side.header_position());
+            let (buffer_top, buffer_bottom) = match placement.side {
+                crate::submenu::Side::Below => (0, buffer_px),
+                crate::submenu::Side::Above => (buffer_px, 0),
+            };
+            let layout = crate::layout::compute_submenu_layout(
+                display_items.len(),
+                item_px,
+                width_for(&display_items),
+                buffer_top,
+                buffer_bottom,
+                placement.max_h,
+            );
+            // Pixel-perfect text alignment with the button:
+            //   Button text_x = btn.left + scale(BTN_PAD_H, dpi)
+            //   Popup text_x  = popup.left + buffer_top + scale(8, dpi)
             let btn = self.last_button_screen_rect;
-            // Pixel-perfect alignment. Derived directly from the paint code:
-            //   Button text_x  = btn.left + scale(BTN_PAD_H=10, dpi)          [paint.rs:304]
-            //   Popup text_x   = popup.left + buffer_top + scale(8, dpi)      [paint.rs:537]
-            // Setting them equal and solving:
-            //   popup.left = btn.left + scale(10 - 8, dpi) - buffer_top
-            //              = btn.left + scale(2, dpi) - buffer_top
             let align_offset = crate::theme::scale(BTN_PAD_H - 8, self.dpi);
-            let x = btn.left + align_offset - buffer_top;
-            // TODO(vertical toolbar): if layout is Vertical, horizontal offset should
-            // push the Recent popup left/right of the toolbar instead. For now assume
-            // horizontal toolbars — the dominant case.
-            let y = if is_recent {
-                // Recent's root submenu sits entirely above or below the toolbar —
-                // never overlapping the Recent button itself. Regular folders have a
-                // Header row that is meant to sit "in place" over the toolbar
-                // button; Recent has no such row, so overlapping serves no purpose.
-                match reshow {
-                    // Popup opens downward: sit below the button entirely. buffer_top=0,
-                    // so popup.top = btn.bottom + 0 = btn.bottom (flush).
-                    ReshowPosition::First => btn.bottom + buffer_top,
-                    // Popup opens upward: sit above the button entirely. buffer_bottom=0,
-                    // so popup.bottom = btn.top - 0 = btn.top (flush).
-                    ReshowPosition::Last => btn.top - layout.popup_h + buffer_bottom,
-                    // Defensive — Recent at level 1 always resolves First or Last.
-                    ReshowPosition::None => btn.top,
-                }
-            } else {
-                match reshow {
-                    // Popup opens downward: reshow row (first) aligns with button top.
-                    // buffer_top=0 → popup.top = btn.top (reshow row flush at top).
-                    ReshowPosition::First => btn.top - buffer_top,
-                    // Popup opens upward: reshow row (last) aligns with button bottom.
-                    // buffer_bottom=0 → popup.bottom = btn.bottom (reshow row flush at bottom).
-                    ReshowPosition::Last => btn.bottom - layout.popup_h + buffer_bottom,
-                    ReshowPosition::None => btn.top,
-                }
-            };
-            (
-                x.max(work.left).min(work.right - layout.popup_w),
-                y.max(work.top).min(work.bottom - layout.popup_h),
-            )
+            let x = (btn.left + align_offset - buffer_top)
+                .max(work.left)
+                .min(work.right - layout.popup_w);
+            let y = level1_y(placement, band_top, band_bottom, layout.popup_h);
+            (display_items, layout, x, y)
         } else {
-            // Level 2+: place beside the parent popup with flow-direction lock.
-            let parent_idx = (level as usize) - 2; // parent is one level shallower
-            let parent_hwnd = self
-                .submenu_popups
-                .get(parent_idx)
-                .copied()
-                .unwrap_or(HWND(std::ptr::null_mut()));
-            let parent_rect = self.get_window_screen_rect(parent_hwnd);
-
-            // Extract anchor_top from the parent popup's highlighted item before
-            // any further mutable borrows of self. We do this in a separate block
-            // so the immutable borrow of popup_state ends before we mutate
-            // self.submenu_chain.flow below.
-            let anchor_top: i32 = if parent_hwnd.0.is_null() {
-                parent_rect.top
-            } else {
-                unsafe {
-                    crate::submenu_wnd::popup_state(parent_hwnd)
-                        .and_then(|p| {
-                            p.highlighted_index.and_then(|hi| {
-                                // highlighted_index is in display-items space;
-                                // item_rects is in visible-window space (0..visible_count).
-                                // Subtract scroll_offset to get the rect index.
-                                let vis_i = hi.checked_sub(p.scroll_offset)?;
-                                p.layout
-                                    .item_rects
-                                    .get(vis_i)
-                                    .map(|r| parent_rect.top + r.top)
-                            })
-                        })
-                        .unwrap_or(parent_rect.top)
-                }
-            };
-
-            // Resolve (or reuse the locked) flow direction for this chain.
-            // One-way ratchet: Right can flip to Left at any deeper level if
-            // the proposed right edge overflows the work area. Once Left, it
-            // stays Left for the remainder of the chain (no zigzag).
-            let proposed_right_x = parent_rect.right + layout.popup_w;
-            let flow = match self.submenu_chain.flow {
-                Some(crate::submenu::FlowDir::Left) => {
-                    // Already flipped — stays flipped for the rest of the chain.
-                    crate::submenu::FlowDir::Left
-                }
-                _ => {
-                    // Either first evaluation (None) OR still Right — re-check
-                    // for overflow at THIS level. Flip to Left if needed.
-                    let resolved = crate::submenu::resolve_flow_direction(proposed_right_x, work);
-                    self.submenu_chain.flow = Some(resolved);
-                    resolved
-                }
-            };
-
-            // Slide inward by buffer_px so the two popups' painted regions touch
-            // rather than being separated by a double-buffer gap. The clamp below
-            // still applies at screen edges.
-            let x = match flow {
-                crate::submenu::FlowDir::Right => parent_rect.right - buffer_px,
-                crate::submenu::FlowDir::Left => parent_rect.left + buffer_px - layout.popup_w,
-            };
-
-            // Clamp both axes to the monitor work area.
-            let clamped_x = x.max(work.left).min(work.right - layout.popup_w);
-            let clamped_y = anchor_top.max(work.top).min(work.bottom - layout.popup_h);
-            (clamped_x, clamped_y)
+            let display_items = build(ReshowPosition::None);
+            let layout = crate::layout::compute_submenu_layout(
+                display_items.len(),
+                item_px,
+                width_for(&display_items),
+                buffer_px,
+                buffer_px,
+                work.bottom - work.top,
+            );
+            let (x, y) = self.leveln_origin(level, &layout, buffer_px, work);
+            (display_items, layout, x, y)
         };
 
         let base_opacity = self
@@ -331,7 +178,159 @@ impl ToolbarState {
             scroll_delta_accum: 0,
             last_bandhover_dir: 0,
         });
+        self.install_popup(toolbar, level, popup, sx, sy);
+    }
 
+    /// Load what `folder_path` shows at `level`. `None` = refuse to open
+    /// (empty shell alias — existing rule, moved here unchanged).
+    fn load_level_contents(
+        &self,
+        level: u8,
+        folder_path: &std::path::Path,
+        is_recent: bool,
+    ) -> Option<LevelContents> {
+        // Level-1 Recent button: the tracked recent list, not subfolder
+        // enumeration.
+        if level == 1 && is_recent {
+            let (pinned, include_pinned) = self
+                .config
+                .as_ref()
+                .map(|c| {
+                    let pinned: Vec<String> = c
+                        .folders
+                        .iter()
+                        .filter(|f| f.kind == crate::config::FolderKind::Folder)
+                        .map(|f| f.path.clone())
+                        .collect();
+                    (pinned, c.recent.include_pinned)
+                })
+                .unwrap_or_default();
+            return Some(LevelContents::Recent(crate::recent_list::for_display(
+                &self.recent_list,
+                &pinned,
+                include_pinned,
+            )));
+        }
+        let max_items = 200;
+        let entries = match self.subfolder_source.list(folder_path, max_items) {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!("subfolder list failed for {folder_path:?}: {e:?}");
+                Vec::new()
+            }
+        };
+        // Refuse to open an empty popup for a shell alias — path resolution
+        // is a Task 15 follow-up.
+        if entries.is_empty()
+            && crate::config::is_shell_alias(folder_path.to_string_lossy().as_ref())
+        {
+            log::warn!(
+                "submenu: refusing to open empty popup for shell alias {folder_path:?}; \
+                 path resolution is a Task 15 follow-up"
+            );
+            return None;
+        }
+        Some(LevelContents::Folder(entries))
+    }
+
+    /// Screen band a level-1 popup must not cross: the toolbar window for a
+    /// horizontal toolbar, the triggering button for a vertical one (side
+    /// placement for vertical bars is out of scope; this keeps them usable).
+    fn level1_band(&self, toolbar: HWND) -> (i32, i32) {
+        if self.layout == crate::config::Orientation::Vertical {
+            let b = self.last_button_screen_rect;
+            return (b.top, b.bottom);
+        }
+        let r = self.get_window_screen_rect(toolbar);
+        (r.top, r.bottom)
+    }
+
+    /// Level 2+: beside the parent popup, with the chain's flow-direction
+    /// lock. Moved verbatim from `open_popup_level`.
+    fn leveln_origin(
+        &mut self,
+        level: u8,
+        layout: &crate::layout::SubmenuLayout,
+        buffer_px: i32,
+        work: crate::submenu::WorkArea,
+    ) -> (i32, i32) {
+        // Level 2+: place beside the parent popup with flow-direction lock.
+        let parent_idx = (level as usize) - 2; // parent is one level shallower
+        let parent_hwnd = self
+            .submenu_popups
+            .get(parent_idx)
+            .copied()
+            .unwrap_or(HWND(std::ptr::null_mut()));
+        let parent_rect = self.get_window_screen_rect(parent_hwnd);
+
+        // Extract anchor_top from the parent popup's highlighted item before
+        // any further mutable borrows of self. We do this in a separate block
+        // so the immutable borrow of popup_state ends before we mutate
+        // self.submenu_chain.flow below.
+        let anchor_top: i32 = if parent_hwnd.0.is_null() {
+            parent_rect.top
+        } else {
+            unsafe {
+                crate::submenu_wnd::popup_state(parent_hwnd)
+                    .and_then(|p| {
+                        p.highlighted_index.and_then(|hi| {
+                            // highlighted_index is in display-items space;
+                            // item_rects is in visible-window space (0..visible_count).
+                            // Subtract scroll_offset to get the rect index.
+                            let vis_i = hi.checked_sub(p.scroll_offset)?;
+                            p.layout
+                                .item_rects
+                                .get(vis_i)
+                                .map(|r| parent_rect.top + r.top)
+                        })
+                    })
+                    .unwrap_or(parent_rect.top)
+            }
+        };
+
+        // Resolve (or reuse the locked) flow direction for this chain.
+        // One-way ratchet: Right can flip to Left at any deeper level if
+        // the proposed right edge overflows the work area. Once Left, it
+        // stays Left for the remainder of the chain (no zigzag).
+        let proposed_right_x = parent_rect.right + layout.popup_w;
+        let flow = match self.submenu_chain.flow {
+            Some(crate::submenu::FlowDir::Left) => {
+                // Already flipped — stays flipped for the rest of the chain.
+                crate::submenu::FlowDir::Left
+            }
+            _ => {
+                // Either first evaluation (None) OR still Right — re-check
+                // for overflow at THIS level. Flip to Left if needed.
+                let resolved = crate::submenu::resolve_flow_direction(proposed_right_x, work);
+                self.submenu_chain.flow = Some(resolved);
+                resolved
+            }
+        };
+
+        // Slide inward by buffer_px so the two popups' painted regions touch
+        // rather than being separated by a double-buffer gap. The clamp below
+        // still applies at screen edges.
+        let x = match flow {
+            crate::submenu::FlowDir::Right => parent_rect.right - buffer_px,
+            crate::submenu::FlowDir::Left => parent_rect.left + buffer_px - layout.popup_w,
+        };
+
+        // Clamp both axes to the monitor work area.
+        let clamped_x = x.max(work.left).min(work.right - layout.popup_w);
+        let clamped_y = anchor_top.max(work.top).min(work.bottom - layout.popup_h);
+        (clamped_x, clamped_y)
+    }
+
+    /// Create the popup window, slot it at `level`, and arm the safety timer
+    /// for a fresh chain. Moved verbatim from `open_popup_level`.
+    fn install_popup(
+        &mut self,
+        toolbar: HWND,
+        level: u8,
+        popup: Box<crate::submenu_wnd::SubmenuPopup>,
+        sx: i32,
+        sy: i32,
+    ) {
         let popup_hwnd =
             crate::submenu_wnd::create_popup(toolbar, popup, sx, sy, self.file_operator.clone());
 

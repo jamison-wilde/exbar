@@ -56,55 +56,6 @@ impl WorkArea {
     }
 }
 
-/// Decides the vertical orientation for a LEVEL-1 submenu based on the
-/// trigger button's center Y relative to the work-area midline + the
-/// "direction-for-most-options" rule (spec §3.7).
-///
-/// Inputs:
-/// - `btn_center_y` — triggering toolbar button's center Y (screen coords).
-/// - `item_count` — number of items the submenu wants to show.
-/// - `item_px` — per-item height + margins, DPI-scaled.
-/// - `cursor_y` — cursor Y at open time (screen coords).
-/// - `work` — monitor work area.
-///
-/// Returns the vertical orientation. The caller uses this + parent-reshow
-/// policy (§3.6) to place the popup.
-pub fn resolve_level1_orientation(
-    btn_center_y: i32,
-    item_count: i32,
-    item_px: i32,
-    cursor_y: i32,
-    work: WorkArea,
-) -> VertOrient {
-    let needed = item_count * item_px;
-    let space_up = cursor_y - work.top;
-    let space_down = work.bottom - cursor_y;
-
-    let fits_up = space_up >= needed;
-    let fits_down = space_down >= needed;
-
-    match (fits_up, fits_down) {
-        (true, false) => VertOrient::Upward,
-        (false, true) => VertOrient::Downward,
-        (true, true) => {
-            // Both fit → fall back to button-half rule (spec §3.6).
-            if btn_center_y >= work.vertical_midline() {
-                VertOrient::Upward
-            } else {
-                VertOrient::Downward
-            }
-        }
-        (false, false) => {
-            // Neither fits → direction-for-most-options.
-            if space_up >= space_down {
-                VertOrient::Upward
-            } else {
-                VertOrient::Downward
-            }
-        }
-    }
-}
-
 /// Which side of the toolbar a level-1 popup opens on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -1177,32 +1128,6 @@ mod tests_direction {
             right: 1920,
             bottom: 1080,
         }
-    }
-
-    #[test]
-    fn level1_up_when_below_midline_both_fit() {
-        let o = resolve_level1_orientation(800, 5, 30, 700, wa());
-        assert_eq!(o, VertOrient::Upward);
-    }
-
-    #[test]
-    fn level1_down_when_above_midline_both_fit() {
-        let o = resolve_level1_orientation(200, 5, 30, 200, wa());
-        assert_eq!(o, VertOrient::Downward);
-    }
-
-    #[test]
-    fn level1_prefers_direction_that_fits() {
-        // Only 100 px above cursor, 980 below; 5*30=150 needed.
-        let o = resolve_level1_orientation(200, 5, 30, 100, wa());
-        assert_eq!(o, VertOrient::Downward);
-    }
-
-    #[test]
-    fn level1_most_space_when_neither_fits() {
-        // 40 items * 30 px = 1200; cursor at y=300 → up=300, down=780; pick down.
-        let o = resolve_level1_orientation(200, 40, 30, 300, wa());
-        assert_eq!(o, VertOrient::Downward);
     }
 
     #[test]
