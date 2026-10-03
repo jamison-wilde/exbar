@@ -415,7 +415,7 @@ fn display_item_label(item: &DisplayItem, at_max_depth: bool) -> String {
             }
         }
         DisplayItem::Dotdot { parent_name, .. } => format!("\u{2B06} {}", parent_name),
-        DisplayItem::ParentReshow { name, .. } => format!("\u{1F4C1} {}", name),
+        DisplayItem::Header { name, .. } => format!("\u{1F4C1} {}", name),
         DisplayItem::Ellipsis => "\u{2026}(more)".to_string(),
         DisplayItem::Empty { message } => message.clone(),
     }
@@ -474,6 +474,123 @@ pub fn measure_display_items_width(display_items: &[DisplayItem], dpi: u32, leve
     max_w
 }
 
+/// Colours shared by every row of a popup, computed once per paint.
+struct PopupPalette {
+    text: COLORREF,
+    text_dim: COLORREF,
+    accent_bg: COLORREF,
+}
+
+/// Paint one visible popup row: highlight, label, ▸ arrow, and the header
+/// separator. `is_first`/`is_last` are display-list positions, used to put
+/// the header's separator on its content-facing edge.
+#[allow(clippy::too_many_arguments)]
+fn paint_popup_row(
+    hdc: HDC,
+    item: &DisplayItem,
+    win_rect: RECT,
+    highlighted: bool,
+    is_first: bool,
+    is_last: bool,
+    at_max_depth: bool,
+    palette: &PopupPalette,
+    dpi: u32,
+) {
+    // Accent background for the highlighted row.
+    if highlighted {
+        let accent_brush = unsafe { CreateSolidBrush(palette.accent_bg) };
+        unsafe {
+            FillRect(hdc, &win_rect, accent_brush);
+            let _ = DeleteObject(accent_brush.into());
+        }
+    }
+
+    // Build label text and determine display properties.
+    let label = display_item_label(item, at_max_depth);
+    // `has_children_visual` controls the ▸ arrow glyph. At max depth,
+    // subfolders with children cannot open a deeper level, so the arrow
+    // would be misleading — suppress it. Dotdot (upward ..) is unaffected
+    // because going up is never blocked by the depth cap.
+    let (is_disabled, has_children_visual) = match item {
+        DisplayItem::Subfolder { entry } => (false, entry.has_children && !at_max_depth),
+        DisplayItem::Dotdot { .. } => (false, true), // Dotdot always opens parent dir submenu
+        DisplayItem::Header { .. } => (false, false),
+        DisplayItem::Ellipsis | DisplayItem::Empty { .. } => (true, false),
+    };
+
+    let color = if is_disabled {
+        palette.text_dim
+    } else {
+        palette.text
+    };
+    unsafe { SetTextColor(hdc, color) };
+
+    // Draw label with left padding and end-ellipsis on overflow.
+    let pad = theme::scale(8, dpi);
+    let arrow_w = theme::scale(20, dpi);
+    let text_right = if has_children_visual {
+        win_rect.right - arrow_w
+    } else {
+        win_rect.right - theme::scale(8, dpi)
+    };
+    let mut text_rect = RECT {
+        left: win_rect.left + pad,
+        top: win_rect.top,
+        right: text_right,
+        bottom: win_rect.bottom,
+    };
+    let mut wide: Vec<u16> = label.encode_utf16().collect();
+    unsafe {
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut text_rect,
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
+        );
+    }
+
+    // Trailing ▸ arrow for items that have children (suppressed at max depth).
+    if has_children_visual {
+        let mut arrow_rect = RECT {
+            left: win_rect.right - arrow_w,
+            top: win_rect.top,
+            right: win_rect.right - theme::scale(4, dpi),
+            bottom: win_rect.bottom,
+        };
+        let mut arrow: Vec<u16> = "\u{25B8}".encode_utf16().collect();
+        unsafe {
+            DrawTextW(
+                hdc,
+                &mut arrow,
+                &mut arrow_rect,
+                DT_SINGLELINE | DT_VCENTER | DT_RIGHT,
+            );
+        }
+    }
+
+    if matches!(item, DisplayItem::Header { .. }) {
+        let h = theme::scale(1, dpi).max(1);
+        // First row => content is below, separator on the bottom edge;
+        // last row => content is above, separator on the top edge.
+        let y = if is_last && !is_first {
+            win_rect.top
+        } else {
+            win_rect.bottom - h
+        };
+        let sep = RECT {
+            left: win_rect.left + theme::scale(8, dpi),
+            top: y,
+            right: win_rect.right - theme::scale(8, dpi),
+            bottom: y + h,
+        };
+        unsafe {
+            let brush = CreateSolidBrush(palette.text_dim);
+            FillRect(hdc, &sep, brush);
+            let _ = DeleteObject(brush.into());
+        }
+    }
+}
+
 /// Render a submenu popup. Called from the popup wndproc's `WM_PAINT` handler.
 ///
 /// Not unit-tested (pure GDI) — covered by manual smoke in Task 17.
@@ -482,7 +599,7 @@ pub fn measure_display_items_width(display_items: &[DisplayItem], dpi: u32, leve
 /// popup creation. Iterates `display_items` in parallel with
 /// `layout.item_rects`, drawing each row; the `highlighted_index` row gets an
 /// opaque accent bar. Rows with `has_children` paint a right-aligned `▸` glyph.
-/// Parent-reshow and Dotdot items get distinctive markers. `Ellipsis` / `Empty`
+/// Header and Dotdot items get distinctive markers. `Ellipsis` / `Empty`
 /// rows render disabled. Font obtained via `GetStockObject(DEFAULT_GUI_FONT)`,
 /// consistent with the toolbar button paint.
 pub fn paint_submenu_popup(
@@ -518,6 +635,12 @@ pub fn paint_submenu_popup(
         COLORREF(0x00_D8_E4_F0)
     };
 
+    let palette = PopupPalette {
+        text: text_color,
+        text_dim: text_color_dim,
+        accent_bg,
+    };
+
     // Background fill (full popup area).
     let full_rect = RECT {
         left: 0,
@@ -550,80 +673,19 @@ pub fn paint_submenu_popup(
             right: rect.right,
             bottom: rect.bottom,
         };
-
         // highlighted_index is in display-items space; vis_i is visible-window space.
         let logical_i = start + vis_i;
-        // Accent background for the highlighted row.
-        if highlighted_index == Some(logical_i) {
-            let accent_brush = unsafe { CreateSolidBrush(accent_bg) };
-            unsafe {
-                FillRect(hdc, &win_rect, accent_brush);
-                let _ = DeleteObject(accent_brush.into());
-            }
-        }
-
-        // Build label text and determine display properties.
-        let label = display_item_label(item, at_max_depth);
-        // `has_children_visual` controls the ▸ arrow glyph. At max depth,
-        // subfolders with children cannot open a deeper level, so the arrow
-        // would be misleading — suppress it. Dotdot (upward ..) is unaffected
-        // because going up is never blocked by the depth cap.
-        let (is_disabled, has_children_visual) = match item {
-            DisplayItem::Subfolder { entry } => (false, entry.has_children && !at_max_depth),
-            DisplayItem::Dotdot { .. } => (false, true), // Dotdot always opens parent dir submenu
-            DisplayItem::ParentReshow { .. } => (false, false),
-            DisplayItem::Ellipsis | DisplayItem::Empty { .. } => (true, false),
-        };
-
-        let color = if is_disabled {
-            text_color_dim
-        } else {
-            text_color
-        };
-        unsafe { SetTextColor(hdc, color) };
-
-        // Draw label with left padding and end-ellipsis on overflow.
-        let pad = theme::scale(8, dpi);
-        let arrow_w = theme::scale(20, dpi);
-        let text_right = if has_children_visual {
-            win_rect.right - arrow_w
-        } else {
-            win_rect.right - theme::scale(8, dpi)
-        };
-        let mut text_rect = RECT {
-            left: win_rect.left + pad,
-            top: win_rect.top,
-            right: text_right,
-            bottom: win_rect.bottom,
-        };
-        let mut wide: Vec<u16> = label.encode_utf16().collect();
-        unsafe {
-            DrawTextW(
-                hdc,
-                &mut wide,
-                &mut text_rect,
-                DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
-            );
-        }
-
-        // Trailing ▸ arrow for items that have children (suppressed at max depth).
-        if has_children_visual {
-            let mut arrow_rect = RECT {
-                left: win_rect.right - arrow_w,
-                top: win_rect.top,
-                right: win_rect.right - theme::scale(4, dpi),
-                bottom: win_rect.bottom,
-            };
-            let mut arrow: Vec<u16> = "\u{25B8}".encode_utf16().collect();
-            unsafe {
-                DrawTextW(
-                    hdc,
-                    &mut arrow,
-                    &mut arrow_rect,
-                    DT_SINGLELINE | DT_VCENTER | DT_RIGHT,
-                );
-            }
-        }
+        paint_popup_row(
+            hdc,
+            item,
+            win_rect,
+            highlighted_index == Some(logical_i),
+            logical_i == 0,
+            logical_i + 1 == display_items.len(),
+            at_max_depth,
+            &palette,
+            dpi,
+        );
     }
 
     // Scroll indicators: ▲ in top buffer band when more items above; ▼ in bottom band below.

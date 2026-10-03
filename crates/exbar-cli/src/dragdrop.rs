@@ -806,9 +806,7 @@ impl IDropTarget_Impl for SubmenuDropTarget_Impl {
                         crate::submenu::DisplayItem::Dotdot { parent_path, .. } => {
                             Some(parent_path.clone())
                         }
-                        crate::submenu::DisplayItem::ParentReshow { path, .. } => {
-                            Some(path.clone())
-                        }
+                        crate::submenu::DisplayItem::Header { path, .. } => Some(path.clone()),
                         _ => None,
                     })
             })

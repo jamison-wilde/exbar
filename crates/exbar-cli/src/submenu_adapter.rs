@@ -217,7 +217,7 @@ impl ToolbarState {
             let y = if is_recent {
                 // Recent's root submenu sits entirely above or below the toolbar —
                 // never overlapping the Recent button itself. Regular folders have a
-                // ParentReshow row that is meant to sit "in place" over the toolbar
+                // Header row that is meant to sit "in place" over the toolbar
                 // button; Recent has no such row, so overlapping serves no purpose.
                 match reshow {
                     // Popup opens downward: sit below the button entirely. buffer_top=0,

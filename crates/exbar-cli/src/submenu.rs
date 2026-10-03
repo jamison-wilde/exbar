@@ -105,6 +105,67 @@ pub fn resolve_level1_orientation(
     }
 }
 
+/// Which side of the toolbar a level-1 popup opens on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Below,
+    Above,
+}
+
+impl Side {
+    /// The header row sits at the toolbar-facing end of the popup.
+    pub fn header_position(self) -> ReshowPosition {
+        match self {
+            Side::Below => ReshowPosition::First,
+            Side::Above => ReshowPosition::Last,
+        }
+    }
+}
+
+/// Where a level-1 popup goes and how tall it may grow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Level1Placement {
+    pub side: Side,
+    pub max_h: i32,
+}
+
+/// Choose the side of the toolbar band (`band_top..band_bottom`, screen
+/// coords) for a level-1 popup that wants `needed_h` pixels.
+///
+/// The popup never crosses the band, so the toolbar stays visible wherever
+/// the user docked it (mid-window, status bar, top). Below wins when it fits;
+/// otherwise Above if that fits; otherwise the larger side, with the popup
+/// capped to it (overflow scrolls).
+pub fn place_level1(
+    band_top: i32,
+    band_bottom: i32,
+    needed_h: i32,
+    work: WorkArea,
+) -> Level1Placement {
+    let below = (work.bottom - band_bottom).max(0);
+    let above = (band_top - work.top).max(0);
+    let side = if needed_h <= below {
+        Side::Below
+    } else if needed_h <= above || above > below {
+        Side::Above
+    } else {
+        Side::Below
+    };
+    let max_h = match side {
+        Side::Below => below,
+        Side::Above => above,
+    };
+    Level1Placement { side, max_h }
+}
+
+/// Top Y of a level-1 popup of height `popup_h`, flush against the band.
+pub fn level1_y(p: Level1Placement, band_top: i32, band_bottom: i32, popup_h: i32) -> i32 {
+    match p.side {
+        Side::Below => band_bottom,
+        Side::Above => band_top - popup_h,
+    }
+}
+
 /// Resolve the horizontal flow direction for a chain, given the proposed X
 /// of the first nested (level-2) popup and its width. If it overflows right,
 /// returns `Left`; otherwise `Right`. Once returned, the adapter locks this
@@ -339,7 +400,7 @@ pub fn transition(chain: &mut SubmenuChain, ev: SubmenuEvent) -> Vec<SubmenuComm
 }
 
 /// One entry in a popup's rendered list. Either a real subfolder, a ".."
-/// ancestor hop, the parent-reshow item (level 1 only), or the "…(more)"
+/// ancestor hop, the folder's own header row (level 1 only), or the "…(more)"
 /// ellipsis sentinel.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayItem {
@@ -347,7 +408,7 @@ pub enum DisplayItem {
         parent_path: PathBuf,
         parent_name: String,
     },
-    ParentReshow {
+    Header {
         path: PathBuf,
         name: String,
     },
@@ -402,7 +463,7 @@ pub fn build_display_list(
 
     // Reshown parent at "First" goes at the very top (popup opened downward).
     if reshow == ReshowPosition::First && level == 1 {
-        out.push(DisplayItem::ParentReshow {
+        out.push(DisplayItem::Header {
             path: folder_path.to_path_buf(),
             name: folder_display_name.to_string(),
         });
@@ -433,7 +494,7 @@ pub fn build_display_list(
     }
 
     if reshow == ReshowPosition::Last && level == 1 {
-        out.push(DisplayItem::ParentReshow {
+        out.push(DisplayItem::Header {
             path: folder_path.to_path_buf(),
             name: folder_display_name.to_string(),
         });
@@ -488,7 +549,7 @@ mod tests_display {
     }
 
     #[test]
-    fn level1_ancestor_mode_includes_dotdot_and_reshow_first() {
+    fn level1_ancestor_mode_includes_dotdot_and_header_first() {
         let items = build_display_list(
             1,
             std::path::Path::new("C:\\Users\\Alice"),
@@ -497,13 +558,13 @@ mod tests_display {
             &[sf("Docs"), sf("Pictures")],
             ReshowPosition::First,
         );
-        assert!(matches!(&items[0], DisplayItem::ParentReshow { .. }));
+        assert!(matches!(&items[0], DisplayItem::Header { .. }));
         assert!(matches!(&items[1], DisplayItem::Dotdot { .. }));
         assert!(matches!(&items[2], DisplayItem::Subfolder { .. }));
     }
 
     #[test]
-    fn level1_ancestor_mode_includes_dotdot_and_reshow_last() {
+    fn level1_ancestor_mode_includes_dotdot_and_header_last() {
         let items = build_display_list(
             1,
             std::path::Path::new("C:\\Users\\Alice"),
@@ -514,7 +575,7 @@ mod tests_display {
         );
         assert!(matches!(&items[0], DisplayItem::Dotdot { .. }));
         assert!(matches!(&items[1], DisplayItem::Subfolder { .. }));
-        assert!(matches!(&items[2], DisplayItem::ParentReshow { .. }));
+        assert!(matches!(&items[2], DisplayItem::Header { .. }));
     }
 
     #[test]
@@ -552,7 +613,7 @@ mod tests_display {
         assert!(
             !items
                 .iter()
-                .any(|i| matches!(i, DisplayItem::ParentReshow { .. }))
+                .any(|i| matches!(i, DisplayItem::Header { .. }))
         );
     }
 
@@ -571,7 +632,7 @@ mod tests_display {
     }
 
     #[test]
-    fn level1_empty_entries_with_reshow_first_produces_only_reshow() {
+    fn level1_empty_entries_with_header_first_produces_only_header() {
         // Non-ancestor level-1 with nothing to list but a reshow at First:
         // empty-state guard must suppress the "(empty)" sentinel, and the
         // reshow item itself must be the only rendered entry.
@@ -584,7 +645,7 @@ mod tests_display {
             ReshowPosition::First,
         );
         assert_eq!(items.len(), 1);
-        assert!(matches!(&items[0], DisplayItem::ParentReshow { .. }));
+        assert!(matches!(&items[0], DisplayItem::Header { .. }));
     }
 }
 
@@ -1211,16 +1272,16 @@ mod tests_recent_display {
     }
 
     #[test]
-    fn no_dotdot_or_parent_reshow_items() {
+    fn no_dotdot_or_header_items() {
         let entries = vec![RecentEntry {
             path: PathBuf::from("C:\\Users\\Alice\\Projects"),
             last_accessed_unix_ms: 100,
         }];
         let out = build_recent_display_list(&entries);
-        assert!(!out.iter().any(|i| matches!(
-            i,
-            DisplayItem::Dotdot { .. } | DisplayItem::ParentReshow { .. }
-        )));
+        assert!(
+            !out.iter()
+                .any(|i| matches!(i, DisplayItem::Dotdot { .. } | DisplayItem::Header { .. }))
+        );
     }
 
     #[test]
@@ -1237,5 +1298,118 @@ mod tests_recent_display {
             }
             _ => panic!("expected Subfolder"),
         }
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    fn work() -> WorkArea {
+        WorkArea {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1000,
+        }
+    }
+
+    #[test]
+    fn fits_below_prefers_below() {
+        // Toolbar 1/4 down: 210 px above, 750 below.
+        let p = place_level1(210, 250, 400, work());
+        assert_eq!(
+            p,
+            Level1Placement {
+                side: Side::Below,
+                max_h: 750
+            }
+        );
+    }
+
+    #[test]
+    fn fits_both_still_below() {
+        let p = place_level1(480, 520, 100, work());
+        assert_eq!(p.side, Side::Below);
+    }
+
+    #[test]
+    fn fits_above_only_goes_above() {
+        // Status-bar toolbar near the bottom.
+        let p = place_level1(940, 980, 400, work());
+        assert_eq!(
+            p,
+            Level1Placement {
+                side: Side::Above,
+                max_h: 940
+            }
+        );
+    }
+
+    #[test]
+    fn fits_neither_takes_larger_side() {
+        let p = place_level1(300, 340, 5000, work());
+        assert_eq!(
+            p,
+            Level1Placement {
+                side: Side::Below,
+                max_h: 660
+            }
+        );
+        let p = place_level1(700, 740, 5000, work());
+        assert_eq!(
+            p,
+            Level1Placement {
+                side: Side::Above,
+                max_h: 700
+            }
+        );
+    }
+
+    #[test]
+    fn toolbar_at_very_top_goes_below() {
+        let p = place_level1(0, 40, 2000, work());
+        assert_eq!(
+            p,
+            Level1Placement {
+                side: Side::Below,
+                max_h: 960
+            }
+        );
+    }
+
+    #[test]
+    fn band_outside_work_area_clamps_space_to_zero() {
+        let p = place_level1(-50, -10, 100, work());
+        assert_eq!(p.side, Side::Below);
+        assert_eq!(p.max_h, 1010);
+        let p = place_level1(1010, 1050, 100, work());
+        assert_eq!(
+            p,
+            Level1Placement {
+                side: Side::Above,
+                max_h: 1010
+            }
+        );
+    }
+
+    #[test]
+    fn y_is_flush_with_band() {
+        let below = Level1Placement {
+            side: Side::Below,
+            max_h: 750,
+        };
+        assert_eq!(level1_y(below, 210, 250, 300), 250);
+        let above = Level1Placement {
+            side: Side::Above,
+            max_h: 940,
+        };
+        assert_eq!(level1_y(above, 940, 980, 300), 640);
+    }
+
+    #[test]
+    fn header_position_follows_side() {
+        assert_eq!(Side::Below.header_position(), ReshowPosition::First);
+        assert_eq!(Side::Above.header_position(), ReshowPosition::Last);
     }
 }

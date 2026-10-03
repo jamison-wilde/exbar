@@ -735,7 +735,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                         );
                         state.navigate_or_new_window_or_tab(&parent_path.to_string_lossy(), ctrl);
                     }
-                    Some(crate::submenu::DisplayItem::ParentReshow { path, .. }) => {
+                    Some(crate::submenu::DisplayItem::Header { path, .. }) => {
                         state.execute_tracker_event(
                             hwnd,
                             crate::recent_tracker::TrackerEvent::SelfInitiated,
@@ -804,7 +804,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                                 },
                             );
                         }
-                        // ParentReshow, Ellipsis, Empty → treat as buffer
+                        // Header, Ellipsis, Empty → treat as buffer
                         // (highlight stays, dismiss cancelled).
                         _ => {
                             state.execute_submenu_event(
