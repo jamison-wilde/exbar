@@ -156,7 +156,7 @@ All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` 
 | `clock::Clock` | `SystemClock` | Time source for dwell timestamps + debounced writes |
 | `reachability_probe::ReachabilityProbe` | `Win32Probe` | Network reachability probe with 3 s wall-clock budget |
 
-Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView`, `MockSubfolderSource`, `MockRecentStore`, `MockDialogMru`, `MockClock`, `MockProbe` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
+Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView`, `MockSubfolderSource`, `MockRecentStore`, `MockDialogMru`, `MockClock`, `MockProbe` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8). `ToolbarState.dialog_mru` is not a `with_deps` parameter; it defaults to `Win32DialogMru` and tests replace it by field assignment — any test reaching `on_dialog_mru_changed` must assign a mock.
 
 ### Error handling (SP5)
 
