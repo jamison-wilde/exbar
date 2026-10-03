@@ -375,6 +375,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
 
         WM_LBUTTONDOWN => {
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                let (px, py) = lparam_point(lparam);
+                state.hover_button_down(hwnd, px, py);
                 // If submenus are open, a toolbar click starts a new gesture.
                 // Dismiss the current chain before processing the press so the
                 // new press-release cycle works cleanly (and a subsequent
@@ -424,7 +426,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // Cancel a pending rest timer before the context-menu modal loop
             // (it dispatches WM_TIMER and would open a submenu over the menu).
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
-                state.execute_hover_event(hwnd, crate::hover_open::HoverEvent::RightButtonDown);
+                let (x, y) = lparam_point(lparam);
+                state.hover_button_down(hwnd, x, y);
             }
             LRESULT(0)
         }
@@ -432,8 +435,8 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         WM_RBUTTONUP => {
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
                 // Defense-in-depth: cancel here too in case WM_RBUTTONDOWN was missed.
-                state.execute_hover_event(hwnd, crate::hover_open::HoverEvent::RightButtonDown);
                 let (x, y) = lparam_point(lparam);
+                state.hover_button_down(hwnd, x, y);
                 if let Some(idx) = hit_test::hit_test(&state.buttons, x, y) {
                     let mut pt = POINT { x, y };
                     unsafe {

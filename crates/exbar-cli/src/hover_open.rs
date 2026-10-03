@@ -8,6 +8,11 @@
 //! - A chain that closed under the cursor (Esc, click, dismiss) stays closed
 //!   until the cursor leaves that button (`Suppressed`), so hover never
 //!   re-pops something the user just dismissed.
+//! - A press (`ButtonDown`) cancels a pending rest and suppresses the pressed
+//!   button: the user is acting on it, so hover must not pop over the click.
+//! - `Away`: the pointer left the toolbar window while a chain was open (into
+//!   a popup). If the chain later closes and the pointer returns, that is a
+//!   fresh arrival, not a dismissal under the cursor.
 //!
 //! The adapter (`ToolbarState::execute_hover_event`) runs the commands.
 
@@ -30,6 +35,10 @@ pub enum HoverState {
     Suppressed {
         button: usize,
     },
+    /// Pointer left the toolbar while `button`'s chain was open.
+    Away {
+        button: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +55,11 @@ pub enum HoverEvent {
     RestTimerFired {
         chain_open: bool,
     },
-    RightButtonDown,
+    /// A mouse press; `button` is the toolbar button index under the cursor
+    /// (`None` when not on a folder button).
+    ButtonDown {
+        button: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,11 +85,17 @@ pub fn transition(state: &mut HoverState, ev: HoverEvent, ctx: &HoverCtx) -> Vec
             y,
             chain_open,
         } => match *state {
-            HoverState::Open { button: open } if chain_open => {
+            // Our chain is open (possibly after a press or a trip into a popup):
+            // menu-bar switching.
+            HoverState::Open { button: open }
+            | HoverState::Away { button: open }
+            | HoverState::Suppressed { button: open }
+                if chain_open =>
+            {
+                *state = HoverState::Open { button };
                 if open == button {
                     vec![]
                 } else {
-                    *state = HoverState::Open { button };
                     vec![Open(button)]
                 }
             }
@@ -100,18 +119,50 @@ pub fn transition(state: &mut HoverState, ev: HoverEvent, ctx: &HoverCtx) -> Vec
             }
             _ => arrive(state, button, is_recent, (x, y), ctx),
         },
-        HoverEvent::MoveOffButtons | HoverEvent::Leave | HoverEvent::RightButtonDown => {
-            match *state {
-                HoverState::Resting { .. } => {
-                    *state = HoverState::Idle;
-                    vec![KillRest]
-                }
-                HoverState::Suppressed { .. } if !matches!(ev, HoverEvent::RightButtonDown) => {
-                    *state = HoverState::Idle;
-                    vec![]
-                }
-                _ => vec![],
+        HoverEvent::MoveOffButtons => match *state {
+            HoverState::Resting { .. } => {
+                *state = HoverState::Idle;
+                vec![KillRest]
             }
+            HoverState::Suppressed { .. } => {
+                *state = HoverState::Idle;
+                vec![]
+            }
+            _ => vec![],
+        },
+        HoverEvent::Leave => match *state {
+            HoverState::Resting { .. } => {
+                *state = HoverState::Idle;
+                vec![KillRest]
+            }
+            HoverState::Suppressed { .. } => {
+                *state = HoverState::Idle;
+                vec![]
+            }
+            HoverState::Open { button } => {
+                *state = HoverState::Away { button };
+                vec![]
+            }
+            _ => vec![],
+        },
+        HoverEvent::ButtonDown { button } => {
+            let cmds = if matches!(*state, HoverState::Resting { .. }) {
+                vec![KillRest]
+            } else {
+                vec![]
+            };
+            match button.filter(|&b| b >= 1) {
+                Some(b) => *state = HoverState::Suppressed { button: b },
+                None => {
+                    if matches!(
+                        *state,
+                        HoverState::Resting { .. } | HoverState::Suppressed { .. }
+                    ) {
+                        *state = HoverState::Idle;
+                    }
+                }
+            }
+            cmds
         }
         HoverEvent::RestTimerFired { chain_open } => match *state {
             HoverState::Resting { button, .. } => {
@@ -156,6 +207,17 @@ impl ToolbarState {
                 .as_ref()
                 .and_then(|c| c.folders.get(button - 1))
                 .is_some_and(|f| matches!(f.kind, crate::config::FolderKind::Recent))
+    }
+
+    /// Report a mouse press at client point (`x`, `y`) to the hover controller.
+    pub(crate) fn hover_button_down(
+        &mut self,
+        toolbar: windows::Win32::Foundation::HWND,
+        x: i32,
+        y: i32,
+    ) {
+        let button = crate::hit_test::hit_test(&self.buttons, x, y);
+        self.execute_hover_event(toolbar, HoverEvent::ButtonDown { button });
     }
 
     /// Feed a hover event through the controller and run its commands.
@@ -490,20 +552,123 @@ mod tests {
         assert_eq!(transition(&mut s, HoverEvent::Leave, &CTX), vec![KillRest]);
         let mut s = HoverState::Open { button: 2 };
         assert_eq!(transition(&mut s, HoverEvent::Leave, &CTX), vec![]);
-        assert_eq!(s, HoverState::Open { button: 2 });
+        assert_eq!(s, HoverState::Away { button: 2 });
+    }
+
+    fn resting2() -> HoverState {
+        HoverState::Resting {
+            button: 2,
+            anchor: (0, 0),
+        }
     }
 
     #[test]
     fn right_button_cancels_rest() {
-        let mut s = HoverState::Resting {
-            button: 2,
-            anchor: (0, 0),
-        };
+        let mut s = resting2();
         assert_eq!(
-            transition(&mut s, HoverEvent::RightButtonDown, &CTX),
+            transition(&mut s, HoverEvent::ButtonDown { button: None }, &CTX),
             vec![KillRest]
         );
         assert_eq!(s, HoverState::Idle);
+    }
+
+    #[test]
+    fn press_on_resting_button_cancels_rest_and_suppresses() {
+        let mut s = resting2();
+        assert_eq!(
+            transition(&mut s, HoverEvent::ButtonDown { button: Some(2) }, &CTX),
+            vec![KillRest]
+        );
+        assert_eq!(s, HoverState::Suppressed { button: 2 });
+        assert_eq!(
+            transition(
+                &mut s,
+                HoverEvent::RestTimerFired { chain_open: false },
+                &CTX
+            ),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn after_press_same_button_stays_closed_until_cursor_leaves() {
+        let mut s = resting2();
+        transition(&mut s, HoverEvent::ButtonDown { button: Some(2) }, &CTX);
+        assert_eq!(transition(&mut s, on(2, 1, false), &CTX), vec![]);
+        transition(&mut s, HoverEvent::MoveOffButtons, &CTX);
+        assert_eq!(
+            transition(&mut s, on(2, 0, false), &CTX),
+            vec![ArmRest(400)]
+        );
+    }
+
+    #[test]
+    fn press_off_buttons_resets_resting_and_suppressed_but_keeps_open() {
+        let mut s = resting2();
+        assert_eq!(
+            transition(&mut s, HoverEvent::ButtonDown { button: None }, &CTX),
+            vec![KillRest]
+        );
+        assert_eq!(s, HoverState::Idle);
+        let mut s = HoverState::Suppressed { button: 2 };
+        transition(&mut s, HoverEvent::ButtonDown { button: None }, &CTX);
+        assert_eq!(s, HoverState::Idle);
+        let mut s = HoverState::Open { button: 2 };
+        transition(&mut s, HoverEvent::ButtonDown { button: None }, &CTX);
+        assert_eq!(s, HoverState::Open { button: 2 });
+    }
+
+    #[test]
+    fn leave_from_open_goes_away() {
+        let mut s = HoverState::Open { button: 2 };
+        transition(&mut s, HoverEvent::Leave, &CTX);
+        assert_eq!(s, HoverState::Away { button: 2 });
+    }
+
+    #[test]
+    fn returning_to_button_after_chain_closed_away_rearms() {
+        let mut s = HoverState::Away { button: 2 };
+        assert_eq!(
+            transition(&mut s, on(2, 0, false), &CTX),
+            vec![ArmRest(400)]
+        );
+    }
+
+    #[test]
+    fn returning_to_recent_after_chain_closed_away_opens() {
+        let mut s = HoverState::Away { button: 1 };
+        assert_eq!(
+            transition(&mut s, recent(1, false), &CTX),
+            vec![KillRest, Open(1)]
+        );
+    }
+
+    #[test]
+    fn away_with_chain_open_switches_to_other_button() {
+        let mut s = HoverState::Away { button: 2 };
+        assert_eq!(transition(&mut s, on(3, 0, true), &CTX), vec![Open(3)]);
+        assert_eq!(s, HoverState::Open { button: 3 });
+    }
+
+    #[test]
+    fn away_with_chain_open_on_same_button_reopens_state_only() {
+        let mut s = HoverState::Away { button: 2 };
+        assert_eq!(transition(&mut s, on(2, 0, true), &CTX), vec![]);
+        assert_eq!(s, HoverState::Open { button: 2 });
+    }
+
+    #[test]
+    fn suppressed_with_chain_open_switches_to_other_button() {
+        let mut s = HoverState::Suppressed { button: 2 };
+        assert_eq!(transition(&mut s, on(3, 0, true), &CTX), vec![Open(3)]);
+        assert_eq!(s, HoverState::Open { button: 3 });
+    }
+
+    #[test]
+    fn suppressed_with_chain_open_on_same_button_adopts() {
+        let mut s = HoverState::Suppressed { button: 2 };
+        assert_eq!(transition(&mut s, on(2, 0, true), &CTX), vec![]);
+        assert_eq!(s, HoverState::Open { button: 2 });
     }
 
     #[test]
