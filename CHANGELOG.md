@@ -2,6 +2,12 @@
 
 All notable changes to Exbar are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Recent Folders learn from Save As / Open dialogs.** Completing a Save or Open in a file dialog exbar is attached to adds that folder to Recents immediately; Cancel adds nothing. Dialogs expose no `IShellBrowser`, so the signal is the shell's own `ComDlg32\LastVisitedPidlMRU`, which Windows writes only on OK. A watcher thread waits on the key, coalesces each Save's write burst, and commits only entries from the dialog's own process — exbar's `+` picker and dialogs exbar never attached to are ignored. Respects `recent.enabled` and `recent.excludedPaths`.
+
 ## [1.3.1] - 2026-09-10
 
 ### Fixed
