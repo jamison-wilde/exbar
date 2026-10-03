@@ -7,6 +7,17 @@ All notable changes to Exbar are documented here. Format based on [Keep a Change
 ### Added
 
 - **Recent Folders learn from Save As / Open dialogs.** Completing a Save or Open in a file dialog exbar is attached to adds that folder to Recents immediately; Cancel adds nothing. Dialogs expose no `IShellBrowser`, so the signal is the shell's own `ComDlg32\LastVisitedPidlMRU`, which Windows writes only on OK. A watcher thread waits on the key, coalesces each Save's write burst, and commits only entries whose app matches the dialog exbar is attached to (by exe name), so exbar's own `+` picker is ignored. Respects `recent.enabled` and `recent.excludedPaths`.
+- **Remove a single Recent folder.** Right-click an entry in the 🕘 Recent popup → **Remove from Recents**. The list refreshes in place; removing the last entry shows the empty placeholder.
+
+### Changed
+
+- **Hover opens on rest, not on a fixed timer.** A folder's submenu opens once the pointer has rested on it for `longHoverOpenMs` (now 400 ms, was 1200 ms from first contact; `0` = on contact); sweeping across the toolbar opens nothing, except crossing the Recent button, which opens on contact (and, once a submenu is open, sliding switches folders instantly, like a menu bar).
+- **Submenus open beside the toolbar, never over it (horizontal toolbars; vertical toolbars still overlap).** The first popup level opens on whichever side of the toolbar has room (below preferred), flush against it and capped to that side, so the bar stays visible whether it sits mid-window or in a bottom status bar. The in-place name row that covered neighbouring buttons is now a 📂 header at the toolbar-facing end of the popup.
+
+### Fixed
+
+- **Every other folder failed to hover-open.** Sliding from an open submenu to the next folder recorded the new button but never armed its timer once the old submenu closed, so alternate folders never opened. Hover logic moved out of the window procedure into a tested state machine (`hover_open.rs`).
+- **No hover-open right after a click.** A stationary click during the hover wait no longer pops the submenu, and a submenu dismissed with Esc or a click stays closed until the pointer leaves that button.
 
 ## [1.3.1] - 2026-09-10
 

@@ -23,8 +23,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, LoadCursorW,
     PostMessageW, RegisterClassExW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DESTROY,
-    WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows_core::PCWSTR;
 
@@ -477,6 +477,26 @@ unsafe extern "system" fn submenu_wndproc(
                     windows::Win32::Foundation::WPARAM(wparam_encoded),
                     windows::Win32::Foundation::LPARAM(item_idx),
                 );
+            }
+            LRESULT(0)
+        }
+
+        WM_RBUTTONUP => {
+            let Some(popup) = (unsafe { popup_state(hwnd) }) else {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            };
+            let x = (lparam.0 as i16) as i32;
+            let y = ((lparam.0 >> 16) as i16) as i32;
+            let item_idx = hit_test_inner(&popup.layout, x, y, popup.scroll_offset);
+            if item_idx >= 0 {
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(popup.toolbar_hwnd),
+                        crate::wndproc::WM_USER_SUBMENU_RCLICK,
+                        WPARAM((popup.level as usize) << 16),
+                        LPARAM(item_idx),
+                    );
+                }
             }
             LRESULT(0)
         }
