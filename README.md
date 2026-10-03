@@ -49,7 +49,7 @@ The installer is per-user (no admin required) and:
 ## Use
 
 - **Click a folder button** — the active Explorer window's active tab navigates to that folder
-- **Long-press or rest the pointer** on a folder button — opens a subfolder submenu beside the toolbar (never over it). Once one is open, slide across the toolbar to switch folders instantly. Right-click a Recents entry → **Remove from Recents**. Click / Ctrl-click items to navigate; drop files onto them to move/copy; mouse-wheel or hover the top/bottom arrows to scroll long lists. `..` rows navigate up. Esc or click outside dismisses.
+- **Long-press or rest the pointer** on a folder button — opens a subfolder submenu beside the toolbar (never over it, for horizontal toolbars). Once one is open, slide across the toolbar to switch folders instantly. Right-click a Recents entry → **Remove from Recents**. Click / Ctrl-click items to navigate; drop files onto them to move/copy; mouse-wheel or hover the top/bottom arrows to scroll long lists. `..` rows navigate up. Esc or click outside dismisses.
 - **Drag a file/folder onto an exbar folder button** — moves (same drive) or copies (different drive) just like it would with a Quick Access folder
   - Hold `Ctrl` to force copy, or `Shift` to force move
 - **Drag the grip** (dots on the left edge when horizontal, top edge when vertical) — move the toolbar
