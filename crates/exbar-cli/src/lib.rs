@@ -89,6 +89,7 @@ pub mod clipboard;
 pub mod clock;
 pub mod config;
 pub mod contextmenu;
+pub mod dialog_mru;
 pub mod dialog_nav;
 pub mod dragdrop;
 pub mod drop_effect;

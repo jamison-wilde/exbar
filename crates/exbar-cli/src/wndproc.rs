@@ -53,6 +53,9 @@ pub const WM_USER_SUBMENU_BANDHOVER: u32 = 0x040F; // WM_USER + 15
 /// payload). `WPARAM` and `LPARAM` are unused — wndproc invalidates the
 /// whole client area.
 pub const WM_USER_REACHABILITY_UPDATED: u32 = 0x0407; // WM_USER + 7
+/// Posted by the `exbar-dialog-mru` watcher thread once a burst of writes to
+/// the shell's dialog MRU has settled (a file dialog completed Save/Open).
+pub const WM_USER_DIALOG_MRU_CHANGED: u32 = 0x0410; // WM_USER + 16
 
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
@@ -680,6 +683,13 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             // Full repaint — cheap, no per-button bookkeeping.
             unsafe {
                 let _ = InvalidateRect(Some(hwnd), None, true);
+            }
+            LRESULT(0)
+        }
+
+        x if x == WM_USER_DIALOG_MRU_CHANGED => {
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                state.on_dialog_mru_changed(hwnd);
             }
             LRESULT(0)
         }

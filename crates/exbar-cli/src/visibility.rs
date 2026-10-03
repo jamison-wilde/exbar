@@ -208,6 +208,14 @@ fn exe_path_for_pid(pid: u32) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len]))
 }
 
+/// Make `hwnd` (a file dialog) the active target and remember its exe.
+/// The exe is captured now because the dialog is usually gone by the time
+/// its Save/Open reaches the shell MRU (see `dialog_mru`).
+fn attach_file_dialog(state: &mut crate::toolbar::ToolbarState, hwnd: HWND) {
+    state.active_target = Some(crate::target::ActiveTarget::file_dialog(hwnd));
+    state.active_dialog_exe = exe_path_for_pid(pid_for_hwnd(hwnd));
+}
+
 /// PID of the process owning `hwnd`, or 0 on failure.
 fn pid_for_hwnd(hwnd: HWND) -> u32 {
     use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
@@ -647,7 +655,7 @@ fn handle_foreign_foreground(hwnd: HWND, class: &str, tb_opt: Option<HWND>) {
             }
             if let Some(tb) = get_global_toolbar_hwnd() {
                 if let Some(state) = unsafe { crate::toolbar::toolbar_state(tb) } {
-                    state.active_target = Some(crate::target::ActiveTarget::file_dialog(hwnd));
+                    attach_file_dialog(state, hwnd);
                     // Force a reposition; last_explorer_origin was for explorer.
                     state.last_explorer_origin = None;
                 }
@@ -705,7 +713,7 @@ pub(crate) fn settle_foreground(toolbar: HWND) {
             .unwrap_or(true);
         if classify_hwnd(fg, &fg_class, dialog_enabled, &Win32DefViewProbe) == HwndRole::FileDialog
         {
-            state.active_target = Some(crate::target::ActiveTarget::file_dialog(fg));
+            attach_file_dialog(state, fg);
             // Offsets are per-kind; force a fresh measure against the dialog.
             state.last_explorer_origin = None;
         }

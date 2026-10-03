@@ -52,6 +52,7 @@ exbar/
 │       │   ├── recent_list.rs          # Pure LRU ops for recent folders (push/dedup/trim/exclude)
 │       │   ├── recent_tracker.rs       # Pure dwell+action state machine for Recent Folders
 │       │   ├── recent_store.rs         # RecentStore trait + JsonRecentStore → ~/.exbar/recents.json
+│       │   ├── dialog_mru.rs           # Shell dialog-MRU parse + gate, DialogMruSource trait, watcher thread (file-dialog Save/Open → Recents)
 │       │   ├── clock.rs                # Clock trait + SystemClock + MockClock (time-source seam)
 │       │   ├── reachability.rs         # Pure ReachabilityCache + classify_root for network paths
 │       │   ├── reachability_probe.rs   # ReachabilityProbe trait + Win32Probe (GetFileAttributesW + 3s timeout)
@@ -151,10 +152,11 @@ All cross-process Win32 surfaces are abstracted behind traits on `ToolbarState` 
 | `visibility::DefViewProbe` | `Win32DefViewProbe` | Detects `SHELLDLL_DefView` descendants to recognise file dialogs |
 | `subfolder_enum::SubfolderSource` | `Win32SubfolderSource` | Directory enumeration + ▸ has-children probe for submenus |
 | `recent_store::RecentStore` | `JsonRecentStore` | `~/.exbar/recents.json` load/save/delete for Recent Folders |
+| `dialog_mru::DialogMruSource` | `Win32DialogMru` | Newest `ComDlg32\LastVisitedPidlMRU` entry (file-dialog Save/Open) for Recent Folders |
 | `clock::Clock` | `SystemClock` | Time source for dwell timestamps + debounced writes |
 | `reachability_probe::ReachabilityProbe` | `Win32Probe` | Network reachability probe with 3 s wall-clock budget |
 
-Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView`, `MockSubfolderSource`, `MockRecentStore`, `MockClock`, `MockProbe` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8).
+Tests inject `MockShellBrowser`, `MockFolderPicker`, `MockFileOp`, `MockClipboard`, `MockConfigStore`, `MockDialogNavigator`, `MockDefView`, `MockSubfolderSource`, `MockRecentStore`, `MockDialogMru`, `MockClock`, `MockProbe` — each mock lives in its trait's `test_mocks` sub-module; shared builders live in `test_helpers.rs` (SP8). `ToolbarState.dialog_mru` is not a `with_deps` parameter; it defaults to `Win32DialogMru` and tests replace it by field assignment — any test reaching `on_dialog_mru_changed` must assign a mock.
 
 ### Error handling (SP5)
 
@@ -193,6 +195,7 @@ Opt-in tracking of folders where the user spends time or acts.
 
 - **Enable/disable** via `+` button's right-click menu. Enable appends a `FolderEntry{kind: "Recent"}` pseudo-entry to `folders[]`, hydrates `recent_list` from `~/.exbar/recents.json`, arms a 1 Hz dwell-tick timer. Disable deletes `recents.json` atomically, clears in-memory list, disarms tick, dismisses any open submenu chain.
 - **Tracking** — pure `recent_tracker::TrackerState` + `transition(event)` returning `CommitRecent` / `ClearDwell` commands. Events: `NavigationTo`, `ForegroundLost`, `SelfInitiated`, `DwellTick`, `ActionInFolder`. Dwell fires at `dwellSecondsToTrack` (default 10s) of being the active tab in the foreground Explorer. Actions (drops onto folder buttons) commit immediately regardless of dwell. Toolbar-initiated navigations emit `SelfInitiated` to suppress self-tracking.
+- **File-dialog Save/Open** — dialogs expose no `IShellBrowser`, so dwell can't see them. The shell writes `HKCU\…\ComDlg32\LastVisitedPidlMRU` on every dialog OK and never on Cancel; the `exbar-dialog-mru` thread watches it (`RegNotifyChangeKeyValue`, 150 ms coalesce) and posts `WM_USER_DIALOG_MRU_CHANGED`. `on_dialog_mru_changed` commits via `ActionInFolder` only when the active target is a `FileDialog` whose exe (captured at attach time by `visibility::attach_file_dialog` — the dialog is gone by the time the write lands) matches the entry's app name; GUID-named entries pass on target kind alone. Apps using `FOS_DONTADDTORECENT` and virtual folders are not captured.
 - **Active-tab path resolution** — `IShellBrowser::QueryActiveShellView` → `IFolderView::GetFolder::<IPersistFolder2>` → `GetCurFolder()` PIDL → `SHGetPathFromIDListW`. Polled each `TIMER_DWELL_TICK`.
 - **Persistence** — `RecentStore` trait; `JsonRecentStore` writes `recents.json` with a 2 s debounced `TIMER_RECENT_DEBOUNCE` on each `CommitRecent`. `flush_recent` called on toolbar `WM_DESTROY` so a clean shutdown doesn't lose pending commits.
 - **LRU semantics** — `recent_list::push` dedupes case-insensitively (normalized via `path_norm::normalize`), trims to `maxCount`. `for_display` filters pinned folders at render time when `includePinned == false`. `excludedPaths` is a prefix match with `\` boundary.
