@@ -14,6 +14,9 @@
 //!   sometimes a GUID), immediately followed by the folder's absolute PIDL.
 
 use crate::target::TargetKind;
+use std::path::PathBuf;
+use windows::Win32::Foundation::HWND;
+use windows::core::{PCWSTR, w};
 
 const MRU_TERMINATOR: u32 = 0xFFFF_FFFF;
 
@@ -83,6 +86,153 @@ pub fn should_commit(active: Option<TargetKind>, dialog_exe: Option<&str>, mru_a
     };
     let base = exe.rsplit(['\\', '/']).next().unwrap_or(exe);
     base.to_lowercase() == app
+}
+
+const MRU_KEY: PCWSTR =
+    w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ComDlg32\\LastVisitedPidlMRU");
+
+/// Source of the newest dialog-MRU entry. Trait seam so the adapter is
+/// testable without a registry.
+pub trait DialogMruSource {
+    /// Newest `LastVisitedPidlMRU` entry as (app name, filesystem folder).
+    /// `None` when the key is unreadable, the entry is malformed, or the
+    /// folder has no filesystem path (Libraries, This PC).
+    fn read_newest(&self) -> Option<(String, PathBuf)>;
+}
+
+/// Production [`DialogMruSource`]: reads `HKCU` and resolves the PIDL with
+/// `SHGetPathFromIDListW`.
+#[derive(Default)]
+pub struct Win32DialogMru;
+
+impl Win32DialogMru {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl DialogMruSource for Win32DialogMru {
+    fn read_newest(&self) -> Option<(String, PathBuf)> {
+        let order = read_binary_value("MRUListEx")?;
+        let idx = newest_index(&order)?;
+        let blob = read_binary_value(&idx.to_string())?;
+        let Some((app, pidl)) = parse_entry(&blob) else {
+            log::debug!(
+                "dialog-mru: entry {idx} is malformed ({} bytes)",
+                blob.len()
+            );
+            return None;
+        };
+        let Some(path) = pidl_to_path(pidl) else {
+            log::debug!("dialog-mru: entry {idx} ({app}) has no filesystem path");
+            return None;
+        };
+        Some((app, path))
+    }
+}
+
+/// Read a `REG_BINARY` value from the MRU key.
+fn read_binary_value(name: &str) -> Option<Vec<u8>> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
+
+    let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let name_p = PCWSTR(name_w.as_ptr());
+    let mut size: u32 = 0;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            MRU_KEY,
+            name_p,
+            RRF_RT_REG_BINARY,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
+    if rc.is_err() {
+        log::debug!("dialog-mru: size query for {name} failed: {rc:?}");
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            MRU_KEY,
+            name_p,
+            RRF_RT_REG_BINARY,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if rc.is_err() {
+        log::debug!("dialog-mru: read of {name} failed: {rc:?}");
+        return None;
+    }
+    buf.truncate(size as usize);
+    Some(buf)
+}
+
+/// Resolve a validated PIDL (from [`parse_entry`]) to a filesystem path.
+fn pidl_to_path(pidl: &[u8]) -> Option<PathBuf> {
+    use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+    use windows::Win32::UI::Shell::SHGetPathFromIDListW;
+
+    let mut buf = [0u16; 260];
+    // SAFETY: `parse_entry` walked the cb chain, so every item and the zero
+    // terminator lie inside `pidl`; ITEMIDLIST is byte-packed, so the
+    // pointer needs no alignment. The shell only reads through it.
+    let ok = unsafe { SHGetPathFromIDListW(pidl.as_ptr().cast::<ITEMIDLIST>(), &mut buf) };
+    if !ok.as_bool() {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    (len > 0).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+}
+
+#[cfg(test)]
+pub(crate) mod test_mocks {
+    use super::DialogMruSource;
+    use std::path::PathBuf;
+
+    /// Returns a fixed newest entry.
+    pub struct MockDialogMru {
+        pub newest: Option<(String, PathBuf)>,
+    }
+
+    impl DialogMruSource for MockDialogMru {
+        fn read_newest(&self) -> Option<(String, PathBuf)> {
+            self.newest.clone()
+        }
+    }
+}
+
+// ── ToolbarState adapter ─────────────────────────────────────────────────────
+
+#[allow(dead_code)] // called from wndproc in Task 4
+impl crate::toolbar::ToolbarState {
+    /// Handle `WM_USER_DIALOG_MRU_CHANGED`: commit the newest dialog-MRU
+    /// folder to Recents if it came from the dialog exbar is attached to.
+    /// `execute_tracker_event` no-ops when Recents is disabled.
+    pub(crate) fn on_dialog_mru_changed(&mut self, toolbar: HWND) {
+        let Some((app, path)) = self.dialog_mru.read_newest() else {
+            return;
+        };
+        let kind = self.active_target.map(|t| t.kind);
+        if !should_commit(kind, self.active_dialog_exe.as_deref(), &app) {
+            log::debug!(
+                "dialog-mru: {app} -> {} skipped (target={kind:?} dialog_exe={:?})",
+                path.display(),
+                self.active_dialog_exe
+            );
+            return;
+        }
+        log::debug!("dialog-mru: {app} -> {} committed", path.display());
+        self.execute_tracker_event(
+            toolbar,
+            crate::recent_tracker::TrackerEvent::ActionInFolder(path),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -275,5 +425,88 @@ mod tests {
         let guid = "{32237796-1509-49D1-BB7E-63AD36AE868C}";
         assert!(should_commit(Some(TargetKind::FileDialog), None, guid));
         assert!(!should_commit(Some(TargetKind::Explorer), None, guid));
+    }
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::test_mocks::MockDialogMru;
+    use crate::target::ActiveTarget;
+    use crate::test_helpers::{make_test_state, mk_config_with_folders, mk_deps};
+    use crate::toolbar::ToolbarState;
+    use std::path::PathBuf;
+    use windows::Win32::Foundation::HWND;
+
+    // An invalid HWND: SetTimer in the debounce path fails harmlessly.
+    fn toolbar() -> HWND {
+        HWND(std::ptr::dangling_mut())
+    }
+    const NOTEPAD: &str = "C:\\Windows\\System32\\notepad.exe";
+
+    fn state_with(
+        recent_enabled: bool,
+        excluded: &[&str],
+        newest: Option<(&str, &str)>,
+    ) -> ToolbarState {
+        let deps = mk_deps();
+        let mut cfg = mk_config_with_folders(&[("A", "C:\\A")]);
+        cfg.recent.enabled = recent_enabled;
+        cfg.recent.excluded_paths = excluded.iter().map(|s| (*s).to_owned()).collect();
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.recent_list.clear();
+        state.dialog_mru = Box::new(MockDialogMru {
+            newest: newest.map(|(app, p)| (app.to_owned(), PathBuf::from(p))),
+        });
+        state.active_target = Some(ActiveTarget::file_dialog(HWND(99 as *mut _)));
+        state.active_dialog_exe = Some(NOTEPAD.to_owned());
+        state
+    }
+
+    #[test]
+    fn matching_save_commits_folder_to_recents() {
+        let mut state = state_with(true, &[], Some(("notepad.exe", "C:\\Notes")));
+        state.on_dialog_mru_changed(toolbar());
+        assert_eq!(state.recent_list.len(), 1);
+        assert_eq!(state.recent_list[0].path, PathBuf::from("C:\\Notes"));
+    }
+
+    #[test]
+    fn entry_from_other_app_is_not_committed() {
+        let mut state = state_with(true, &[], Some(("exbar.exe", "C:\\Notes")));
+        state.on_dialog_mru_changed(toolbar());
+        assert!(state.recent_list.is_empty());
+    }
+
+    #[test]
+    fn explorer_target_is_not_committed() {
+        let mut state = state_with(true, &[], Some(("notepad.exe", "C:\\Notes")));
+        state.active_target = Some(ActiveTarget::explorer(HWND(42 as *mut _)));
+        state.on_dialog_mru_changed(toolbar());
+        assert!(state.recent_list.is_empty());
+    }
+
+    #[test]
+    fn recents_disabled_commits_nothing() {
+        let mut state = state_with(false, &[], Some(("notepad.exe", "C:\\Notes")));
+        state.on_dialog_mru_changed(toolbar());
+        assert!(state.recent_list.is_empty());
+    }
+
+    #[test]
+    fn excluded_folder_is_not_committed() {
+        let mut state = state_with(
+            true,
+            &["C:\\Secret"],
+            Some(("notepad.exe", "C:\\Secret\\Tax")),
+        );
+        state.on_dialog_mru_changed(toolbar());
+        assert!(state.recent_list.is_empty());
+    }
+
+    #[test]
+    fn unreadable_entry_commits_nothing() {
+        let mut state = state_with(true, &[], None);
+        state.on_dialog_mru_changed(toolbar());
+        assert!(state.recent_list.is_empty());
     }
 }

@@ -222,6 +222,16 @@ pub(crate) struct ToolbarState {
     /// the receiver; dropping the sender on `WM_DESTROY` causes the worker
     /// to exit cleanly. `None` in test states (no worker spawned).
     pub(crate) probe_tx: Option<std::sync::mpsc::Sender<String>>,
+
+    // Dialog Recents (Plan: dialog-recents):
+    /// Reads the newest shell dialog-MRU entry. Tests replace it with
+    /// `dialog_mru::test_mocks::MockDialogMru` by assigning the field.
+    pub(crate) dialog_mru: Box<dyn crate::dialog_mru::DialogMruSource>,
+    /// Exe path of the file dialog last attached as `active_target`.
+    /// Captured at attach time because the dialog is usually destroyed
+    /// before its Save/Open reaches the MRU. Never cleared: the commit gate
+    /// checks the target kind first, and the next dialog overwrites it.
+    pub(crate) active_dialog_exe: Option<String>,
 }
 
 impl ToolbarState {
@@ -313,6 +323,8 @@ impl ToolbarState {
                 crate::reachability::ReachabilityCache::new(),
             )),
             probe_tx: None,
+            dialog_mru: Box::new(crate::dialog_mru::Win32DialogMru::new()),
+            active_dialog_exe: None,
         }
     }
 }
