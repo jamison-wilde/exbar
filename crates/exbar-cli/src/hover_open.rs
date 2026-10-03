@@ -11,6 +11,8 @@
 //!
 //! The adapter (`ToolbarState::execute_hover_event`) runs the commands.
 
+use crate::toolbar::ToolbarState;
+
 /// Rest-detection tolerance in logical px (Windows' default `SM_CXMOUSEHOVER`).
 pub const HOVER_JITTER_LOGICAL_PX: i32 = 4;
 
@@ -140,6 +142,88 @@ fn arrive(
     } else {
         *state = HoverState::Resting { button, anchor: at };
         vec![HoverCommand::ArmRest(ctx.rest_ms)]
+    }
+}
+
+// ── ToolbarState adapter ─────────────────────────────────────────────────────
+
+impl ToolbarState {
+    /// Whether toolbar button `button` (0 = '+') is the Recent pseudo-button.
+    pub(crate) fn button_is_recent(&self, button: usize) -> bool {
+        button >= 1
+            && self
+                .config
+                .as_ref()
+                .and_then(|c| c.folders.get(button - 1))
+                .is_some_and(|f| matches!(f.kind, crate::config::FolderKind::Recent))
+    }
+
+    /// Feed a hover event through the controller and run its commands.
+    pub(crate) fn execute_hover_event(
+        &mut self,
+        toolbar: windows::Win32::Foundation::HWND,
+        ev: HoverEvent,
+    ) {
+        use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
+        let ctx = HoverCtx {
+            rest_ms: self.submenu_cfg.long_hover_open_ms,
+            jitter_px: crate::theme::scale(HOVER_JITTER_LOGICAL_PX, self.dpi),
+        };
+        for cmd in transition(&mut self.hover, ev, &ctx) {
+            match cmd {
+                HoverCommand::ArmRest(ms) => unsafe {
+                    let _ = SetTimer(Some(toolbar), crate::toolbar::TIMER_HOVER_OPEN, ms, None);
+                },
+                HoverCommand::KillRest => unsafe {
+                    let _ = KillTimer(Some(toolbar), crate::toolbar::TIMER_HOVER_OPEN);
+                },
+                HoverCommand::Open(button) => self.open_root_for_button(toolbar, button),
+            }
+        }
+    }
+
+    /// Record the trigger context and open `button`'s root submenu.
+    fn open_root_for_button(&mut self, toolbar: windows::Win32::Foundation::HWND, button: usize) {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        // Translate button index → folder index (button 0 is '+').
+        let folder_button = button.saturating_sub(1);
+        let Some(folder) = self
+            .config
+            .as_ref()
+            .and_then(|c| c.folders.get(folder_button))
+        else {
+            return;
+        };
+        let is_recent = matches!(folder.kind, crate::config::FolderKind::Recent);
+        let raw_path = folder.path.clone();
+
+        // Record trigger context (same as FireLongPress arm in execute_pointer_command).
+        let btn_rect = self.button_screen_rect(toolbar, folder_button);
+        self.last_button_screen_rect = btn_rect;
+        self.last_button_center_y_on_open = (btn_rect.top + btn_rect.bottom) / 2;
+        let mut cursor = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut cursor);
+        }
+        self.last_cursor_x_on_open = cursor.x;
+        self.last_cursor_y_on_open = cursor.y;
+
+        log::info!(
+            "hover_open: fire folder_button={} at cursor=({},{})",
+            folder_button,
+            cursor.x,
+            cursor.y
+        );
+
+        self.execute_submenu_event(
+            toolbar,
+            crate::submenu::SubmenuEvent::OpenRoot {
+                path: std::path::PathBuf::from(raw_path),
+                button_center_y: self.last_button_center_y_on_open,
+                is_recent,
+            },
+        );
     }
 }
 

@@ -69,14 +69,9 @@ const MENU_ID_REMOVE: u32 = 205;
 const MENU_ID_RETRY_CONNECTION: u32 = 206;
 
 /// Returns `true` if the given screen-coord cursor is inside any open popup's
-/// rendered bounds OR inside the triggering toolbar button's rect.
-///
-/// - Popup HWND rect already includes the buffer band (spec §3.8).
-/// - The triggering button is included because some submenu placements (e.g.
-///   the Recent button's root submenu, which sits entirely above/below the
-///   toolbar) leave a gap between cursor-at-button and popup-bounds. Without
-///   this, the safety timer would dismiss the chain the instant it opens.
-fn cursor_inside_any_padded_popup(state: &crate::toolbar::ToolbarState, cx: i32, cy: i32) -> bool {
+/// rendered bounds. The popup HWND rect already includes the buffer band
+/// (spec §3.8). The toolbar is handled separately by [`cursor_over_toolbar`].
+fn cursor_inside_popups(state: &crate::toolbar::ToolbarState, cx: i32, cy: i32) -> bool {
     use windows::Win32::Foundation::RECT;
 
     for &h in state.submenu_popups.iter() {
@@ -91,13 +86,17 @@ fn cursor_inside_any_padded_popup(state: &crate::toolbar::ToolbarState, cx: i32,
             return true;
         }
     }
-    // Also treat the triggering toolbar button as "inside" while the chain is
-    // open — so cursor-on-button doesn't read as "cursor exited popup".
-    let btn = state.last_button_screen_rect;
-    if cx >= btn.left && cx < btn.right && cy >= btn.top && cy < btn.bottom {
-        return true;
-    }
     false
+}
+
+/// True if the screen point is over the toolbar window. While a chain is
+/// open the toolbar counts as "inside" for the dismiss countdown, so the
+/// cursor can return to the bar (to switch buttons) without the chain
+/// closing under it.
+fn cursor_over_toolbar(toolbar: HWND, cx: i32, cy: i32) -> bool {
+    let mut r = windows::Win32::Foundation::RECT::default();
+    let ok = unsafe { GetWindowRect(toolbar, &mut r).is_ok() };
+    ok && cx >= r.left && cx < r.right && cy >= r.top && cy < r.bottom
 }
 
 /// Extract `(x, y)` from a WM_* LPARAM whose layout is
@@ -331,48 +330,19 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     },
                 );
 
-                // Hover-open: arm a one-shot timer when the cursor rests on a folder button.
-                // If already waiting on the same button, do nothing. If on a different button,
-                // reset. If not on any button, cancel.
-                match state.pointer {
+                let ev = match state.pointer {
                     pointer::PointerState::Hovering { button } if button >= 1 => {
-                        // button 0 is the '+' button — only fire for folder buttons.
-                        if state.hover_open_pending_button != Some(button) {
-                            // Kill any previous timer.
-                            unsafe {
-                                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
-                                    Some(hwnd),
-                                    crate::toolbar::TIMER_HOVER_OPEN,
-                                );
-                            }
-                            state.hover_open_pending_button = Some(button);
-                            // Don't arm if a submenu chain is already open (avoid re-opening on hover drift).
-                            if !state.submenu_chain.is_open() {
-                                let delay = state.submenu_cfg.long_hover_open_ms;
-                                unsafe {
-                                    let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(
-                                        Some(hwnd),
-                                        crate::toolbar::TIMER_HOVER_OPEN,
-                                        delay,
-                                        None,
-                                    );
-                                }
-                            }
+                        crate::hover_open::HoverEvent::MoveOnButton {
+                            button,
+                            is_recent: state.button_is_recent(button),
+                            x,
+                            y,
+                            chain_open: state.submenu_chain.is_open(),
                         }
                     }
-                    _ => {
-                        // Cursor no longer on a folder button — cancel pending hover-open.
-                        if state.hover_open_pending_button.is_some() {
-                            unsafe {
-                                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
-                                    Some(hwnd),
-                                    crate::toolbar::TIMER_HOVER_OPEN,
-                                );
-                            }
-                            state.hover_open_pending_button = None;
-                        }
-                    }
-                }
+                    _ => crate::hover_open::HoverEvent::MoveOffButtons,
+                };
+                state.execute_hover_event(hwnd, ev);
             }
             LRESULT(0)
         }
@@ -381,16 +351,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
                 state.mouse_tracking_started = false; // next hover will need to re-arm.
                 state.apply_pointer_event(hwnd, pointer::PointerEvent::Leave);
-                // Cancel pending hover-open.
-                if state.hover_open_pending_button.is_some() {
-                    unsafe {
-                        let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
-                            Some(hwnd),
-                            crate::toolbar::TIMER_HOVER_OPEN,
-                        );
-                    }
-                    state.hover_open_pending_button = None;
-                }
+                state.execute_hover_event(hwnd, crate::hover_open::HoverEvent::Leave);
             }
             LRESULT(0)
         }
@@ -460,37 +421,18 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
         }
 
         WM_RBUTTONDOWN => {
-            // Cancel any pending hover-open timer before the right-click cascades
-            // into a context-menu modal loop. Win32 dispatches WM_TIMER inside
-            // TrackPopupMenu's modal pump, so without this cancel the hover-open
-            // timer would fire and open a submenu on top of the context menu.
-            if let Some(state) = unsafe { toolbar_state(hwnd) }
-                && state.hover_open_pending_button.is_some()
-            {
-                unsafe {
-                    let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
-                        Some(hwnd),
-                        crate::toolbar::TIMER_HOVER_OPEN,
-                    );
-                }
-                state.hover_open_pending_button = None;
+            // Cancel a pending rest timer before the context-menu modal loop
+            // (it dispatches WM_TIMER and would open a submenu over the menu).
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                state.execute_hover_event(hwnd, crate::hover_open::HoverEvent::RightButtonDown);
             }
             LRESULT(0)
         }
 
         WM_RBUTTONUP => {
             if let Some(state) = unsafe { toolbar_state(hwnd) } {
-                // Defense-in-depth: also cancel here in case WM_RBUTTONDOWN was
-                // missed (e.g. mouse was captured elsewhere when the button went down).
-                if state.hover_open_pending_button.is_some() {
-                    unsafe {
-                        let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
-                            Some(hwnd),
-                            crate::toolbar::TIMER_HOVER_OPEN,
-                        );
-                    }
-                    state.hover_open_pending_button = None;
-                }
+                // Defense-in-depth: cancel here too in case WM_RBUTTONDOWN was missed.
+                state.execute_hover_event(hwnd, crate::hover_open::HoverEvent::RightButtonDown);
                 let (x, y) = lparam_point(lparam);
                 if let Some(idx) = hit_test::hit_test(&state.buttons, x, y) {
                     let mut pt = POINT { x, y };
@@ -908,9 +850,12 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 //
                 // Ordering is important (see fix notes in CLAUDE.md):
                 //   1. Escape check — immediate dismiss.
-                //   2. Cursor poll — compute inside_any.
-                //   3. Mouse-button check — instant dismiss if newly pressed outside.
-                //   4. Transition-only cursor events (CursorExit / CursorReenter) — NOT every tick.
+                //   2. Cursor poll — compute inside_popups and inside_any (popups or toolbar).
+                //   3. Mouse-button check — instant dismiss if newly pressed outside the
+                //      popups (a click on the toolbar still closes the chain; the click
+                //      itself then reaches the button).
+                //   4. Transition-only cursor events (CursorExit / CursorReenter, using
+                //      inside_any) — NOT every tick.
                 //   5. SafetyTick — always emitted, drives the dismiss countdown.
                 //   6. Kill timer if chain closed.
                 if let Some(state) = unsafe { toolbar_state(hwnd) } {
@@ -933,8 +878,10 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     // 2. Cursor poll.
                     let mut cursor = POINT::default();
                     let cursor_ok = unsafe { GetCursorPos(&mut cursor).is_ok() };
-                    let inside_any =
-                        cursor_ok && cursor_inside_any_padded_popup(state, cursor.x, cursor.y);
+                    let inside_popups =
+                        cursor_ok && cursor_inside_popups(state, cursor.x, cursor.y);
+                    let inside_any = inside_popups
+                        || (cursor_ok && cursor_over_toolbar(hwnd, cursor.x, cursor.y));
 
                     // 3. Mouse-button check — instant dismiss on a fresh click outside all popups.
                     let lb =
@@ -945,7 +892,7 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                     let btn_just_pressed = btn_now && !state.prev_mouse_button_down;
                     state.prev_mouse_button_down = btn_now;
 
-                    if btn_just_pressed && !inside_any {
+                    if btn_just_pressed && !inside_popups {
                         state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Dismiss);
                         unsafe {
                             let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_SUBMENU_SAFETY);
@@ -986,63 +933,14 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 }
                 LRESULT(0)
             } else if timer_id == crate::toolbar::TIMER_HOVER_OPEN {
-                // Kill the one-shot timer regardless.
                 unsafe {
                     let _ = KillTimer(Some(hwnd), crate::toolbar::TIMER_HOVER_OPEN);
                 }
                 if let Some(state) = unsafe { toolbar_state(hwnd) } {
-                    let pending = state.hover_open_pending_button.take();
-                    // Verify cursor is still on the same button we were waiting for.
-                    let still_same = match state.pointer {
-                        pointer::PointerState::Hovering { button } => Some(button) == pending,
-                        _ => false,
-                    };
-                    if !still_same {
-                        return LRESULT(0);
-                    }
-                    let Some(button_idx) = pending else {
-                        return LRESULT(0);
-                    };
-                    // Don't open if chain already open or user is pressing.
-                    if state.submenu_chain.is_open() {
-                        return LRESULT(0);
-                    }
-                    // Translate button index → folder index (button 0 is '+').
-                    let folder_button = button_idx.saturating_sub(1);
-                    let Some(cfg) = state.config.as_ref() else {
-                        return LRESULT(0);
-                    };
-                    let Some(folder) = cfg.folders.get(folder_button) else {
-                        return LRESULT(0);
-                    };
-                    let is_recent = matches!(folder.kind, crate::config::FolderKind::Recent);
-                    let raw_path = folder.path.clone();
-
-                    // Record trigger context (same as FireLongPress arm in execute_pointer_command).
-                    let btn_rect = state.button_screen_rect(hwnd, folder_button);
-                    state.last_button_screen_rect = btn_rect;
-                    state.last_button_center_y_on_open = (btn_rect.top + btn_rect.bottom) / 2;
-                    let mut cursor = POINT::default();
-                    unsafe {
-                        let _ = GetCursorPos(&mut cursor);
-                    }
-                    state.last_cursor_x_on_open = cursor.x;
-                    state.last_cursor_y_on_open = cursor.y;
-
-                    log::info!(
-                        "hover_open: fire folder_button={} at cursor=({},{})",
-                        folder_button,
-                        cursor.x,
-                        cursor.y
-                    );
-
-                    state.execute_submenu_event(
+                    let chain_open = state.submenu_chain.is_open();
+                    state.execute_hover_event(
                         hwnd,
-                        crate::submenu::SubmenuEvent::OpenRoot {
-                            path: std::path::PathBuf::from(raw_path),
-                            button_center_y: state.last_button_center_y_on_open,
-                            is_recent,
-                        },
+                        crate::hover_open::HoverEvent::RestTimerFired { chain_open },
                     );
                 }
                 LRESULT(0)

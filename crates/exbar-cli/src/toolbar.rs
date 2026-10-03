@@ -203,7 +203,7 @@ pub(crate) struct ToolbarState {
     /// Set when SetTimer(TIMER_RECENT_DEBOUNCE) is armed but not yet fired.
     pub(crate) recent_debounce_pending: bool,
     /// Button index the hover-open timer is waiting on. `None` when no wait is active.
-    pub(crate) hover_open_pending_button: Option<usize>,
+    pub(crate) hover: crate::hover_open::HoverState,
     /// HWND of the popup currently being auto-scrolled (`None` = no autoscroll).
     pub(crate) autoscroll_popup: Option<HWND>,
     /// Auto-scroll direction: -1 = scroll up (decrease offset), +1 = scroll down. 0 = inactive.
@@ -314,7 +314,7 @@ impl ToolbarState {
             clock,
             recent_dirty: false,
             recent_debounce_pending: false,
-            hover_open_pending_button: None,
+            hover: Default::default(),
             autoscroll_popup: None,
             autoscroll_dir: 0,
             reachability: std::sync::Arc::new(std::sync::RwLock::new(
