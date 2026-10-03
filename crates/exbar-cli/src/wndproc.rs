@@ -56,6 +56,9 @@ pub const WM_USER_REACHABILITY_UPDATED: u32 = 0x0407; // WM_USER + 7
 /// Posted by the `exbar-dialog-mru` watcher thread once a burst of writes to
 /// the shell's dialog MRU has settled (a file dialog completed Save/Open).
 pub const WM_USER_DIALOG_MRU_CHANGED: u32 = 0x0410; // WM_USER + 16
+/// Posted by a submenu popup on right-button-up over an item.
+/// WPARAM high 16 bits = level; LPARAM = display-item index.
+pub const WM_USER_SUBMENU_RCLICK: u32 = 0x0411; // WM_USER + 17
 
 const MENU_ID_EDIT_CONFIG: u32 = 101;
 const MENU_ID_RELOAD_CONFIG: u32 = 102;
@@ -693,6 +696,14 @@ unsafe fn toolbar_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) 
                 }
 
                 state.execute_submenu_event(hwnd, crate::submenu::SubmenuEvent::Commit);
+            }
+            LRESULT(0)
+        }
+
+        x if x == WM_USER_SUBMENU_RCLICK => {
+            if let Some(state) = unsafe { toolbar_state(hwnd) } {
+                let level = (wparam.0 >> 16) as u8;
+                state.on_popup_right_click(hwnd, level, lparam.0 as usize);
             }
             LRESULT(0)
         }

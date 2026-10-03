@@ -24,3 +24,6 @@ touched file (see the global CLAUDE.md "Decomposition (size) discipline").
   One `WM_USER_DIALOG_MRU_CHANGED` arm added under a dated ruling
   (2026-10-03). Decomposition (move `WM_*` arms into feature handlers) is
   owed; every new arm needs a ruling.
+- `crates/exbar-cli/src/submenu_wnd.rs::submenu_wndproc` — 262 lines, frozen;
+  one `WM_RBUTTONUP` arm added under a dated ruling (2026-10-03, Remove from
+  Recents). Decomposition owed.

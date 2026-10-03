@@ -23,6 +23,8 @@ enum LevelContents {
     Folder(Vec<crate::subfolder_enum::SubfolderEntry>),
 }
 
+const MENU_ID_REMOVE_RECENT: u32 = 301;
+
 impl ToolbarState {
     /// Translate a `SubmenuEvent` into pure state-machine transitions + Win32 side effects.
     pub(crate) fn execute_submenu_event(
@@ -538,5 +540,134 @@ impl ToolbarState {
             right: r.right,
             bottom: r.bottom,
         }
+    }
+}
+
+impl ToolbarState {
+    /// Drop `path` from Recents and schedule the debounced save.
+    pub(crate) fn remove_recent(&mut self, toolbar: HWND, path: &std::path::Path) -> bool {
+        if !crate::recent_list::remove(&mut self.recent_list, path) {
+            log::debug!("recent: remove {} - not in list", path.display());
+            return false;
+        }
+        self.recent_dirty = true;
+        self.schedule_recent_debounce(toolbar);
+        true
+    }
+
+    /// Right-click on popup item `idx` at `level`. Only level-1 items of a
+    /// Recent chain get a menu (Remove from Recents).
+    pub(crate) fn on_popup_right_click(&mut self, toolbar: HWND, level: u8, idx: usize) {
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, KillTimer, SetTimer};
+        if level != 1 {
+            return;
+        }
+        let Some(root) = self.submenu_chain.levels.first().cloned() else {
+            return;
+        };
+        if !root.is_recent {
+            return;
+        }
+        let Some(&popup) = self.submenu_popups.first() else {
+            return;
+        };
+        let item = unsafe {
+            crate::submenu_wnd::popup_state(popup).and_then(|p| p.display_items.get(idx).cloned())
+        };
+        let Some(crate::submenu::DisplayItem::Subfolder { entry }) = item else {
+            return;
+        };
+
+        // The modal loop of the menu would otherwise run the safety tick, which
+        // dismisses the chain as the cursor moves onto the menu.
+        unsafe {
+            let _ = KillTimer(Some(toolbar), TIMER_SUBMENU_SAFETY);
+        }
+        self.submenu_timer_active = false;
+
+        let mut pt = windows::Win32::Foundation::POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let items = [crate::contextmenu::MenuItem {
+            id: MENU_ID_REMOVE_RECENT,
+            label: "Remove from Recents",
+            disabled: false,
+        }];
+        let chosen = crate::contextmenu::show_menu(toolbar, pt, &items);
+
+        if chosen == MENU_ID_REMOVE_RECENT && self.remove_recent(toolbar, &entry.path) {
+            // Reopen the Recents root so the list (or its placeholder) refreshes.
+            self.execute_submenu_event(
+                toolbar,
+                crate::submenu::SubmenuEvent::OpenRoot {
+                    path: root.path,
+                    button_center_y: self.last_button_center_y_on_open,
+                    is_recent: true,
+                },
+            );
+        } else if self.submenu_chain.is_open() {
+            self.cursor_was_inside_popup = true;
+            unsafe {
+                let _ = SetTimer(Some(toolbar), TIMER_SUBMENU_SAFETY, 30, None);
+            }
+            self.submenu_timer_active = true;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::recent_list::RecentEntry;
+    use crate::test_helpers::{make_test_state, mk_config_with_folders, mk_deps};
+    use crate::toolbar::ToolbarState;
+    use std::path::{Path, PathBuf};
+    use windows::Win32::Foundation::HWND;
+
+    // Not a real window: SetTimer in the debounce path fails harmlessly.
+    fn toolbar() -> HWND {
+        HWND(std::ptr::dangling_mut())
+    }
+
+    fn recent_state(paths: &[&str]) -> ToolbarState {
+        let deps = mk_deps();
+        let mut cfg = mk_config_with_folders(&[("A", "C:\\A")]);
+        cfg.recent.enabled = true;
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.recent_list = paths
+            .iter()
+            .map(|p| RecentEntry {
+                path: PathBuf::from(p),
+                last_accessed_unix_ms: 0,
+            })
+            .collect();
+        state.recent_dirty = false;
+        state
+    }
+
+    #[test]
+    fn remove_recent_drops_entry_and_marks_dirty() {
+        let mut state = recent_state(&["C:\\A", "C:\\B"]);
+        assert!(state.remove_recent(toolbar(), Path::new("C:\\A")));
+        assert_eq!(state.recent_list.len(), 1);
+        assert!(state.recent_dirty);
+    }
+
+    #[test]
+    fn remove_recent_absent_is_noop() {
+        let mut state = recent_state(&["C:\\A"]);
+        assert!(!state.remove_recent(toolbar(), Path::new("C:\\Z")));
+        assert!(!state.recent_dirty);
+    }
+
+    #[test]
+    fn remove_last_recent_leaves_placeholder_list() {
+        let mut state = recent_state(&["C:\\A"]);
+        state.remove_recent(toolbar(), Path::new("C:\\A"));
+        let items = crate::submenu::build_recent_display_list(&state.recent_list);
+        assert!(matches!(
+            items.as_slice(),
+            [crate::submenu::DisplayItem::Empty { .. }]
+        ));
     }
 }

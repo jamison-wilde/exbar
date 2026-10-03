@@ -65,6 +65,15 @@ pub fn for_display(
         .collect()
 }
 
+/// Remove `path` (normalized compare, same rule as [`push`]). Returns whether
+/// anything was removed.
+pub fn remove(entries: &mut Vec<RecentEntry>, path: &Path) -> bool {
+    let target = crate::path_norm::normalize(&path.to_string_lossy());
+    let before = entries.len();
+    entries.retain(|e| crate::path_norm::normalize(&e.path.to_string_lossy()) != target);
+    entries.len() != before
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +161,34 @@ mod tests {
         let pinned = vec!["C:\\A".to_string()];
         let out = for_display(&list, &pinned, true);
         assert_eq!(out.len(), 1);
+    }
+
+    fn entry(p: &str) -> RecentEntry {
+        RecentEntry {
+            path: PathBuf::from(p),
+            last_accessed_unix_ms: 0,
+        }
+    }
+
+    #[test]
+    fn remove_drops_matching_entry() {
+        let mut v = vec![entry("C:\\A"), entry("C:\\B")];
+        assert!(remove(&mut v, Path::new("C:\\A")));
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].path, PathBuf::from("C:\\B"));
+    }
+
+    #[test]
+    fn remove_matches_case_insensitively_like_push() {
+        let mut v = vec![entry("C:\\Users\\Me\\Docs")];
+        assert!(remove(&mut v, Path::new("c:\\users\\me\\docs\\")));
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn remove_absent_path_is_noop() {
+        let mut v = vec![entry("C:\\A")];
+        assert!(!remove(&mut v, Path::new("C:\\Z")));
+        assert_eq!(v.len(), 1);
     }
 }

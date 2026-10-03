@@ -771,7 +771,7 @@ impl ToolbarState {
     }
 
     /// Arm a 2-second debounce timer if not already armed. Idempotent.
-    fn schedule_recent_debounce(&mut self, toolbar: HWND) {
+    pub(crate) fn schedule_recent_debounce(&mut self, toolbar: HWND) {
         if self.recent_debounce_pending {
             return;
         }
