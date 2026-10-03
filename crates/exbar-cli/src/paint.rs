@@ -415,7 +415,7 @@ fn display_item_label(item: &DisplayItem, at_max_depth: bool) -> String {
             }
         }
         DisplayItem::Dotdot { parent_name, .. } => format!("\u{2B06} {}", parent_name),
-        DisplayItem::Header { name, .. } => format!("\u{1F4C1} {}", name),
+        DisplayItem::Header { name, .. } => format!("\u{1F4C2} {}", name),
         DisplayItem::Ellipsis => "\u{2026}(more)".to_string(),
         DisplayItem::Empty { message } => message.clone(),
     }
@@ -774,6 +774,15 @@ mod tests {
     #[test]
     fn folder_button_label_recent_with_icon() {
         assert_eq!(folder_button_label(&recent(), true), "\u{1F558} Recent");
+    }
+
+    #[test]
+    fn display_item_label_header_uses_open_folder_glyph() {
+        let item = DisplayItem::Header {
+            path: std::path::PathBuf::from("C:/AppData"),
+            name: "AppData".to_string(),
+        };
+        assert_eq!(display_item_label(&item, false), "📂 AppData");
     }
 
     #[test]
