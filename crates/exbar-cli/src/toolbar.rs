@@ -199,6 +199,8 @@ pub(crate) struct ToolbarState {
     pub(crate) prev_mouse_button_down: bool,
     // Recent Folders (Plan B):
     pub(crate) recent_tracker: crate::recent_tracker::TrackerState,
+    /// Instant last-two-folders history for the Recent button toggle.
+    pub(crate) toggle_history: crate::toggle_history::ToggleHistory,
     pub(crate) recent_list: Vec<crate::recent_list::RecentEntry>,
     pub(crate) recent_store: Box<dyn crate::recent_store::RecentStore>,
     pub(crate) clock: Box<dyn crate::clock::Clock>,
@@ -314,6 +316,7 @@ impl ToolbarState {
             esc_latched: false,
             prev_mouse_button_down: false,
             recent_tracker: crate::recent_tracker::TrackerState::default(),
+            toggle_history: Default::default(),
             recent_list,
             recent_store,
             clock,
@@ -504,65 +507,11 @@ impl ToolbarState {
                 // folder_button is in folder-index space; buttons[0] is the + button.
                 let btn_slot = folder_button + 1;
                 if btn_slot < self.buttons.len() {
-                    let path = std::path::PathBuf::from(&self.buttons[btn_slot].folder.path);
-                    // Mark as toolbar-initiated so the dwell tracker skips counting
-                    // our own navigation as a user-discovered folder.
-                    self.execute_tracker_event(
-                        hwnd,
-                        crate::recent_tracker::TrackerEvent::SelfInitiated,
-                    );
-                    // Reachability gate: skip navigation entirely if the
-                    // folder's network root is currently Unreachable.
-                    let path_str = path.to_string_lossy();
-                    if let Some(root) = crate::reachability::classify_root(&path_str) {
-                        let r = self
-                            .reachability
-                            .read()
-                            .map(|c| c.get(&root))
-                            .unwrap_or(crate::reachability::Reachability::Unknown);
-                        if r == crate::reachability::Reachability::Unreachable {
-                            log::info!("click on unreachable folder: {path_str}");
-                            return;
-                        }
-                    }
-                    if ctrl {
-                        match self.active_target.map(|t| t.kind) {
-                            Some(crate::target::TargetKind::FileDialog) => {
-                                self.shell_browser.open_in_new_window(&path);
-                            }
-                            Some(crate::target::TargetKind::Explorer) => {
-                                let timeout = self
-                                    .config
-                                    .as_ref()
-                                    .map(|c| c.new_tab_timeout_ms_zero_disables)
-                                    .unwrap_or(500);
-                                if let Some(explorer) = self.active_target.map(|t| t.hwnd) {
-                                    self.shell_browser.open_in_new_tab(explorer, &path, timeout);
-                                }
-                            }
-                            None => {
-                                log::debug!("FireFolderClick(ctrl): no active target");
-                            }
-                        }
+                    if self.buttons[btn_slot].folder.kind == crate::config::FolderKind::Recent {
+                        self.on_recent_button_click(hwnd, ctrl);
                     } else {
-                        match self.active_target.map(|t| t.kind) {
-                            Some(crate::target::TargetKind::FileDialog) => {
-                                if let Some(target) = self.active_target
-                                    && let Err(e) = self.dialog_nav.navigate(target.hwnd, &path)
-                                {
-                                    log::warn!("dialog navigate failed: {e:?}");
-                                }
-                            }
-                            Some(crate::target::TargetKind::Explorer) => {
-                                crate::warn_on_err!(
-                                    self.shell_browser
-                                        .navigate(self.active_target.unwrap().hwnd, &path)
-                                );
-                            }
-                            None => {
-                                log::debug!("FireFolderClick: no active target");
-                            }
-                        }
+                        let path = std::path::PathBuf::from(&self.buttons[btn_slot].folder.path);
+                        self.navigate_folder(hwnd, &path, ctrl);
                     }
                 }
             }
@@ -723,6 +672,14 @@ impl ToolbarState {
         if !cfg.recent.enabled {
             return;
         }
+        // Instant toggle history sees every navigation, even ones the dwell
+        // tracker will skip (self-initiated, excluded, pinned).
+        if let crate::recent_tracker::TrackerEvent::NavigationTo(ref p) = event {
+            self.toggle_history.record(p);
+        }
+        let Some(cfg) = self.config.as_ref() else {
+            return;
+        };
         let ctx = crate::recent_tracker::TrackerContext {
             dwell_threshold_seconds: cfg.recent.dwell_seconds_to_track,
             excluded_paths: &cfg.recent.excluded_paths,
@@ -826,13 +783,77 @@ use crate::rename::{self, RenameAction, RenameEvent};
 // ── Submenu adapter (Task 10a) ────────────────────────────────────────────────
 
 impl ToolbarState {
+    /// Navigate the active target to `path` the way a folder-button click does:
+    /// marks it self-initiated for the dwell tracker, refuses Unreachable network
+    /// roots, and handles ctrl (new tab / new window) and file dialogs.
+    pub(crate) fn navigate_folder(&mut self, toolbar: HWND, path: &std::path::Path, ctrl: bool) {
+        // Mark as toolbar-initiated so the dwell tracker skips counting
+        // our own navigation as a user-discovered folder.
+        self.execute_tracker_event(toolbar, crate::recent_tracker::TrackerEvent::SelfInitiated);
+        // Reachability gate: skip navigation entirely if the
+        // folder's network root is currently Unreachable.
+        let path_str = path.to_string_lossy();
+        if let Some(root) = crate::reachability::classify_root(&path_str) {
+            let r = self
+                .reachability
+                .read()
+                .map(|c| c.get(&root))
+                .unwrap_or(crate::reachability::Reachability::Unknown);
+            if r == crate::reachability::Reachability::Unreachable {
+                log::info!("click on unreachable folder: {path_str}");
+                return;
+            }
+        }
+        self.record_toggle_history(path);
+        if ctrl {
+            match self.active_target.map(|t| t.kind) {
+                Some(crate::target::TargetKind::FileDialog) => {
+                    self.shell_browser.open_in_new_window(path);
+                }
+                Some(crate::target::TargetKind::Explorer) => {
+                    let timeout = self
+                        .config
+                        .as_ref()
+                        .map(|c| c.new_tab_timeout_ms_zero_disables)
+                        .unwrap_or(500);
+                    if let Some(explorer) = self.active_target.map(|t| t.hwnd) {
+                        self.shell_browser.open_in_new_tab(explorer, path, timeout);
+                    }
+                }
+                None => {
+                    log::debug!("navigate_folder(ctrl): no active target");
+                }
+            }
+        } else {
+            match self.active_target.map(|t| t.kind) {
+                Some(crate::target::TargetKind::FileDialog) => {
+                    if let Some(target) = self.active_target
+                        && let Err(e) = self.dialog_nav.navigate(target.hwnd, path)
+                    {
+                        log::warn!("dialog navigate failed: {e:?}");
+                    }
+                }
+                Some(crate::target::TargetKind::Explorer) => {
+                    crate::warn_on_err!(
+                        self.shell_browser
+                            .navigate(self.active_target.unwrap().hwnd, path)
+                    );
+                }
+                None => {
+                    log::debug!("navigate_folder: no active target");
+                }
+            }
+        }
+    }
+
     /// Navigate the active target to `path`, or open a new window (FileDialog mode)
     /// or new tab (Explorer mode with ctrl held).
     ///
     /// Used by the submenu click handler in `wndproc` to dispatch `WM_USER_SUBMENU_CLICK`.
-    pub(crate) fn navigate_or_new_window_or_tab(&self, path: &str, ctrl: bool) {
+    pub(crate) fn navigate_or_new_window_or_tab(&mut self, path: &str, ctrl: bool) {
         use crate::target::TargetKind;
         let path = std::path::Path::new(path);
+        self.record_toggle_history(path);
         match (self.active_target.map(|t| t.kind), ctrl) {
             (Some(TargetKind::FileDialog), true) => {
                 // Dialogs have no tabs; ctrl degrades to a new Explorer window.
@@ -1008,6 +1029,35 @@ mod tests {
 
         // navigate should NOT have been called.
         assert_eq!(deps.navigate_calls.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn recent_button_click_routes_to_toggle_not_pseudo_entry_path() {
+        let deps = mk_deps();
+        let cfg = Config::from_str(
+            r#"{"folders":[{"name":"Recent","kind":"Recent"}],"recent":{"enabled":true}}"#,
+        )
+        .unwrap();
+        let mut state = make_test_state(&deps, Some(cfg));
+        state.active_target = Some(ActiveTarget::file_dialog(HWND(99 as *mut _)));
+        let mut recent = mk_folder_button("Recent", "", 42);
+        recent.folder.kind = crate::config::FolderKind::Recent;
+        state.buttons = vec![mk_add_button(), recent];
+        state
+            .toggle_history
+            .record(std::path::Path::new("C:\\Hist"));
+
+        state.execute_pointer_command(
+            HWND(std::ptr::dangling_mut()),
+            pointer::PointerCommand::FireFolderClick {
+                folder_button: 0,
+                ctrl: false,
+            },
+        );
+
+        let dlg_calls = deps.dialog_nav.calls.borrow();
+        assert_eq!(dlg_calls.len(), 1);
+        assert_eq!(dlg_calls[0].1, PathBuf::from("C:\\Hist"));
     }
 
     #[test]

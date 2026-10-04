@@ -121,6 +121,7 @@ pub mod submenu_adapter;
 pub mod submenu_wnd;
 pub mod target;
 pub mod theme;
+pub mod toggle_history;
 pub mod toolbar;
 pub mod visibility;
 pub mod wndproc;
