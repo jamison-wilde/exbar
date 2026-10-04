@@ -2,7 +2,7 @@
 
 All notable changes to Exbar are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.4.0] - 2026-10-03
 
 ### Added
 
@@ -12,8 +12,9 @@ All notable changes to Exbar are documented here. Format based on [Keep a Change
 
 ### Changed
 
-- **Folders open on contact by default.** Popups no longer cover the toolbar, so the old guard delay is unnecessary: `longHoverOpenMs` now defaults to `0` (open on contact; was a 400 ms rest). Set it above `0` to restore a rest-based delay (the pointer must rest that long; movement re-arms it). Menu-bar switching is unchanged: once a submenu is open, sliding to another folder switches instantly.
-- **Submenus open beside the toolbar, never over it (horizontal toolbars; vertical toolbars still overlap).** The first popup level opens on whichever side of the toolbar has room (below preferred), flush against it and capped to that side, so the bar stays visible whether it sits mid-window or in a bottom status bar. The in-place name row that covered neighbouring buttons is now a 📂 header at the toolbar-facing end of the popup.
+- **Folders open on contact by default.** Popups no longer cover the toolbar, so the old guard delay is unnecessary: `longHoverOpenMs` now defaults to `0` (open on contact; was 1200 ms from first contact). Set it above `0` to restore a rest-based delay (the pointer must rest that long; movement re-arms it). Menu-bar switching is unchanged: once a submenu is open, sliding to another folder switches instantly.
+- **Submenus open beside the toolbar, never over it (horizontal toolbars; vertical toolbars still overlap).** The first popup level opens on whichever side of the toolbar has room (below preferred), flush against it and capped to that side, so the bar stays visible whether it sits mid-window or in a bottom status bar. The in-place name row that covered neighbouring buttons is now a 📂 header at the toolbar-facing end of the popup, pinned while the list scrolls.
+- **Long submenus scroll with arrow rows.** When a folder has more subfolders than fit, ▲ / ▼ rows bracket the list — dimmed at either end, hover an active one to scroll (the mouse wheel works too). The old scroll zones lived in the popup's margin, which vanished once popups sat flush against the toolbar.
 
 ### Fixed
 
@@ -101,6 +102,7 @@ First public release.
 - Configurable `repositionDelayMs` to tune the animation-aware reposition debounce (default 250 ms).
 - GitHub Actions CI: lint, test, doc-check, and MSI build on every push; automatic release creation on tag push.
 
+[1.4.0]: https://github.com/jamison-wilde/exbar/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/jamison-wilde/exbar/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/jamison-wilde/exbar/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/jamison-wilde/exbar/compare/v1.1.0...v1.2.0
