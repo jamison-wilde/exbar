@@ -54,6 +54,27 @@ impl crate::toolbar::ToolbarState {
         }
     }
 
+    /// Remember the folder exbar just navigated the active file dialog to.
+    pub(crate) fn note_dialog_nav(&mut self, path: &Path) {
+        if let Some(t) = self.active_target
+            && t.kind == crate::target::TargetKind::FileDialog
+        {
+            self.dialog_last_nav = Some((t.hwnd.0 as isize, path.to_path_buf()));
+        }
+    }
+
+    /// Last folder exbar sent the *active* dialog to, if it is the same dialog.
+    fn dialog_current(&self) -> Option<PathBuf> {
+        let t = self.active_target?;
+        if t.kind != crate::target::TargetKind::FileDialog {
+            return None;
+        }
+        match &self.dialog_last_nav {
+            Some((h, p)) if *h == t.hwnd.0 as isize => Some(p.clone()),
+            _ => None,
+        }
+    }
+
     /// Handle a click on the Recent button: reads the active Explorer tab's
     /// folder (COM) and delegates to [`Self::toggle_click_with_current`].
     pub(crate) fn on_recent_button_click(&mut self, toolbar: HWND, ctrl: bool) {
@@ -75,6 +96,15 @@ impl crate::toolbar::ToolbarState {
         if !self.config.as_ref().is_some_and(|c| c.recent.enabled) {
             return;
         }
+        // A dialog's folder can't be read; use where exbar last sent it.
+        let current = if self
+            .active_target
+            .is_some_and(|t| t.kind == crate::target::TargetKind::FileDialog)
+        {
+            self.dialog_current()
+        } else {
+            current
+        };
         let Some(path) = self.toggle_history.target(current.as_deref()) else {
             log::debug!("recent toggle: no distinct folder to go to");
             return;
@@ -274,5 +304,55 @@ mod tests {
         st.active_target = Some(ActiveTarget::explorer(HWND(7 as *mut _)));
         st.navigate_folder(hwnd(), Path::new("C:\\Z"), false);
         assert_eq!(st.toggle_history.target(None), Some(PathBuf::from("C:\\Z")));
+    }
+
+    #[test]
+    fn dialog_toggle_ping_pongs() {
+        let deps = mk_deps();
+        let mut st = make_test_state(&deps, Some(recents_cfg(true)));
+        st.active_target = Some(ActiveTarget::file_dialog(HWND(99 as *mut _)));
+        st.toggle_history = hist(&["C:\\A", "C:\\B"]);
+
+        for _ in 0..3 {
+            st.toggle_click_with_current(hwnd(), None, false);
+        }
+
+        let calls = deps.dialog_nav.calls.borrow();
+        let paths: Vec<_> = calls.iter().map(|c| c.1.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("C:\\B"),
+                PathBuf::from("C:\\A"),
+                PathBuf::from("C:\\B")
+            ]
+        );
+    }
+
+    #[test]
+    fn dialog_last_nav_is_not_reused_for_another_dialog() {
+        let deps = mk_deps();
+        let mut st = make_test_state(&deps, Some(recents_cfg(true)));
+        st.active_target = Some(ActiveTarget::file_dialog(HWND(99 as *mut _)));
+        st.toggle_history = hist(&["C:\\A", "C:\\B"]);
+        st.toggle_click_with_current(hwnd(), None, false); // dialog 99 -> B
+        st.active_target = Some(ActiveTarget::file_dialog(HWND(100 as *mut _)));
+
+        // Dialog 100's folder is unknown, so it gets the newest (B), not A.
+        st.toggle_click_with_current(hwnd(), None, false);
+
+        let calls = deps.dialog_nav.calls.borrow();
+        assert_eq!(
+            (calls[1].0, calls[1].1.clone()),
+            (100, PathBuf::from("C:\\B"))
+        );
+    }
+
+    #[test]
+    fn navigate_folder_without_target_records_nothing() {
+        let deps = mk_deps();
+        let mut st = make_test_state(&deps, Some(recents_cfg(true)));
+        st.navigate_folder(hwnd(), Path::new("C:\\Z"), false);
+        assert_eq!(st.toggle_history, ToggleHistory::default());
     }
 }

@@ -201,6 +201,9 @@ pub(crate) struct ToolbarState {
     pub(crate) recent_tracker: crate::recent_tracker::TrackerState,
     /// Instant last-two-folders history for the Recent button toggle.
     pub(crate) toggle_history: crate::toggle_history::ToggleHistory,
+    /// Folder exbar last navigated a file dialog to (dialog HWND, path); lets
+    /// the toggle know where an unreadable dialog currently is.
+    pub(crate) dialog_last_nav: Option<(isize, std::path::PathBuf)>,
     pub(crate) recent_list: Vec<crate::recent_list::RecentEntry>,
     pub(crate) recent_store: Box<dyn crate::recent_store::RecentStore>,
     pub(crate) clock: Box<dyn crate::clock::Clock>,
@@ -317,6 +320,7 @@ impl ToolbarState {
             prev_mouse_button_down: false,
             recent_tracker: crate::recent_tracker::TrackerState::default(),
             toggle_history: Default::default(),
+            dialog_last_nav: None,
             recent_list,
             recent_store,
             clock,
@@ -666,20 +670,17 @@ impl ToolbarState {
         toolbar: HWND,
         event: crate::recent_tracker::TrackerEvent,
     ) {
+        // Instant toggle history sees every navigation, even ones the dwell
+        // tracker will skip (self-initiated, excluded, pinned).
+        if let crate::recent_tracker::TrackerEvent::NavigationTo(ref p) = event {
+            self.record_toggle_history(p);
+        }
         let Some(cfg) = self.config.as_ref() else {
             return;
         };
         if !cfg.recent.enabled {
             return;
         }
-        // Instant toggle history sees every navigation, even ones the dwell
-        // tracker will skip (self-initiated, excluded, pinned).
-        if let crate::recent_tracker::TrackerEvent::NavigationTo(ref p) = event {
-            self.toggle_history.record(p);
-        }
-        let Some(cfg) = self.config.as_ref() else {
-            return;
-        };
         let ctx = crate::recent_tracker::TrackerContext {
             dwell_threshold_seconds: cfg.recent.dwell_seconds_to_track,
             excluded_paths: &cfg.recent.excluded_paths,
@@ -804,7 +805,10 @@ impl ToolbarState {
                 return;
             }
         }
-        self.record_toggle_history(path);
+        // Only a real navigation counts; with no target nothing moves.
+        if self.active_target.is_some() {
+            self.record_toggle_history(path);
+        }
         if ctrl {
             match self.active_target.map(|t| t.kind) {
                 Some(crate::target::TargetKind::FileDialog) => {
@@ -832,6 +836,7 @@ impl ToolbarState {
                     {
                         log::warn!("dialog navigate failed: {e:?}");
                     }
+                    self.note_dialog_nav(path);
                 }
                 Some(crate::target::TargetKind::Explorer) => {
                     crate::warn_on_err!(
@@ -867,6 +872,7 @@ impl ToolbarState {
                 {
                     log::warn!("dialog navigate failed: {e:?}");
                 }
+                self.note_dialog_nav(path);
             }
             (Some(TargetKind::Explorer), true) => {
                 let active_hwnd = self.active_target.map(|t| t.hwnd).unwrap_or_default();
