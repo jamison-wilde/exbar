@@ -6,6 +6,7 @@ All notable changes to Exbar are documented here. Format based on [Keep a Change
 
 ### Added
 
+- **Click 🕘 to flip between your last two folders** (`cd -` style). The Recent button now navigates to the previous folder; clicking again returns, and Ctrl+click opens it in a new tab (new window in a file dialog). It uses its own instant, global, in-memory two-folder history that includes toolbar, pinned and file-dialog navigations; nothing is persisted. Requires Recent Folders to be enabled.
 - **Recent Folders learn from Save As / Open dialogs.** Completing a Save or Open in a file dialog exbar is attached to adds that folder to Recents immediately; Cancel adds nothing. Dialogs expose no `IShellBrowser`, so the signal is the shell's own `ComDlg32\LastVisitedPidlMRU`, which Windows writes only on OK. A watcher thread waits on the key, coalesces each Save's write burst, and commits only entries whose app matches the dialog exbar is attached to (by exe name), so exbar's own `+` picker is ignored. Respects `recent.enabled` and `recent.excludedPaths`.
 - **Remove a single Recent folder.** Right-click an entry in the 🕘 Recent popup → **Remove from Recents**. The list refreshes in place; removing the last entry shows the empty placeholder.
 
