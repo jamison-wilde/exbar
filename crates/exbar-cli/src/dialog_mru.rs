@@ -35,13 +35,14 @@ pub fn newest_index(mrulistex: &[u8]) -> Option<u32> {
 /// can hand it to the shell without risking a read past the end. A
 /// terminator-only PIDL is valid: it names the Desktop.
 pub fn parse_entry(blob: &[u8]) -> Option<(String, &[u8])> {
-    let nul = blob.chunks_exact(2).position(|unit| unit == [0, 0])?;
+    let (units, _) = blob.as_chunks::<2>();
+    let nul = units.iter().position(|unit| *unit == [0, 0])?;
     if nul == 0 {
         return None;
     }
-    let name: Vec<u16> = blob[..nul * 2]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+    let name: Vec<u16> = units[..nul]
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     let app = String::from_utf16(&name).ok()?;
     let pidl = &blob[(nul + 1) * 2..];
